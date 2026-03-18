@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: Build Android AAB (RuStore)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+          cache: true
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/keystore.jks
+      - name: Create key.properties
+        run: |
+          cat > android/key.properties << EOF
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=keystore.jks
+          EOF
+      - run: flutter pub get
+      - name: Build AAB
+        run: flutter build appbundle --release
+      - name: Build APK
+        run: flutter build apk --release
+      - name: Rename
+        run: |
+          V="${{ github.ref_name }}"
+          cp build/app/outputs/bundle/release/app-release.aab   mesh_chat_${V}_rustore.aab
+          cp build/app/outputs/flutter-apk/app-release.apk      mesh_chat_${V}_android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: mesh_chat_*
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+          cache: true
+      - run: flutter pub get
+      - name: Build
+        run: |
+          flutter build windows --release `
+            --dart-define=GITHUB_PAT=${{ secrets.UPDATE_PAT }} `
+            --dart-define=GITHUB_OWNER=${{ github.repository_owner }} `
+            --dart-define=GITHUB_REPO=${{ github.event.repository.name }}
+      - name: ZIP
+        shell: pwsh
+        run: Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "mesh_chat_${{ github.ref_name }}_windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: mesh_chat_*.zip
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+          cache: true
+      - run: flutter pub get
+      - name: Build
+        run: |
+          flutter build macos --release \
+            --dart-define=GITHUB_PAT=${{ secrets.UPDATE_PAT }} \
+            --dart-define=GITHUB_OWNER=${{ github.repository_owner }} \
+            --dart-define=GITHUB_REPO=${{ github.event.repository.name }}
+      - name: ZIP
+        run: |
+          cd build/macos/Build/Products/Release
+          zip -r "$GITHUB_WORKSPACE/mesh_chat_${{ github.ref_name }}_macos.zip" MeshChat.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: mesh_chat_*.zip
+
+  create-release:
+    name: Create Release
+    needs: [build-android, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: "MeshChat ${{ github.ref_name }}"
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: artifacts/*
+          token: ${{ secrets.GITHUB_TOKEN }}
