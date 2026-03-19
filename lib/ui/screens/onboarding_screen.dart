@@ -1,0 +1,229 @@
+import 'package:flutter/material.dart';
+
+import '../../models/user_profile.dart';
+import '../../services/crypto_service.dart';
+import '../../services/profile_service.dart';
+import '../widgets/avatar_widget.dart';
+import 'chat_list_screen.dart';
+
+class OnboardingScreen extends StatefulWidget {
+  const OnboardingScreen({super.key});
+
+  @override
+  State<OnboardingScreen> createState() => _OnboardingScreenState();
+}
+
+class _OnboardingScreenState extends State<OnboardingScreen> {
+  final _controller = TextEditingController();
+  int _selectedColor = UserProfile.avatarColors[0];
+  String _selectedEmoji = UserProfile.avatarEmojis[0];
+  bool _loading = false;
+  bool _showEmojiPicker = false;
+
+  String get _initials {
+    final text = _controller.text.trim();
+    if (text.isEmpty) return '?';
+    final parts = text.split(' ');
+    if (parts.length >= 2) return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+    return text[0].toUpperCase();
+  }
+
+  Future<void> _create() async {
+    final nick = _controller.text.trim();
+    if (nick.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Имя должно быть не короче 2 символов')),
+      );
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      // Создаём профиль через ProfileService
+      await ProfileService.instance.createProfile(
+        publicKeyHex: CryptoService.instance.publicKeyHex,
+        nickname: nick,
+      );
+      // Обновляем эмодзи и цвет
+      await ProfileService.instance.updateProfile(
+        nickname: nick,
+        avatarColor: _selectedColor,
+        avatarEmoji: _selectedEmoji,
+      );
+      if (mounted) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const ChatListScreen()),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              const SizedBox(height: 40),
+
+              // Логотип
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1DB954),
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child:
+                    const Icon(Icons.bluetooth, color: Colors.white, size: 40),
+              ),
+              const SizedBox(height: 20),
+              const Text('Rlink',
+                  style: TextStyle(fontSize: 30, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 6),
+              Text(
+                'Мессенджер без интернета через Bluetooth',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, color: Colors.grey.shade400),
+              ),
+              const SizedBox(height: 36),
+
+              // Аватар — тап для смены эмодзи
+              GestureDetector(
+                onTap: () =>
+                    setState(() => _showEmojiPicker = !_showEmojiPicker),
+                child: Stack(
+                  children: [
+                    AnimatedBuilder(
+                      animation: _controller,
+                      builder: (_, __) => AvatarWidget(
+                        initials: _initials,
+                        color: _selectedColor,
+                        emoji: _selectedEmoji,
+                        size: 84,
+                      ),
+                    ),
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        width: 26,
+                        height: 26,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1DB954),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: const Color(0xFF0A0A0A), width: 2),
+                        ),
+                        child: const Icon(Icons.edit,
+                            size: 14, color: Colors.white),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Нажми на аватар чтобы выбрать эмодзи',
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+
+              // Выбор эмодзи (раскрывается)
+              AnimatedCrossFade(
+                firstChild: const SizedBox.shrink(),
+                secondChild: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A1A1A),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: EmojiPicker(
+                    selected: _selectedEmoji,
+                    onSelected: (e) => setState(() {
+                      _selectedEmoji = e;
+                      _showEmojiPicker = false;
+                    }),
+                  ),
+                ),
+                crossFadeState: _showEmojiPicker
+                    ? CrossFadeState.showSecond
+                    : CrossFadeState.showFirst,
+                duration: const Duration(milliseconds: 250),
+              ),
+
+              if (!_showEmojiPicker) ...[
+                // Цвет фона
+                const SizedBox(height: 16),
+                AvatarColorPicker(
+                  selected: _selectedColor,
+                  onSelected: (c) => setState(() => _selectedColor = c),
+                ),
+                const SizedBox(height: 24),
+
+                // Поле имени
+                TextField(
+                  controller: _controller,
+                  autofocus: true,
+                  textCapitalization: TextCapitalization.words,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      fontSize: 20, fontWeight: FontWeight.w500),
+                  decoration: InputDecoration(
+                    hintText: 'Твоё имя',
+                    hintStyle: TextStyle(color: Colors.grey.shade600),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                    filled: true,
+                    fillColor: const Color(0xFF1A1A1A),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 16),
+                  ),
+                  onSubmitted: (_) => _create(),
+                  onChanged: (_) => setState(() {}),
+                ),
+                const SizedBox(height: 16),
+
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: FilledButton(
+                    onPressed: _loading ? null : _create,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF1DB954),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                    ),
+                    child: _loading
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white))
+                        : const Text('Начать',
+                            style: TextStyle(
+                                fontSize: 17, fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ],
+
+              const SizedBox(height: 32),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

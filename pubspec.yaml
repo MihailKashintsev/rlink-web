@@ -1,5 +1,5 @@
 name: mesh_chat
-description: Bluetooth mesh messenger
+description: Rlink — Bluetooth mesh messenger
 version: 1.0.0+1
 
 environment:
@@ -9,30 +9,49 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
+  # BLE
   flutter_blue_plus: ^1.32.12
+
+  # Nearby (WiFi Direct fallback)
   nearby_connections: ^4.3.0
+
+  # Cryptography
   cryptography: ^2.7.0
-  drift: ^2.18.0
-  sqlite3_flutter_libs: ^0.5.24
+
+  # Database
+  sqflite: ^2.3.3+1
   path_provider: ^2.1.3
   path: ^1.9.0
+
+  # Secure storage
   flutter_secure_storage: ^9.2.2
+
+  # State
   flutter_riverpod: ^2.5.1
-  riverpod_annotation: ^2.3.5
+
+  # Networking (updates)
   dio: ^5.4.3+1
+
+  # App info
   package_info_plus: ^8.0.2
+
+  # Open APK installer
   open_filex: ^4.4.0
+
+  # Permissions
   permission_handler: ^11.3.1
+
+  # UUID
   uuid: ^4.4.0
+
+  # Fonts
   google_fonts: ^6.2.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
-  drift_dev: ^2.18.0
-  build_runner: ^2.4.11
-  riverpod_generator: ^2.4.3
 
 flutter:
   uses-material-design: true

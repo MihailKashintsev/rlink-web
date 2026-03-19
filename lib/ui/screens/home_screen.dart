@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,7 +8,6 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../../main.dart';
 import '../../services/ble_service.dart';
 import '../../services/crypto_service.dart';
-import '../../services/crypto_service.dart' show EncryptedMessage;
 import '../../services/gossip_router.dart';
 import '../../services/update_service.dart';
 
@@ -19,21 +19,19 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final _messages   = <ChatMessage>[];
+  final _messages = <ChatMessage>[];
   final _controller = TextEditingController();
-  final _scrollKey  = GlobalKey<AnimatedListState>();
-  final _listKey    = GlobalKey();
+  final _scrollController = ScrollController();
 
   StreamSubscription<IncomingMessage>? _msgSub;
-  String? _targetPeerId; // ID собеседника (null = broadcast)
+  String? _targetPeerId;
   bool _isSending = false;
+  bool _isScanning = false;
 
   @override
   void initState() {
     super.initState();
     _msgSub = incomingMessageController.stream.listen(_onIncoming);
-
-    // Слушаем обновления
     pendingUpdateNotifier.addListener(_onUpdateAvailable);
   }
 
@@ -41,11 +39,10 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _msgSub?.cancel();
     _controller.dispose();
+    _scrollController.dispose();
     pendingUpdateNotifier.removeListener(_onUpdateAvailable);
     super.dispose();
   }
-
-  // ─── Входящее сообщение ─────────────────────────────────
 
   void _onIncoming(IncomingMessage msg) {
     setState(() {
@@ -59,13 +56,13 @@ class _HomeScreenState extends State<HomeScreen> {
     _scrollToBottom();
   }
 
-  // ─── Отправка ───────────────────────────────────────────
-
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
     if (_targetPeerId == null) {
-      _showNoPeerSnack();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Выбери пира из списка')),
+      );
       return;
     }
 
@@ -73,14 +70,10 @@ class _HomeScreenState extends State<HomeScreen> {
     _controller.clear();
 
     try {
-      final encrypted = await CryptoService.instance.encryptMessage(
-        plaintext: text,
-        recipientPublicKeyHex: _targetPeerId!,
-      );
-
-      await GossipRouter.instance.sendMessage(
-        encrypted: encrypted,
+      await GossipRouter.instance.sendRawMessage(
+        text: text,
         recipientId: _targetPeerId!,
+        senderId: CryptoService.instance.publicKeyHex,
       );
 
       setState(() {
@@ -103,21 +96,42 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ─── Обновление ─────────────────────────────────────────
+  Future<void> _rescan() async {
+    setState(() => _isScanning = true);
+    try {
+      await FlutterBluePlus.stopScan();
+      await FlutterBluePlus.startScan(
+        withServices: [Guid('12345678-1234-5678-1234-56789abcdef0')],
+        continuousUpdates: true,
+        removeIfGone: const Duration(seconds: 30),
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Поиск устройств...'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[Scan] Error: $e');
+    } finally {
+      await Future.delayed(const Duration(seconds: 3));
+      if (mounted) setState(() => _isScanning = false);
+    }
+  }
 
   void _onUpdateAvailable() {
     final update = pendingUpdateNotifier.value;
     if (update == null || !mounted) return;
-
     ScaffoldMessenger.of(context).showMaterialBanner(
       MaterialBanner(
         content: Text('Доступно обновление ${update.version}'),
         leading: const Icon(Icons.system_update, color: Colors.green),
         actions: [
           TextButton(
-            onPressed: () {
-              ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
-            },
+            onPressed: () =>
+                ScaffoldMessenger.of(context).hideCurrentMaterialBanner(),
             child: const Text('Позже'),
           ),
           FilledButton(
@@ -140,14 +154,39 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ─── UI ─────────────────────────────────────────────────
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('MeshChat'),
+        title: const Text('Rlink'),
         actions: [
+          // Кнопка поиска
+          _isScanning
+              ? const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12),
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
+              : IconButton(
+                  icon: const Icon(Icons.search),
+                  tooltip: 'Найти устройства',
+                  onPressed: _rescan,
+                ),
           _PeerIndicator(),
           IconButton(
             icon: const Icon(Icons.key),
@@ -158,23 +197,21 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: Column(
         children: [
-          // Peer selector
           _PeerSelector(
             selected: _targetPeerId,
             onSelected: (id) => setState(() => _targetPeerId = id),
           ),
           const Divider(height: 1),
-          // Messages
           Expanded(
             child: _messages.isEmpty
-                ? _EmptyState()
+                ? const _EmptyState()
                 : ListView.builder(
+                    controller: _scrollController,
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     itemCount: _messages.length,
                     itemBuilder: (_, i) => _MessageBubble(msg: _messages[i]),
                   ),
           ),
-          // Input
           _MessageInput(
             controller: _controller,
             isSending: _isSending,
@@ -182,18 +219,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-    );
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      // scroll logic
-    });
-  }
-
-  void _showNoPeerSnack() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Выбери собеседника из списка пиров')),
     );
   }
 
@@ -218,14 +243,17 @@ class _HomeScreenState extends State<HomeScreen> {
             },
             child: const Text('Копировать'),
           ),
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Закрыть')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Закрыть'),
+          ),
         ],
       ),
     );
   }
 }
 
-// ─── Вспомогательные виджеты ────────────────────────────────
+// ── Индикатор пиров ──────────────────────────────────────────────
 
 class _PeerIndicator extends StatefulWidget {
   @override
@@ -234,14 +262,13 @@ class _PeerIndicator extends StatefulWidget {
 
 class _PeerIndicatorState extends State<_PeerIndicator> {
   StreamSubscription<BluetoothAdapterState>? _sub;
-  int _peers = 0;
   bool _bleOn = false;
 
   @override
   void initState() {
     super.initState();
     _sub = BleService.instance.adapterState.listen((s) {
-      setState(() => _bleOn = s == BluetoothAdapterState.on);
+      if (mounted) setState(() => _bleOn = s == BluetoothAdapterState.on);
     });
   }
 
@@ -253,18 +280,40 @@ class _PeerIndicatorState extends State<_PeerIndicator> {
 
   @override
   Widget build(BuildContext context) {
-    final color = _bleOn ? Colors.green : Colors.red;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Row(children: [
-        Icon(Icons.bluetooth, size: 16, color: color),
-        const SizedBox(width: 4),
-        Text('${BleService.instance.connectedPeersCount}',
-            style: TextStyle(color: color, fontWeight: FontWeight.bold)),
-      ]),
+    if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 8),
+        child: Row(children: [
+          Icon(Icons.bluetooth_disabled, size: 16, color: Colors.grey),
+          SizedBox(width: 4),
+          Text('—', style: TextStyle(color: Colors.grey)),
+        ]),
+      );
+    }
+
+    return ValueListenableBuilder<int>(
+      valueListenable: BleService.instance.peersCount,
+      builder: (_, count, __) {
+        final color = !_bleOn
+            ? Colors.red
+            : count > 0
+                ? Colors.green
+                : Colors.orange;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(children: [
+            Icon(Icons.bluetooth, size: 16, color: color),
+            const SizedBox(width: 4),
+            Text('$count',
+                style: TextStyle(color: color, fontWeight: FontWeight.bold)),
+          ]),
+        );
+      },
     );
   }
 }
+
+// ── Выбор пира ───────────────────────────────────────────────────
 
 class _PeerSelector extends StatelessWidget {
   final String? selected;
@@ -273,26 +322,54 @@ class _PeerSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // В реальном приложении — список из BleService.connectedPeers
-    return Container(
-      height: 48,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      alignment: Alignment.centerLeft,
-      child: selected == null
-          ? Text('Пиры не найдены',
-              style: TextStyle(color: Colors.grey.shade500, fontSize: 13))
-          : Chip(
-              label: Text(
-                '${selected!.substring(0, 12)}...',
-                style: const TextStyle(fontSize: 12),
-              ),
-              avatar: const Icon(Icons.person, size: 16),
+    return ValueListenableBuilder<int>(
+      valueListenable: BleService.instance.peersCount,
+      builder: (_, count, __) {
+        if (count == 0) {
+          return Container(
+            height: 48,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Ищем устройства поблизости...',
+              style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
             ),
+          );
+        }
+
+        final peers = BleService.instance.connectedPeerIds;
+        return SizedBox(
+          height: 48,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            itemCount: peers.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 8),
+            itemBuilder: (_, i) {
+              final id = peers[i];
+              final isSelected = id == selected;
+              return FilterChip(
+                label: Text(
+                  id.length > 8 ? '${id.substring(0, 8)}...' : id,
+                  style: const TextStyle(fontSize: 12),
+                ),
+                selected: isSelected,
+                onSelected: (_) => onSelected(id),
+                avatar: const Icon(Icons.phone_android, size: 14),
+              );
+            },
+          ),
+        );
+      },
     );
   }
 }
 
+// ── Пустое состояние ─────────────────────────────────────────────
+
 class _EmptyState extends StatelessWidget {
+  const _EmptyState();
+
   @override
   Widget build(BuildContext context) {
     return const Center(
@@ -307,11 +384,17 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+// ── Ввод сообщения ───────────────────────────────────────────────
+
 class _MessageInput extends StatelessWidget {
   final TextEditingController controller;
   final bool isSending;
   final VoidCallback onSend;
-  const _MessageInput({required this.controller, required this.isSending, required this.onSend});
+  const _MessageInput({
+    required this.controller,
+    required this.isSending,
+    required this.onSend,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -325,7 +408,8 @@ class _MessageInput extends StatelessWidget {
               decoration: const InputDecoration(
                 hintText: 'Сообщение...',
                 border: OutlineInputBorder(),
-                contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                contentPadding:
+                    EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               ),
               textInputAction: TextInputAction.send,
               onSubmitted: (_) => onSend(),
@@ -335,7 +419,11 @@ class _MessageInput extends StatelessWidget {
           FilledButton(
             onPressed: isSending ? null : onSend,
             child: isSending
-                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
                 : const Icon(Icons.send),
           ),
         ]),
@@ -343,6 +431,8 @@ class _MessageInput extends StatelessWidget {
     );
   }
 }
+
+// ── Диалог обновления ────────────────────────────────────────────
 
 class _UpdateDialog extends StatefulWidget {
   final UpdateInfo update;
@@ -388,7 +478,7 @@ class _UpdateDialogState extends State<_UpdateDialog> {
   }
 }
 
-// ─── Модель сообщения ───────────────────────────────────────
+// ── Модель сообщения ─────────────────────────────────────────────
 
 class ChatMessage {
   final String text;
@@ -415,7 +505,9 @@ class _MessageBubble extends StatelessWidget {
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.75,
+        ),
         decoration: BoxDecoration(
           color: msg.isOutgoing ? cs.primary : cs.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(18).copyWith(
@@ -423,25 +515,37 @@ class _MessageBubble extends StatelessWidget {
             bottomLeft: msg.isOutgoing ? null : const Radius.circular(4),
           ),
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (!msg.isOutgoing)
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (!msg.isOutgoing)
+              Text(
+                msg.fromId.length > 8
+                    ? '${msg.fromId.substring(0, 8)}...'
+                    : msg.fromId,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: cs.primary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             Text(
-              '${msg.fromId.substring(0, 8)}...',
-              style: TextStyle(fontSize: 10, color: cs.primary, fontWeight: FontWeight.bold),
+              msg.text,
+              style: TextStyle(
+                color: msg.isOutgoing ? cs.onPrimary : cs.onSurface,
+              ),
             ),
-          Text(
-            msg.text,
-            style: TextStyle(color: msg.isOutgoing ? cs.onPrimary : cs.onSurface),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            _fmt(msg.timestamp),
-            style: TextStyle(
-              fontSize: 10,
-              color: (msg.isOutgoing ? cs.onPrimary : cs.onSurface).withOpacity(0.5),
+            const SizedBox(height: 2),
+            Text(
+              _fmt(msg.timestamp),
+              style: TextStyle(
+                fontSize: 10,
+                color: (msg.isOutgoing ? cs.onPrimary : cs.onSurface)
+                    .withOpacity(0.5),
+              ),
             ),
-          ),
-        ]),
+          ],
+        ),
       ),
     );
   }
