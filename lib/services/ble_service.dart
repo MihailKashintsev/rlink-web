@@ -83,11 +83,27 @@ class BleService {
 
   /// Проверяет подключён ли пир (по публичному ключу или BLE ID)
   bool isPeerConnected(String peerId) {
+    if (_connectedPeers.containsKey(DeviceIdentifier(peerId))) return true;
     if (_publicKeyToBleId.containsKey(peerId)) {
-      final bleId = _publicKeyToBleId[peerId]!;
-      return _connectedPeers.containsKey(DeviceIdentifier(bleId));
+      return _connectedPeers
+          .containsKey(DeviceIdentifier(_publicKeyToBleId[peerId]!));
     }
-    return _connectedPeers.containsKey(DeviceIdentifier(peerId));
+    for (final id in _connectedPeers.keys) {
+      if (_bleIdToPublicKey[id.str] == peerId) return true;
+    }
+    return false;
+  }
+
+  DeviceIdentifier? _resolveBleId(String peerId) {
+    final direct = DeviceIdentifier(peerId);
+    if (_connectedPeers.containsKey(direct)) return direct;
+    if (_publicKeyToBleId.containsKey(peerId)) {
+      return DeviceIdentifier(_publicKeyToBleId[peerId]!);
+    }
+    for (final id in _connectedPeers.keys) {
+      if (_bleIdToPublicKey[id.str] == peerId) return id;
+    }
+    return null;
   }
 
   Stream<BluetoothAdapterState> get adapterState =>
@@ -103,6 +119,12 @@ class BleService {
     _eventSub = _events.receiveBroadcastStream().listen(_onNativeEvent);
     // iOS push channel — native → Flutter via invokeMethod
     _dataChannel.setMethodCallHandler(_onDataChannelCall);
+    // Просим AppDelegate сбросить буферизованные события
+    Future.delayed(const Duration(milliseconds: 500), () async {
+      try {
+        await _method.invokeMethod('flushPendingEvents');
+      } catch (_) {}
+    });
     await _startAdvertising();
     _startScan();
     _scheduleScanRestart();
@@ -134,7 +156,7 @@ class BleService {
   Timer? _scanRestartTimer;
   void _scheduleScanRestart() {
     _scanRestartTimer?.cancel();
-    _scanRestartTimer = Timer(const Duration(seconds: 25), () {
+    _scanRestartTimer = Timer(const Duration(seconds: 90), () {
       if (_isRunning) {
         debugPrint('[BLE] Auto-restarting scan');
         _startScan();
@@ -328,12 +350,12 @@ class BleService {
     device.connectionState.listen((state) {
       if (state == BluetoothConnectionState.disconnected) {
         final bleId = device.remoteId.str;
-        // Убираем маппинг и pending при отключении
+        // Убираем pending при отключении
         final newPending = Set<String>.from(pendingProfiles.value)
           ..remove(bleId);
         pendingProfiles.value = newPending;
-        final publicKey = _bleIdToPublicKey.remove(bleId);
-        if (publicKey != null) _publicKeyToBleId.remove(publicKey);
+        // НЕ удаляем publicKey маппинг — чтобы chat знал что пир был известен
+        // Маппинг обновится при следующем обмене профилями
         _connectedPeers.remove(device.remoteId);
         _txChars.remove(device.remoteId);
         peersCount.value = _connectedPeers.length;

@@ -167,8 +167,11 @@ class _ChatScreenState extends State<ChatScreen> {
               builder: (_, __, ___) {
                 final online =
                     BleService.instance.isPeerConnected(widget.peerId);
+                final anyConnected = BleService.instance.peersCount.value > 0;
                 return Text(
-                  online ? 'в сети' : 'не в сети',
+                  online
+                      ? 'в сети'
+                      : (anyConnected ? 'нет соединения' : 'BLE выкл'),
                   style: TextStyle(
                     fontSize: 12,
                     color: online ? Colors.green : Colors.grey.shade500,
