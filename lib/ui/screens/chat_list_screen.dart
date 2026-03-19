@@ -10,6 +10,7 @@ import '../../services/profile_service.dart';
 import '../widgets/avatar_widget.dart';
 import 'chat_screen.dart';
 import 'profile_screen.dart';
+import 'contacts_screen.dart';
 import 'settings_screen.dart';
 
 class ChatListScreen extends StatefulWidget {
@@ -27,7 +28,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 2, vsync: this);
+    _tabs = TabController(length: 3, vsync: this);
     ChatStorageService.instance.loadContacts();
     _msgSub = incomingMessageController.stream.listen((_) {
       if (mounted) setState(() {});
@@ -100,12 +101,16 @@ class _ChatListScreenState extends State<ChatListScreen>
         ],
         bottom: TabBar(
           controller: _tabs,
-          tabs: const [Tab(text: 'Чаты'), Tab(text: 'Рядом')],
+          tabs: const [
+            Tab(text: 'Чаты'),
+            Tab(text: 'Контакты'),
+            Tab(text: 'Рядом')
+          ],
         ),
       ),
       body: TabBarView(
         controller: _tabs,
-        children: [_ChatsTab(), _NearbyTab()],
+        children: [_ChatsTab(), const ContactsScreen(), _NearbyTab()],
       ),
     );
   }
@@ -243,28 +248,76 @@ class _NearbyTab extends StatelessWidget {
     return ValueListenableBuilder<int>(
       valueListenable: BleService.instance.peersCount,
       builder: (_, count, __) {
-        final peers = BleService.instance.connectedPeerIds;
-        if (peers.isEmpty) {
-          return Center(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.bluetooth_searching,
-                  size: 72, color: Colors.grey.shade700),
-              const SizedBox(height: 16),
-              Text('Ищем устройства...',
-                  style: TextStyle(color: Colors.grey.shade400, fontSize: 16)),
-              const SizedBox(height: 8),
-              Text('Убедись что Bluetooth включён\nна обоих устройствах',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
-            ]),
-          );
-        }
-        return ListView.builder(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          itemCount: peers.length,
-          itemBuilder: (_, i) => _NearbyDeviceTile(publicKeyOrBleId: peers[i]),
+        return ValueListenableBuilder<Set<String>>(
+          valueListenable: BleService.instance.pendingProfiles,
+          builder: (_, pending, __) {
+            final peers = BleService.instance.connectedPeerIds;
+            if (peers.isEmpty && pending.isEmpty) {
+              return Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.bluetooth_searching,
+                      size: 72, color: Colors.grey.shade700),
+                  const SizedBox(height: 16),
+                  Text('Ищем устройства...',
+                      style:
+                          TextStyle(color: Colors.grey.shade400, fontSize: 16)),
+                  const SizedBox(height: 8),
+                  Text('Убедись что Bluetooth включён\nна обоих устройствах',
+                      textAlign: TextAlign.center,
+                      style:
+                          TextStyle(color: Colors.grey.shade600, fontSize: 13)),
+                ]),
+              );
+            }
+            return ListView(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              children: [
+                // Устройства которые загружают профиль
+                ...pending.map((bleId) => _PendingDeviceTile(bleId: bleId)),
+                // Устройства с полученным профилем
+                ...peers
+                    .where((id) => !pending.contains(id))
+                    .map((id) => _NearbyDeviceTile(publicKeyOrBleId: id)),
+              ],
+            );
+          },
         );
       },
+    );
+  }
+}
+
+class _PendingDeviceTile extends StatelessWidget {
+  final String bleId;
+  const _PendingDeviceTile({required this.bleId});
+
+  @override
+  Widget build(BuildContext context) {
+    final btName = BleService.instance.getDeviceName(bleId);
+    final displayName =
+        btName != bleId ? btName : '${bleId.substring(0, 8)}...';
+    return ListTile(
+      leading: Container(
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          color: Colors.grey.shade800,
+          shape: BoxShape.circle,
+        ),
+        child: const Center(
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: Color(0xFF1DB954)),
+          ),
+        ),
+      ),
+      title: Text(displayName,
+          style: const TextStyle(fontWeight: FontWeight.w500)),
+      subtitle: Text('Загрузка профиля...',
+          style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+      trailing: const SizedBox(width: 48),
     );
   }
 }

@@ -38,6 +38,7 @@ Future<void> initServices() async {
     await ChatStorageService.instance.init();
 
     GossipRouter.instance.init(
+      myKey: CryptoService.instance.publicKeyHex,
       onMessage: (fromId, encrypted) async {
         debugPrint(
             '[Main] onMessage fromId=${fromId.substring(0, 16)} ephemeral=${encrypted.ephemeralPublicKey.isEmpty ? "empty" : "set"}');
@@ -72,6 +73,8 @@ Future<void> initServices() async {
       onProfile: (bleId, publicKey, nick, color, emoji) async {
         // Регистрируем маппинг BLE ID → публичный ключ
         BleService.instance.registerPeerKey(bleId, publicKey);
+        // Профиль получен — убираем лоадер
+        BleService.instance.markProfileReceived(bleId);
 
         // Сохраняем контакт с его именем
         final existing =

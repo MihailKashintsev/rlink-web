@@ -4,7 +4,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart';
-import 'dart:io';
 
 import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
@@ -140,9 +139,13 @@ class SettingsScreen extends StatelessWidget {
     // 2. Сбрасываем БД через сервис (закрываем соединение, чистим кэш, удаляем файл)
     await ChatStorageService.instance.resetAll();
 
-    // 3. Удаляем профиль из secure storage
+    // 3. Удаляем профиль из secure storage (включая iOS Keychain)
     const storage = FlutterSecureStorage(
       aOptions: AndroidOptions(encryptedSharedPreferences: true),
+      iOptions: IOSOptions(
+        accessibility: KeychainAccessibility.first_unlock,
+        synchronizable: false,
+      ),
     );
     await storage.deleteAll();
 

@@ -76,6 +76,8 @@ typedef OnProfileReceived = void Function(
     String bleId, String publicKey, String nick, int color, String emoji);
 
 class GossipRouter {
+  // Публичный ключ этого устройства — устанавливается при инициализации
+  String? myPublicKey;
   GossipRouter._();
   static final GossipRouter instance = GossipRouter._();
 
@@ -88,10 +90,12 @@ class GossipRouter {
   OnProfileReceived? onProfileReceived;
 
   void init({
+    String? myKey,
     required OnMessageReceived onMessage,
     required OnForwardPacket onForward,
     OnProfileReceived? onProfile,
   }) {
+    myPublicKey = myKey;
     onMessageReceived = onMessage;
     onForwardPacket = onForward;
     onProfileReceived = onProfile;
@@ -162,6 +166,17 @@ class GossipRouter {
       if (packet.type == 'raw') {
         final text = packet.payload['text'] as String?;
         final from = packet.payload['from'] as String? ?? 'unknown';
+
+        // Фильтрация получателя: если recipientId задан — принимаем только если это мы
+        final rid = packet.recipientId;
+        if (rid != null &&
+            rid.isNotEmpty &&
+            myPublicKey != null &&
+            rid != myPublicKey) {
+          debugPrint('[Gossip] Message for $rid — not for us, skip');
+          return;
+        }
+
         debugPrint(
             '[Gossip] Raw message from=$from text=${text?.substring(0, text.length > 20 ? 20 : text.length)}');
         if (text != null) {

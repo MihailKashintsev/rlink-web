@@ -36,6 +36,8 @@ class BleService {
   bool _advertisingStarted = false;
 
   final ValueNotifier<int> peersCount = ValueNotifier(0);
+  // Устройства подключены но профиль ещё не получен — показываем лоадер
+  final ValueNotifier<Set<String>> pendingProfiles = ValueNotifier({});
 
   void Function(String peerId)? onPeerConnected;
 
@@ -43,6 +45,14 @@ class BleService {
 
   /// Возвращает публичный ключ пира по его BLE ID (или сам BLE ID если ключ неизвестен)
   String resolvePublicKey(String bleId) => _bleIdToPublicKey[bleId] ?? bleId;
+
+  // Вызывается когда профиль пира получен — убираем лоадер
+  void markProfileReceived(String bleId) {
+    if (pendingProfiles.value.contains(bleId)) {
+      final upd = Set<String>.from(pendingProfiles.value)..remove(bleId);
+      pendingProfiles.value = upd;
+    }
+  }
 
   /// Регистрирует маппинг BLE ID → публичный ключ
   void registerPeerKey(String bleId, String publicKey) {
@@ -292,9 +302,21 @@ class BleService {
       await Future.delayed(const Duration(milliseconds: 200));
       await _setupGattClient(device);
       peersCount.value = _connectedPeers.length;
+      // Помечаем как ожидающий профиль
+      final newPending = Set<String>.from(pendingProfiles.value)
+        ..add(device.remoteId.str);
+      pendingProfiles.value = newPending;
       debugPrint('[BLE] Connected to ${device.remoteId}');
       // Отправляем свой профиль
       onPeerConnected?.call(device.remoteId.str);
+      // Таймаут: если профиль не пришёл за 5 сек — убираем лоадер
+      Future.delayed(const Duration(seconds: 5), () {
+        if (pendingProfiles.value.contains(device.remoteId.str)) {
+          final upd = Set<String>.from(pendingProfiles.value)
+            ..remove(device.remoteId.str);
+          pendingProfiles.value = upd;
+        }
+      });
     } catch (e) {
       debugPrint('[BLE] Connect failed: $e');
       _connectedPeers.remove(device.remoteId);
@@ -306,7 +328,10 @@ class BleService {
     device.connectionState.listen((state) {
       if (state == BluetoothConnectionState.disconnected) {
         final bleId = device.remoteId.str;
-        // Убираем маппинг при отключении — при переподключении профиль запросится заново
+        // Убираем маппинг и pending при отключении
+        final newPending = Set<String>.from(pendingProfiles.value)
+          ..remove(bleId);
+        pendingProfiles.value = newPending;
         final publicKey = _bleIdToPublicKey.remove(bleId);
         if (publicKey != null) _publicKeyToBleId.remove(publicKey);
         _connectedPeers.remove(device.remoteId);
