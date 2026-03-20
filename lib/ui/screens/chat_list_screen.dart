@@ -122,7 +122,7 @@ class _ChatListScreenState extends State<ChatListScreen>
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => SettingsScreen()),
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
               );
             },
           ),
@@ -237,6 +237,7 @@ class _ChatsTabState extends State<_ChatsTab> {
                 peerNickname: item.nickname,
                 peerAvatarColor: item.avatarColor,
                 peerAvatarEmoji: item.avatarEmoji,
+                peerAvatarImagePath: item.avatarImagePath,
               ),
             ),
           ),
@@ -392,6 +393,7 @@ class _NearbyDeviceTile extends StatelessWidget {
             initials: nickname[0].toUpperCase(),
             color: color,
             emoji: emoji,
+            imagePath: contact?.avatarImagePath,
             size: 48,
             isOnline: true,
           ),
@@ -405,6 +407,7 @@ class _NearbyDeviceTile extends StatelessWidget {
                 peerNickname: nickname,
                 peerAvatarColor: color,
                 peerAvatarEmoji: emoji,
+                peerAvatarImagePath: contact?.avatarImagePath,
               ),
             ),
           ),
@@ -434,6 +437,7 @@ class _NearbyDeviceTile extends StatelessWidget {
                     peerNickname: nickname,
                     peerAvatarColor: color,
                     peerAvatarEmoji: emoji,
+                    peerAvatarImagePath: contact?.avatarImagePath,
                   ),
                 ),
               ),

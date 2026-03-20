@@ -66,6 +66,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Rlink использует микрофон для записи голосовых сообщений</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Rlink использует галерею для выбора фото аватара и изображений в чате</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>

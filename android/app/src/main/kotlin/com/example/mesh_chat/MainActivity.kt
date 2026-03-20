@@ -18,6 +18,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         const val METHOD_CHANNEL = "com.rendergames.rlink/ble"
         const val EVENT_CHANNEL  = "com.rendergames.rlink/ble_events"
+        const val NOTIFICATION_CHANNEL_ID = "rlink_messages"
         val SERVICE_UUID: UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef0")
         val TX_CHAR_UUID: UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef1")
         val CCCD_UUID:    UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -36,10 +37,6 @@ class MainActivity : FlutterActivity() {
 
     // Отслеживаем foreground/background для уведомлений
     private var isAppInForeground = false
-
-    companion object {
-        const val NOTIFICATION_CHANNEL_ID = "rlink_messages"
-    }
 
     override fun onResume() {
         super.onResume()

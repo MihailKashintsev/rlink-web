@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:uuid/uuid.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -124,9 +126,12 @@ Future<void> initServices() async {
       onDelete: (fromId, messageId) async {
         await ChatStorageService.instance.deleteMessage(messageId);
       },
-      onImgMetaReceived: (fromId, msgId, totalChunks, isAvatar) {
+      onReact: (fromId, messageId, emoji) async {
+        await ChatStorageService.instance.addReaction(messageId, emoji, fromId);
+      },
+      onImgMetaReceived: (fromId, msgId, totalChunks, isAvatar, isVoice) {
         ImageService.instance.initAssembly(
-          msgId, totalChunks, isAvatar: isAvatar, fromId: fromId,
+          msgId, totalChunks, isAvatar: isAvatar, isVoice: isVoice, fromId: fromId,
         );
       },
       onImgChunkReceived: (fromId, msgId, totalChunks, index, base64Data) async {
@@ -139,21 +144,13 @@ Future<void> initServices() async {
         if (!ImageService.instance.isComplete(msgId)) return;
 
         final isAvatar = ImageService.instance.isAvatarAssembly(msgId);
+        final isVoice  = ImageService.instance.isVoiceAssembly(msgId);
         final senderKey = ImageService.instance.assemblyFromId(msgId).isNotEmpty
             ? ImageService.instance.assemblyFromId(msgId)
             : fromId;
 
-        if (isAvatar) {
-          final path = await ImageService.instance.assembleAndSave(
-            msgId, forContactKey: senderKey,
-          );
-          if (path != null) {
-            await ChatStorageService.instance.updateContactAvatarImage(senderKey, path);
-          }
-        } else {
-          final path = await ImageService.instance.assembleAndSave(msgId);
-          if (path == null) return;
-
+        // Helper: ensure contact exists
+        Future<void> ensureContact() async {
           final existing = await ChatStorageService.instance.getContact(senderKey);
           if (existing == null) {
             await ChatStorageService.instance.saveContact(Contact(
@@ -164,6 +161,39 @@ Future<void> initServices() async {
               addedAt: DateTime.now(),
             ));
           }
+        }
+
+        if (isAvatar) {
+          final path = await ImageService.instance.assembleAndSave(
+            msgId, forContactKey: senderKey,
+          );
+          if (path != null) {
+            await ChatStorageService.instance.updateContactAvatarImage(senderKey, path);
+          }
+        } else if (isVoice) {
+          final path = await ImageService.instance.assembleAndSaveVoice(msgId);
+          if (path == null) return;
+          await ensureContact();
+          final msg = ChatMessage(
+            id: msgId,
+            peerId: senderKey,
+            text: '🎤 Голосовое',
+            isOutgoing: false,
+            timestamp: DateTime.now(),
+            status: MessageStatus.delivered,
+            voicePath: path,
+          );
+          await ChatStorageService.instance.saveMessage(msg);
+          incomingMessageController.add(IncomingMessage(
+            fromId: senderKey,
+            text: '🎤 Голосовое',
+            timestamp: msg.timestamp,
+            msgId: msgId,
+          ));
+        } else {
+          final path = await ImageService.instance.assembleAndSave(msgId);
+          if (path == null) return;
+          await ensureContact();
           final msg = ChatMessage(
             id: msgId,
             peerId: senderKey,
@@ -188,41 +218,43 @@ Future<void> initServices() async {
         // Регистрируем маппинг BLE ID → публичный ключ
         BleService.instance.registerPeerKey(bleId, publicKey);
 
-        // Сохраняем контакт в БД ПЕРЕД тем как убрать лоадер
-        // Порядок критичен: markProfileReceived триггерит UI rebuild,
-        // который должен найти контакт уже в БД
-        final existing =
-            await ChatStorageService.instance.getContact(publicKey);
-        if (existing == null) {
-          final contact = Contact(
-            publicKeyHex: publicKey,
-            nickname: nick,
-            avatarColor: color,
-            avatarEmoji: emoji,
-            addedAt: DateTime.now(),
-          );
-          await ChatStorageService.instance.saveContact(contact);
-          debugPrint(
-              '[Profile] Auto-saved contact: $nick (key: ${publicKey.substring(0, 8)}...)');
-        } else {
-          // Обновляем профиль — ник/цвет/эмодзи могли измениться
-          await ChatStorageService.instance.updateContact(Contact(
-            publicKeyHex: publicKey,
-            nickname: nick,
-            avatarColor: color,
-            avatarEmoji: emoji,
-            addedAt: existing.addedAt,
-          ));
-          debugPrint(
-              '[Profile] Updated contact: $nick (key: ${publicKey.substring(0, 8)}...)');
+        // Сохраняем контакт в БД ПЕРЕД тем как убрать лоадер.
+        // finally гарантирует markProfileReceived даже при ошибке БД.
+        try {
+          final existing =
+              await ChatStorageService.instance.getContact(publicKey);
+          if (existing == null) {
+            await ChatStorageService.instance.saveContact(Contact(
+              publicKeyHex: publicKey,
+              nickname: nick,
+              avatarColor: color,
+              avatarEmoji: emoji,
+              addedAt: DateTime.now(),
+            ));
+            debugPrint(
+                '[Profile] Auto-saved contact: $nick (key: ${publicKey.substring(0, 8)}...)');
+          } else {
+            await ChatStorageService.instance.updateContact(Contact(
+              publicKeyHex: publicKey,
+              nickname: nick,
+              avatarColor: color,
+              avatarEmoji: emoji,
+              avatarImagePath: existing.avatarImagePath,
+              addedAt: existing.addedAt,
+            ));
+            debugPrint(
+                '[Profile] Updated contact: $nick (key: ${publicKey.substring(0, 8)}...)');
+          }
+        } catch (e) {
+          debugPrint('[Profile] DB error saving contact: $e');
+        } finally {
+          // Убираем лоадер ПОСЛЕ сохранения контакта — UI увидит правильные данные
+          BleService.instance.markProfileReceived(bleId);
         }
-
-        // Убираем лоадер ПОСЛЕ сохранения контакта — UI увидит правильные данные
-        BleService.instance.markProfileReceived(bleId);
       },
     );
 
-    // При подключении нового пира — отправляем свой профиль
+    // При подключении нового пира — отправляем свой профиль + аватар
     BleService.instance.onPeerConnected = (peerId) async {
       final profile = ProfileService.instance.profile;
       if (profile == null) return;
@@ -234,6 +266,11 @@ Future<void> initServices() async {
         emoji: profile.avatarEmoji,
       );
       debugPrint('[Profile] Sent my profile to $peerId');
+      // Отправляем аватар в фоне после текстового профиля
+      final imagePath = profile.avatarImagePath;
+      if (imagePath != null) {
+        unawaited(_broadcastAvatar(profile.publicKeyHex, imagePath));
+      }
     };
 
     await BleService.instance.start();
@@ -243,6 +280,34 @@ Future<void> initServices() async {
     }
   } catch (e) {
     debugPrint('[main] Init error: $e');
+  }
+}
+
+/// Отправляет аватар-изображение по BLE (fire-and-forget, вызывается из onPeerConnected).
+/// Аватар ~ 8–15 KB → ~120 чанков → ~4 секунды передачи.
+Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
+  try {
+    await Future.delayed(const Duration(milliseconds: 300));
+    final bytes = await File(imagePath).readAsBytes();
+    final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+    final msgId = const Uuid().v4();
+    await GossipRouter.instance.sendImgMeta(
+      msgId: msgId,
+      totalChunks: chunks.length,
+      fromId: myPublicKey,
+      isAvatar: true,
+    );
+    for (var i = 0; i < chunks.length; i++) {
+      await GossipRouter.instance.sendImgChunk(
+        msgId: msgId,
+        index: i,
+        base64Data: chunks[i],
+        fromId: myPublicKey,
+      );
+    }
+    debugPrint('[Avatar] Sent ${chunks.length} chunks');
+  } catch (e) {
+    debugPrint('[Avatar] Send failed: $e');
   }
 }
 

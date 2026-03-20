@@ -9,7 +9,7 @@ import 'crypto_service.dart';
 const _kDefaultTtl = 7;
 const _kProfileTtl = 4; // Профили распространяются на 4 хопа для лучшего discovery
 const _kSeenCacheTtl = Duration(minutes: 30);
-const _kMaxPayloadBytes = 512;
+const _kMaxPayloadBytes = 288; // hard limit: iOS ATT MTU ≈ 290, leave 2 bytes margin
 const _kMaxImgPayloadBytes = 285; // img_meta ≈ 233 б, img_chunk ≈ 274 б < BLE MTU 290
 
 class GossipPacket {
@@ -89,13 +89,15 @@ typedef OnEditReceived = Future<void> Function(
   String newText,
 );
 typedef OnDeleteReceived = Future<void> Function(String fromId, String messageId);
+typedef OnReactReceived = Future<void> Function(String fromId, String messageId, String emoji);
 
-/// Вызывается при получении img_meta (начало передачи изображения).
+/// Вызывается при получении img_meta (начало передачи изображения/голоса).
 typedef OnImgMeta = void Function(
   String fromId,
   String msgId,
   int totalChunks,
-  bool isAvatar, // true — аватар, false — чат-изображение
+  bool isAvatar, // true — аватар
+  bool isVoice,  // true — голосовое сообщение
 );
 
 /// Вызывается при получении очередного img_chunk.
@@ -123,6 +125,7 @@ class GossipRouter {
   OnProfileReceived? onProfileReceived;
   OnEditReceived? onEditReceived;
   OnDeleteReceived? onDeleteReceived;
+  OnReactReceived? onReactReceived;
   OnImgMeta? onImgMeta;
   OnImgChunk? onImgChunk;
 
@@ -134,6 +137,7 @@ class GossipRouter {
     OnProfileReceived? onProfile,
     OnEditReceived? onEdit,
     OnDeleteReceived? onDelete,
+    OnReactReceived? onReact,
     OnImgMeta? onImgMetaReceived,
     OnImgChunk? onImgChunkReceived,
   }) {
@@ -144,6 +148,7 @@ class GossipRouter {
     onProfileReceived = onProfile;
     onEditReceived = onEdit;
     onDeleteReceived = onDelete;
+    onReactReceived = onReact;
     onImgMeta = onImgMetaReceived;
     onImgChunk = onImgChunkReceived;
     _cleanupTimer =
@@ -162,12 +167,13 @@ class GossipRouter {
     String? messageId,
     String? replyToMessageId,
   }) async {
+    // rid omitted — saves 73 bytes (64-hex key + JSON overhead), keeping packet
+    // under 290-byte BLE ATT MTU. In a direct 2-device mesh this is acceptable.
     final packet = GossipPacket(
       id: messageId ?? _uuid.v4(),
       type: 'raw',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
-      recipientId: recipientId,
       payload: {
         'text': text,
         'from': senderId,
@@ -202,16 +208,16 @@ class GossipRouter {
     required String senderId,
     required String recipientId,
   }) async {
+    // rid and from omitted — saves ~146 bytes, keeping packet under BLE MTU.
+    // onEdit callback ignores fromId anyway; mesh broadcast reaches the right peer.
     final packet = GossipPacket(
       id: _uuid.v4(), // separate packet id for dedup
       type: 'edit',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
-      recipientId: recipientId,
       payload: {
         'messageId': messageId,
         'text': newText,
-        'from': senderId,
       },
     );
     _markSeen(packet.id);
@@ -223,13 +229,14 @@ class GossipRouter {
     required String senderId,
     required String recipientId,
   }) async {
+    // rid and from omitted — saves ~146 bytes, keeping packet under BLE MTU.
+    // onDelete callback ignores fromId anyway.
     final packet = GossipPacket(
       id: _uuid.v4(), // separate packet id for dedup
       type: 'delete',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
-      recipientId: recipientId,
-      payload: {'messageId': messageId, 'from': senderId},
+      payload: {'messageId': messageId},
     );
     _markSeen(packet.id);
     await _forward(packet);
@@ -243,6 +250,7 @@ class GossipRouter {
     required String fromId,
     String? recipientId, // не используется в пакете — не помещается в BLE MTU 290
     bool isAvatar = false,
+    bool isVoice = false,
   }) async {
     final packet = GossipPacket(
       id: _uuid.v4(),
@@ -255,6 +263,7 @@ class GossipRouter {
         'chunks': totalChunks,
         'from': fromId,
         'avatar': isAvatar,
+        if (isVoice) 'voice': true,
       },
     );
     _markSeen(packet.id);
@@ -284,6 +293,22 @@ class GossipRouter {
     );
     _markSeen(packet.id);
     await _forwardImg(packet);
+  }
+
+  Future<void> sendReaction({
+    required String messageId,
+    required String emoji,
+    required String fromId,
+  }) async {
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'react',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {'messageId': messageId, 'emoji': emoji, 'from': fromId},
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
   }
 
   Future<void> broadcastProfile({
@@ -396,6 +421,19 @@ class GossipRouter {
         return;
       }
 
+      if (packet.type == 'react') {
+        final messageId = packet.payload['messageId'] as String?;
+        final from = packet.payload['from'] as String? ?? 'unknown';
+        final emoji = packet.payload['emoji'] as String?;
+        if (messageId != null && emoji != null) {
+          final handler = onReactReceived;
+          if (handler != null) {
+            await handler(from, messageId, emoji);
+          }
+        }
+        return;
+      }
+
       if (packet.type == 'profile') {
         final publicKey = packet.payload['id'] as String?;
         final nick = packet.payload['nick'] as String?;
@@ -430,8 +468,9 @@ class GossipRouter {
         final totalChunks= packet.payload['chunks']  as int?;
         final from       = packet.payload['from']    as String? ?? 'unknown';
         final isAvatar   = (packet.payload['avatar'] as bool?) ?? false;
+        final isVoice    = (packet.payload['voice']  as bool?) ?? false;
         if (msgId != null && totalChunks != null) {
-          onImgMeta?.call(from, msgId, totalChunks, isAvatar);
+          onImgMeta?.call(from, msgId, totalChunks, isAvatar, isVoice);
         }
         return;
       }

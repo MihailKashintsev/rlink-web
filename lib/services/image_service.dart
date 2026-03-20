@@ -31,12 +31,14 @@ class ImageService {
     final name = '${_uuid.v4()}.jpg';
     final targetPath = p.join(dir.path, name);
 
+    // Chat images: 320×320 quality 55 ≈ 15–30 KB → ~220 BLE chunks → ~7 seconds transfer.
+    // Avatar images: 192×192 quality 60 ≈ 8–15 KB → ~120 chunks → ~4 seconds transfer.
     final result = await FlutterImageCompress.compressAndGetFile(
       sourcePath,
       targetPath,
-      minWidth:  isAvatar ? 256 : 1024,
-      minHeight: isAvatar ? 256 : 1024,
-      quality:   isAvatar ? 65  : 80,
+      minWidth:  isAvatar ? 192 : 320,
+      minHeight: isAvatar ? 192 : 320,
+      quality:   isAvatar ? 60  : 55,
       format:    CompressFormat.jpeg,
     );
 
@@ -108,17 +110,29 @@ class ImageService {
   }
 
   /// Инициализирует сборку до прихода первого чанка (вызывается из onImgMeta).
-  void initAssembly(String msgId, int totalChunks, {bool isAvatar = false, String fromId = ''}) {
+  void initAssembly(String msgId, int totalChunks, {bool isAvatar = false, bool isVoice = false, String fromId = ''}) {
     _assemblies.putIfAbsent(
       msgId,
-      () => _ImageAssembly(totalChunks: totalChunks, isAvatar: isAvatar, fromId: fromId),
+      () => _ImageAssembly(totalChunks: totalChunks, isAvatar: isAvatar, isVoice: isVoice, fromId: fromId),
     );
   }
 
   bool isAvatarAssembly(String msgId) => _assemblies[msgId]?.isAvatar ?? false;
+  bool isVoiceAssembly(String msgId)  => _assemblies[msgId]?.isVoice  ?? false;
   String assemblyFromId(String msgId) => _assemblies[msgId]?.fromId ?? '';
 
   void cancelAssembly(String msgId) => _assemblies.remove(msgId);
+
+  /// Собирает голосовое сообщение и сохраняет как .m4a в voices/.
+  Future<String?> assembleAndSaveVoice(String msgId) async {
+    final assembly = _assemblies.remove(msgId);
+    if (assembly == null || !assembly.isComplete) return null;
+    final data = assembly.assemble();
+    final dir = await _voicesDir();
+    final path = p.join(dir.path, '$msgId.m4a');
+    await File(path).writeAsBytes(data);
+    return path;
+  }
 
   // ── Helpers ───────────────────────────────────────────────────
 
@@ -128,15 +142,23 @@ class ImageService {
     if (!dir.existsSync()) dir.createSync(recursive: true);
     return dir;
   }
+
+  Future<Directory> _voicesDir() async {
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory(p.join(base.path, 'voices'));
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    return dir;
+  }
 }
 
 class _ImageAssembly {
   final int totalChunks;
   final bool isAvatar;
+  final bool isVoice;
   final String fromId;
   final Map<int, Uint8List> _chunks = {};
 
-  _ImageAssembly({required this.totalChunks, this.isAvatar = false, this.fromId = ''});
+  _ImageAssembly({required this.totalChunks, this.isAvatar = false, this.isVoice = false, this.fromId = ''});
 
   void add(int index, Uint8List data) => _chunks[index] = data;
 

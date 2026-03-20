@@ -55,7 +55,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     }
     if (nick.length > _maxNickLength) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Имя не должно превышать $_maxNickLength символов')),
+        const SnackBar(content: Text('Имя не должно превышать $_maxNickLength символов')),
       );
       return;
     }

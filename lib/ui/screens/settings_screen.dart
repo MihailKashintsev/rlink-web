@@ -24,7 +24,7 @@ class SettingsScreen extends StatelessWidget {
       body: ListView(
         children: [
           // ── Профиль ────────────────────────────────────────────
-          _SectionHeader('Профиль'),
+          const _SectionHeader('Профиль'),
           ListTile(
             leading: const Icon(Icons.key_outlined),
             title: const Text('Мой публичный ключ'),
@@ -47,7 +47,7 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           // ── Поиск по ID ────────────────────────────────────────
-          _SectionHeader('Найти пользователя'),
+          const _SectionHeader('Найти пользователя'),
           ListTile(
             leading: const Icon(Icons.search),
             title: const Text('Поиск по уникальному ID'),
@@ -56,7 +56,7 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           // ── Данные ─────────────────────────────────────────────
-          _SectionHeader('Данные'),
+          const _SectionHeader('Данные'),
           ListTile(
             leading:
                 const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
@@ -101,7 +101,7 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           // ── Опасная зона ───────────────────────────────────────
-          _SectionHeader('Опасная зона'),
+          const _SectionHeader('Опасная зона'),
           ListTile(
             leading: const Icon(Icons.restore, color: Colors.red),
             title: const Text('Сбросить приложение',
@@ -181,6 +181,7 @@ class SettingsScreen extends StatelessWidget {
               final nickname = contact?.nickname ?? '${id.substring(0, 8)}...';
               final color = contact?.avatarColor ?? 0xFF607D8B;
               final emoji = contact?.avatarEmoji ?? '';
+              final imagePath = contact?.avatarImagePath;
               // Если контакта нет — создаём временный
               if (contact == null) {
                 await ChatStorageService.instance.saveContact(Contact(
@@ -200,6 +201,7 @@ class SettingsScreen extends StatelessWidget {
                       peerNickname: nickname,
                       peerAvatarColor: color,
                       peerAvatarEmoji: emoji,
+                      peerAvatarImagePath: imagePath,
                     ),
                   ),
                 );

@@ -12,6 +12,7 @@ import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
+import '../../services/voice_service.dart';
 import '../widgets/avatar_widget.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class ChatScreen extends StatefulWidget {
   final String peerNickname;
   final int peerAvatarColor;
   final String peerAvatarEmoji;
+  final String? peerAvatarImagePath;
 
   const ChatScreen({
     super.key,
@@ -26,6 +28,7 @@ class ChatScreen extends StatefulWidget {
     required this.peerNickname,
     required this.peerAvatarColor,
     this.peerAvatarEmoji = '',
+    this.peerAvatarImagePath,
   });
 
   @override
@@ -45,6 +48,9 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _replyPreviewText;
   String? _editingMessageId;
   String? _editingPreviewText;
+  bool _isRecording = false;
+  double _recordingSeconds = 0;
+  Timer? _recordingTimer;
 
   static const _kMaxMessageLength = 280;
   static final _publicKeyRegExp = RegExp(r'^[0-9a-fA-F]{64}$');
@@ -106,10 +112,91 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     BleService.instance.peersCount.removeListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.removeListener(_onPeersChanged);
+    _recordingTimer?.cancel();
     _controller.dispose();
     _scrollController.dispose();
     _msgSub?.cancel();
     super.dispose();
+  }
+
+  // ── Voice recording ───────────────────────────────────────────
+
+  Future<void> _startVoiceRecording() async {
+    if (_isSending || _isRecording) return;
+    final path = await VoiceService.instance.startRecording();
+    if (path == null) return;
+    setState(() {
+      _isRecording = true;
+      _recordingSeconds = 0;
+    });
+    _recordingTimer?.cancel();
+    _recordingTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (!mounted || !_isRecording) return;
+      setState(() => _recordingSeconds += 0.1);
+      if (_recordingSeconds >= 60) {
+        _stopAndSendVoice();
+      }
+    });
+  }
+
+  Future<void> _stopAndSendVoice() async {
+    if (!_isRecording) return;
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+
+    final path = await VoiceService.instance.stopRecording();
+    final duration = _recordingSeconds;
+    setState(() {
+      _isRecording = false;
+      _recordingSeconds = 0;
+    });
+
+    if (path == null || duration < 0.5) return;
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) return;
+    }
+
+    try {
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final msgId = _uuid.v4();
+      final myId = CryptoService.instance.publicKeyHex;
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        recipientId: _resolvedPeerId,
+        isAvatar: false,
+        isVoice: true,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+          recipientId: _resolvedPeerId,
+        );
+      }
+
+      await ChatStorageService.instance.saveMessage(ChatMessage(
+        id: msgId,
+        peerId: _resolvedPeerId,
+        text: '🎤 Голосовое',
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: MessageStatus.sent,
+        voicePath: path,
+      ));
+      _scrollToBottom();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка голосового: $e'), backgroundColor: Colors.red),
+      );
+    }
   }
 
   Future<void> _load() async {
@@ -123,7 +210,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (text.length > _kMaxMessageLength) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
             content: Text(
                 'Сообщение слишком длинное (макс. $_kMaxMessageLength симв.)')),
       );
@@ -432,6 +519,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 : '?',
             color: widget.peerAvatarColor,
             emoji: widget.peerAvatarEmoji,
+            imagePath: widget.peerAvatarImagePath,
             size: 38,
             isOnline: BleService.instance.isPeerConnected(_resolvedPeerId),
           ),
@@ -570,9 +658,13 @@ class _ChatScreenState extends State<ChatScreen> {
         _InputBar(
           controller: _controller,
           isSending: _isSending,
+          isRecording: _isRecording,
+          recordingSeconds: _recordingSeconds,
           maxLength: _kMaxMessageLength,
           onSend: _send,
           onPickImage: _sendImage,
+          onMicDown: _startVoiceRecording,
+          onMicUp: _stopAndSendVoice,
         ),
       ]),
     );
@@ -650,6 +742,11 @@ class _MessageBubble extends StatelessWidget {
               isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
             if (msg.imagePath != null && File(msg.imagePath!).existsSync())
+            if (msg.voicePath != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: _VoiceMessageBubble(voicePath: msg.voicePath!, isOut: isOut),
+              ),
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: ClipRRect(
@@ -696,13 +793,14 @@ class _MessageBubble extends StatelessWidget {
                   ],
                 ),
               ),
-            Text(
-              msg.text,
-              style: TextStyle(
-                color: isOut ? Colors.white : cs.onSurface,
-                fontSize: 15,
+            if (msg.text.isNotEmpty && msg.voicePath == null)
+              Text(
+                msg.text,
+                style: TextStyle(
+                  color: isOut ? Colors.white : cs.onSurface,
+                  fontSize: 15,
+                ),
               ),
-            ),
             const SizedBox(height: 2),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -752,16 +850,24 @@ class _MessageBubble extends StatelessWidget {
 class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final bool isSending;
+  final bool isRecording;
+  final double recordingSeconds;
   final int maxLength;
   final VoidCallback onSend;
   final VoidCallback onPickImage;
+  final VoidCallback onMicDown;
+  final VoidCallback onMicUp;
 
   const _InputBar({
     required this.controller,
     required this.isSending,
+    required this.isRecording,
+    required this.recordingSeconds,
     required this.maxLength,
     required this.onSend,
     required this.onPickImage,
+    required this.onMicDown,
+    required this.onMicUp,
   });
 
   @override
@@ -783,6 +889,9 @@ class _InputBarState extends State<_InputBar> {
   Widget build(BuildContext context) {
     final near = _length > widget.maxLength * 0.8;
     final over = _length > widget.maxLength;
+    final hasText = widget.controller.text.trim().isNotEmpty;
+    final secs = widget.recordingSeconds.floor();
+    final tenths = ((widget.recordingSeconds % 1) * 10).floor();
 
     return SafeArea(
       child: Container(
@@ -808,12 +917,15 @@ class _InputBarState extends State<_InputBar> {
               ),
               child: TextField(
                 controller: widget.controller,
+                enabled: !widget.isRecording,
                 maxLines: 4,
                 minLines: 1,
                 textInputAction: TextInputAction.newline,
                 style: const TextStyle(fontSize: 15),
                 decoration: InputDecoration(
-                  hintText: 'Сообщение...',
+                  hintText: widget.isRecording
+                      ? 'Запись... ${secs}s.$tenths'
+                      : 'Сообщение...',
                   hintStyle: TextStyle(color: Colors.grey.shade600),
                   border: InputBorder.none,
                   contentPadding:
@@ -832,29 +944,90 @@ class _InputBarState extends State<_InputBar> {
             ),
           ),
           const SizedBox(width: 8),
-          GestureDetector(
-            onTap: widget.isSending || over ? null : widget.onSend,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: (widget.isSending || over)
-                    ? Colors.grey.shade700
-                    : const Color(0xFF1DB954),
-                shape: BoxShape.circle,
+          if (hasText || widget.isSending)
+            GestureDetector(
+              onTap: widget.isSending || over || widget.isRecording ? null : widget.onSend,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: (widget.isSending || over || widget.isRecording)
+                      ? Colors.grey.shade700
+                      : const Color(0xFF1DB954),
+                  shape: BoxShape.circle,
+                ),
+                child: widget.isSending
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
               ),
-              child: widget.isSending
-                  ? const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.send_rounded,
-                      color: Colors.white, size: 20),
+            )
+          else
+            GestureDetector(
+              onLongPressStart: (_) => widget.onMicDown(),
+              onLongPressEnd: (_) => widget.onMicUp(),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: widget.isRecording
+                      ? Colors.redAccent
+                      : const Color(0xFF1DB954),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.mic_rounded, color: Colors.white, size: 20),
+              ),
             ),
-          ),
         ]),
       ),
+    );
+  }
+}
+
+class _VoiceMessageBubble extends StatelessWidget {
+  final String voicePath;
+  final bool isOut;
+  const _VoiceMessageBubble({required this.voicePath, required this.isOut});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<String?>(
+      valueListenable: VoiceService.instance.currentlyPlaying,
+      builder: (_, playing, __) {
+        final isPlaying = playing == voicePath;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              onPressed: () async {
+                if (isPlaying) {
+                  await VoiceService.instance.stop();
+                } else {
+                  await VoiceService.instance.play(voicePath);
+                }
+              },
+              icon: Icon(
+                isPlaying ? Icons.stop_circle_outlined : Icons.play_circle_outline,
+                color: isOut ? Colors.white : Colors.white70,
+                size: 22,
+              ),
+            ),
+            Text(
+              'Голосовое',
+              style: TextStyle(
+                color: isOut ? Colors.white : Colors.white70,
+                fontSize: 13,
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

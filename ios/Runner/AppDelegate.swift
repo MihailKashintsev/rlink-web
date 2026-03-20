@@ -172,17 +172,49 @@ import UserNotifications
 
     // MARK: - Notifications
 
-    private func showMessageNotification(from deviceId: String) {
+    /// Returns true only for 'raw' text messages — avoids spam from img_chunk/ack/profile packets.
+    private func isTextMessage(data: Data) -> Bool {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["t"] as? String else { return false }
+        return type == "raw"
+    }
+
+    /// Reads contacts_cache.json written by Flutter — maps publicKeyHex → nickname.
+    private func loadContactsCache() -> [String: String] {
+        guard let docDir = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask).first else { return [:] }
+        let url = docDir.appendingPathComponent("contacts_cache.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String]
+        else { return [:] }
+        return json
+    }
+
+    private func showMessageNotification(data: Data) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = json["p"] as? [String: Any],
+              let text = payload["text"] as? String,
+              let from = payload["from"] as? String
+        else {
+            // Fallback if packet can't be decoded
+            let content = UNMutableNotificationContent()
+            content.title = "Rlink"
+            content.body = "Новое сообщение"
+            content.sound = .default
+            UNUserNotificationCenter.current().add(
+                UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+            return
+        }
+        let cache = loadContactsCache()
+        let senderName = cache[from] ?? String(from.prefix(8))
+        let truncatedText = text.count > 80 ? String(text.prefix(80)) + "…" : text
+
         let content = UNMutableNotificationContent()
-        content.title = "Rlink"
-        content.body = "Новое сообщение"
+        content.title = senderName
+        content.body = truncatedText
         content.sound = .default
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
     // MARK: - BLE Peripheral
@@ -254,10 +286,12 @@ extension AppDelegate: CBPeripheralManagerDelegate {
                 if !pendingEvents.isEmpty && (eventSink != nil || dataChannel != nil) {
                     startFlushTimer()
                 }
-                // Уведомление в фоне
+                // Уведомление в фоне — только для текстовых сообщений ('raw')
+                let dataCopy = data
                 DispatchQueue.main.async {
-                    if UIApplication.shared.applicationState != .active {
-                        self.showMessageNotification(from: deviceId)
+                    if UIApplication.shared.applicationState != .active &&
+                       self.isTextMessage(data: dataCopy) {
+                        self.showMessageNotification(data: dataCopy)
                     }
                 }
             }

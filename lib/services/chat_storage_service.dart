@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
@@ -34,7 +36,7 @@ class ChatStorageService {
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 3,
+      version: 5,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE contacts (
@@ -54,9 +56,11 @@ class ChatStorageService {
             text                 TEXT NOT NULL,
             reply_to_message_id  TEXT,
             image_path           TEXT,
+            voice_path           TEXT,
             is_outgoing          INTEGER NOT NULL,
             timestamp            INTEGER NOT NULL,
-            status               INTEGER NOT NULL DEFAULT 1
+            status               INTEGER NOT NULL DEFAULT 1,
+            reactions            TEXT
           )
         ''');
         await db.execute(
@@ -82,6 +86,20 @@ class ChatStorageService {
             );
           } catch (_) {}
         }
+        if (oldVersion < 4) {
+          try {
+            await db.execute(
+              'ALTER TABLE messages ADD COLUMN reactions TEXT',
+            );
+          } catch (_) {}
+        }
+        if (oldVersion < 5) {
+          try {
+            await db.execute(
+              'ALTER TABLE messages ADD COLUMN voice_path TEXT',
+            );
+          } catch (_) {}
+        }
       },
     );
     debugPrint('[DB] Initialized');
@@ -93,6 +111,7 @@ class ChatStorageService {
     await _db?.insert('contacts', contact.toMap(),
         conflictAlgorithm: ConflictAlgorithm.replace);
     _contactsNotifier.value = await getContacts();
+    unawaited(_writeContactsCache());
   }
 
   Future<void> deleteContact(String id) async {
@@ -134,6 +153,20 @@ class ChatStorageService {
       whereArgs: [contact.publicKeyHex],
     );
     _contactsNotifier.value = await getContacts();
+    unawaited(_writeContactsCache());
+  }
+
+  /// Записывает кэш имён контактов в файл для iOS-уведомлений.
+  Future<void> _writeContactsCache() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File(join(dir.path, 'contacts_cache.json'));
+      final contacts = _contactsNotifier.value;
+      final map = {for (final c in contacts) c.publicKeyHex: c.nickname};
+      await file.writeAsString(jsonEncode(map));
+    } catch (e) {
+      debugPrint('[DB] contacts cache write failed: $e');
+    }
   }
 
   Future<void> updateContactAvatarImage(String id, String imagePath) async {
@@ -301,5 +334,28 @@ class ChatStorageService {
       final msgs = await getMessages(peerId);
       _messagesNotifiers[peerId]!.value = msgs;
     }
+  }
+
+  Future<void> addReaction(String messageId, String emoji, String fromId) async {
+    final rows = await _db?.query(
+      'messages',
+      where: 'id = ?',
+      whereArgs: [messageId],
+      limit: 1,
+    );
+    if (rows == null || rows.isEmpty) return;
+    final msg = ChatMessage.fromMap(rows.first);
+
+    final reactions = msg.reactions.map((k, v) => MapEntry(k, List<String>.from(v)));
+    final senders = reactions.putIfAbsent(emoji, () => []);
+    if (!senders.contains(fromId)) senders.add(fromId);
+
+    await _db?.update(
+      'messages',
+      {'reactions': jsonEncode(reactions)},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _notifyMessages(msg.peerId);
   }
 }
