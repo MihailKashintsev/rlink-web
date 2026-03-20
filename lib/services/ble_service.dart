@@ -54,6 +54,13 @@ class BleService {
     }
   }
 
+  /// Сбрасывает маппинги BLE ID ↔ публичный ключ (для полного сброса)
+  void clearMappings() {
+    _bleIdToPublicKey.clear();
+    _publicKeyToBleId.clear();
+    debugPrint('[BLE] Key mappings cleared');
+  }
+
   /// Регистрирует маппинг BLE ID → публичный ключ
   void registerPeerKey(String bleId, String publicKey) {
     _bleIdToPublicKey[bleId] = publicKey;

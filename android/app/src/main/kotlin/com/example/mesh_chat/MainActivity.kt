@@ -1,9 +1,13 @@
 package com.example.mesh_chat
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
+import android.os.Build
 import android.os.ParcelUuid
+import androidx.core.app.NotificationCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -29,6 +33,55 @@ class MainActivity : FlutterActivity() {
     // Флаг — предотвращаем дублирование
     private var isAdvertising = false
     private var isGattServerRunning = false
+
+    // Отслеживаем foreground/background для уведомлений
+    private var isAppInForeground = false
+
+    companion object {
+        const val NOTIFICATION_CHANNEL_ID = "rlink_messages"
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isAppInForeground = true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        isAppInForeground = false
+    }
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        createNotificationChannel()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "Сообщения Rlink",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Уведомления о новых сообщениях"
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun showMessageNotification() {
+        if (isAppInForeground) return
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle("Rlink")
+            .setContentText("Новое сообщение")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .build()
+        manager.notify(System.currentTimeMillis().toInt(), notification)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -102,7 +155,10 @@ class MainActivity : FlutterActivity() {
             offset: Int, value: ByteArray
         ) {
             if (characteristic.uuid == TX_CHAR_UUID) {
-                runOnUiThread { eventSink?.success(value) }
+                runOnUiThread {
+                    eventSink?.success(value)
+                    showMessageNotification()
+                }
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)

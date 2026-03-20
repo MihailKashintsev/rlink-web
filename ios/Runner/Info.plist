@@ -67,10 +67,15 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-<string>Rlink использует Bluetooth для общения с устройствами поблизости без интернета</string>
-<key>NSBluetoothPeripheralUsageDescription</key>
-<string>Rlink использует Bluetooth для общения с устройствами поблизости без интернета</string>
-<key>NSLocalNetworkUsageDescription</key>
-<string>Rlink использует локальную сеть для общения без интернета</string>
+	<string>Rlink использует Bluetooth для общения с устройствами поблизости без интернета</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Rlink использует Bluetooth для общения с устройствами поблизости без интернета</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Rlink использует локальную сеть для общения без интернета</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+	</array>
 </dict>
 </plist>

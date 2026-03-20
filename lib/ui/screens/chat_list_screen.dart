@@ -6,6 +6,7 @@ import '../../main.dart';
 import '../../models/contact.dart';
 import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/gossip_router.dart';
 import '../../services/profile_service.dart';
 import '../widgets/avatar_widget.dart';
 import 'chat_screen.dart';
@@ -24,11 +25,15 @@ class _ChatListScreenState extends State<ChatListScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabs;
   StreamSubscription<IncomingMessage>? _msgSub;
+  int _currentTab = 0;
 
   @override
   void initState() {
     super.initState();
     _tabs = TabController(length: 3, vsync: this);
+    _tabs.addListener(() {
+      if (mounted) setState(() => _currentTab = _tabs.index);
+    });
     ChatStorageService.instance.loadContacts();
     _msgSub = incomingMessageController.stream.listen((_) {
       if (mounted) setState(() {});
@@ -49,7 +54,23 @@ class _ChatListScreenState extends State<ChatListScreen>
       const SnackBar(
           content: Text('Поиск устройств...'), duration: Duration(seconds: 2)),
     );
-    _tabs.animateTo(1);
+    _tabs.animateTo(2);
+  }
+
+  Future<void> _broadcastProfile() async {
+    final profile = ProfileService.instance.profile;
+    if (profile == null) return;
+    await GossipRouter.instance.broadcastProfile(
+      id: profile.publicKeyHex,
+      nick: profile.nickname,
+      color: profile.avatarColor,
+      emoji: profile.avatarEmoji,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+          content: Text('Профиль разослан'), duration: Duration(seconds: 2)),
+    );
   }
 
   @override
@@ -76,6 +97,12 @@ class _ChatListScreenState extends State<ChatListScreen>
           ),
         ),
         actions: [
+          if (_currentTab == 2)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Обновить профили',
+              onPressed: _broadcastProfile,
+            ),
           ValueListenableBuilder<int>(
             valueListenable: BleService.instance.peersCount,
             builder: (_, count, __) => IconButton(

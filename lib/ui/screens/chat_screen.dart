@@ -35,40 +35,50 @@ class _ChatScreenState extends State<ChatScreen> {
   final _uuid = const Uuid();
   bool _isSending = false;
   StreamSubscription<IncomingMessage>? _msgSub;
+  // Резолвленный публичный ключ пира (может отличаться от widget.peerId если тот BLE UUID)
+  late String _resolvedPeerId;
 
   static const _kMaxMessageLength = 280;
 
   @override
   void initState() {
     super.initState();
+    _resolvedPeerId = BleService.instance.resolvePublicKey(widget.peerId);
     _load();
+    // Следим за изменением маппингов BLE UUID → public key
+    BleService.instance.peersCount.addListener(_onPeersChanged);
     _msgSub = incomingMessageController.stream.listen((msg) {
-      debugPrint(
-          '[Chat] Received msg fromId=${msg.fromId.substring(0, 16)} peerId=${widget.peerId.substring(0, 16)}');
-      // fromId — Ed25519 public key. Принимаем если совпадает с peerId
-      // или если peerId это BLE-адрес (пока профиль ещё не получен)
+      // fromId — Ed25519 public key. Сообщение уже сохранено в main.dart.
+      // Проверяем по обоим вариантам: resolvedPeerId и widget.peerId.
       final resolved = BleService.instance.resolvePublicKey(widget.peerId);
       debugPrint(
-          '[Chat] isOurPeer check: fromId=${msg.fromId.substring(0, 16)} peerId=${widget.peerId.substring(0, 16)} resolved=${resolved.substring(0, 16)}');
-      final isOurPeer = msg.fromId == widget.peerId ||
-          BleService.instance.resolvePublicKey(widget.peerId) == msg.fromId;
+          '[Chat] isOurPeer: fromId=${msg.fromId.substring(0, 16)} resolved=${resolved.substring(0, 16)}');
+      final isOurPeer = msg.fromId == _resolvedPeerId ||
+          msg.fromId == widget.peerId ||
+          msg.fromId == resolved;
       if (isOurPeer) {
-        final chatMsg = ChatMessage(
-          id: _uuid.v4(),
-          peerId: widget.peerId,
-          text: msg.text,
-          isOutgoing: false,
-          timestamp: msg.timestamp,
-          status: MessageStatus.delivered,
-        );
-        ChatStorageService.instance.saveMessage(chatMsg);
+        // Если резолвился новый ключ — перезагружаем под правильным peerId
+        if (resolved != _resolvedPeerId && resolved != widget.peerId) {
+          _resolvedPeerId = resolved;
+          ChatStorageService.instance.loadMessages(_resolvedPeerId);
+        }
         _scrollToBottom();
       }
     });
   }
 
+  void _onPeersChanged() {
+    final resolved = BleService.instance.resolvePublicKey(widget.peerId);
+    if (resolved != _resolvedPeerId && resolved != widget.peerId) {
+      setState(() => _resolvedPeerId = resolved);
+      // Перезагружаем сообщения под правильным публичным ключом
+      ChatStorageService.instance.loadMessages(_resolvedPeerId);
+    }
+  }
+
   @override
   void dispose() {
+    BleService.instance.peersCount.removeListener(_onPeersChanged);
     _controller.dispose();
     _scrollController.dispose();
     _msgSub?.cancel();
@@ -76,7 +86,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _load() async {
-    await ChatStorageService.instance.loadMessages(widget.peerId);
+    await ChatStorageService.instance.loadMessages(_resolvedPeerId);
     _scrollToBottom();
   }
 
@@ -99,7 +109,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final msgId = _uuid.v4();
     final msg = ChatMessage(
       id: msgId,
-      peerId: widget.peerId,
+      peerId: _resolvedPeerId,
       text: text,
       isOutgoing: true,
       timestamp: DateTime.now(),
@@ -113,7 +123,7 @@ class _ChatScreenState extends State<ChatScreen> {
       await GossipRouter.instance.sendRawMessage(
         text: text,
         senderId: CryptoService.instance.publicKeyHex,
-        recipientId: widget.peerId,
+        recipientId: _resolvedPeerId,
       );
       await ChatStorageService.instance
           .saveMessage(msg.copyWith(status: MessageStatus.sent));
@@ -155,7 +165,7 @@ class _ChatScreenState extends State<ChatScreen> {
             color: widget.peerAvatarColor,
             emoji: widget.peerAvatarEmoji,
             size: 38,
-            isOnline: BleService.instance.isPeerConnected(widget.peerId),
+            isOnline: BleService.instance.isPeerConnected(_resolvedPeerId),
           ),
           const SizedBox(width: 10),
           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -166,7 +176,7 @@ class _ChatScreenState extends State<ChatScreen> {
               valueListenable: BleService.instance.peersCount,
               builder: (_, __, ___) {
                 final online =
-                    BleService.instance.isPeerConnected(widget.peerId);
+                    BleService.instance.isPeerConnected(_resolvedPeerId);
                 final anyConnected = BleService.instance.peersCount.value > 0;
                 return Text(
                   online
@@ -188,7 +198,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
             onSelected: (v) async {
               if (v == 'clear') {
-                await ChatStorageService.instance.deleteChat(widget.peerId);
+                await ChatStorageService.instance.deleteChat(_resolvedPeerId);
                 if (mounted) Navigator.pop(context);
               }
             },
@@ -199,7 +209,7 @@ class _ChatScreenState extends State<ChatScreen> {
         Expanded(
           child: ValueListenableBuilder<List<ChatMessage>>(
             valueListenable:
-                ChatStorageService.instance.messagesNotifier(widget.peerId),
+                ChatStorageService.instance.messagesNotifier(_resolvedPeerId),
             builder: (_, messages, __) {
               if (messages.isEmpty) {
                 return Center(

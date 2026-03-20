@@ -1,6 +1,7 @@
 import UIKit
 import Flutter
 import CoreBluetooth
+import UserNotifications
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
@@ -24,7 +25,25 @@ import CoreBluetooth
         let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
         peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
         DispatchQueue.main.async { self.setupChannels() }
+        // Запрашиваем разрешение на уведомления
+        UNUserNotificationCenter.current().delegate = self
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { _, _ in }
         return result
+    }
+
+    private func showMessageNotification(from deviceId: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Rlink"
+        content.body = "Новое сообщение"
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
     private func bufferEvent(deviceId: String, data: Data) {
@@ -175,6 +194,12 @@ extension AppDelegate: CBPeripheralManagerDelegate {
                 trySendOrBuffer(deviceId: deviceId, data: data)
                 // Запускаем таймер на случай если буфер растёт
                 if !pendingEvents.isEmpty { startFlushTimer() }
+                // Показываем уведомление если приложение в фоне
+                DispatchQueue.main.async {
+                    if UIApplication.shared.applicationState != .active {
+                        self.showMessageNotification(from: deviceId)
+                    }
+                }
             }
             peripheral.respond(to: req, withResult: .success)
         }
@@ -205,5 +230,17 @@ extension AppDelegate: FlutterStreamHandler {
         NSLog("[AppDelegate] onCancel")
         self.eventSink = nil
         return nil
+    }
+}
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    // Показываем уведомления даже когда приложение активно (foreground)
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        // В активном режиме уведомления не показываем — Flutter сам обработает
+        completionHandler([])
     }
 }

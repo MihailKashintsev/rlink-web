@@ -4,7 +4,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:uuid/uuid.dart';
 
+import 'models/chat_message.dart';
 import 'models/contact.dart';
 import 'services/ble_service.dart';
 import 'services/chat_storage_service.dart';
@@ -17,13 +19,19 @@ import 'ui/screens/onboarding_screen.dart';
 
 final incomingMessageController = StreamController<IncomingMessage>.broadcast();
 final pendingUpdateNotifier = ValueNotifier<UpdateInfo?>(null);
+const _uuid = Uuid();
 
 class IncomingMessage {
   final String fromId; // Ed25519 public key отправителя
   final String text;
   final DateTime timestamp;
-  const IncomingMessage(
-      {required this.fromId, required this.text, required this.timestamp});
+  final String msgId; // pre-generated ID для дедупликации
+  const IncomingMessage({
+    required this.fromId,
+    required this.text,
+    required this.timestamp,
+    required this.msgId,
+  });
 }
 
 Future<void> main() async {
@@ -42,28 +50,55 @@ Future<void> initServices() async {
       onMessage: (fromId, encrypted) async {
         debugPrint(
             '[Main] onMessage fromId=${fromId.substring(0, 16)} ephemeral=${encrypted.ephemeralPublicKey.isEmpty ? "empty" : "set"}');
-        // fromId — Ed25519 public key отправителя
+
+        final String text;
         if (encrypted.ephemeralPublicKey.isEmpty) {
-          debugPrint(
-              '[Main] Adding to stream: fromId=${fromId.substring(0, 16)}');
-          incomingMessageController.add(IncomingMessage(
-            fromId: fromId,
-            text: encrypted.cipherText,
-            timestamp: DateTime.now(),
-          ));
-          return;
+          text = encrypted.cipherText;
+        } else {
+          final plaintext =
+              await CryptoService.instance.decryptMessage(encrypted);
+          if (plaintext == null) return;
+          text = plaintext;
         }
-        final plaintext =
-            await CryptoService.instance.decryptMessage(encrypted);
-        if (plaintext != null) {
-          debugPrint(
-              '[Main] Adding to stream: fromId=${fromId.substring(0, 16)}');
-          incomingMessageController.add(IncomingMessage(
-            fromId: fromId,
-            text: plaintext,
-            timestamp: DateTime.now(),
+
+        final now = DateTime.now();
+        final msgId = _uuid.v4();
+
+        // Если незнакомец — автоматически создаём временный контакт
+        final existing =
+            await ChatStorageService.instance.getContact(fromId);
+        if (existing == null) {
+          final btName = BleService.instance.getDeviceName(fromId);
+          final displayName = btName.isNotEmpty && btName != fromId.substring(0, btName.length.clamp(0, fromId.length))
+              ? btName
+              : '${fromId.substring(0, 8)}...';
+          await ChatStorageService.instance.saveContact(Contact(
+            publicKeyHex: fromId,
+            nickname: displayName,
+            avatarColor: 0xFF607D8B,
+            avatarEmoji: '',
+            addedAt: now,
           ));
+          debugPrint('[Main] Auto-created stranger contact: $displayName');
         }
+
+        // Сохраняем сообщение в БД немедленно (peerId = fromId = public key)
+        await ChatStorageService.instance.saveMessage(ChatMessage(
+          id: msgId,
+          peerId: fromId,
+          text: text,
+          isOutgoing: false,
+          timestamp: now,
+          status: MessageStatus.delivered,
+        ));
+
+        debugPrint('[Main] Adding to stream: fromId=${fromId.substring(0, 16)}');
+        incomingMessageController.add(IncomingMessage(
+          fromId: fromId,
+          text: text,
+          timestamp: now,
+          msgId: msgId,
+        ));
       },
       onForward: (packet) async {
         await BleService.instance.broadcastPacket(packet);
@@ -91,7 +126,16 @@ Future<void> initServices() async {
           debugPrint(
               '[Profile] Auto-saved contact: $nick (key: ${publicKey.substring(0, 8)}...)');
         } else {
-          await ChatStorageService.instance.updateContactLastSeen(publicKey);
+          // Обновляем профиль — ник/цвет/эмодзи могли измениться
+          await ChatStorageService.instance.updateContact(Contact(
+            publicKeyHex: publicKey,
+            nickname: nick,
+            avatarColor: color,
+            avatarEmoji: emoji,
+            addedAt: existing.addedAt,
+          ));
+          debugPrint(
+              '[Profile] Updated contact: $nick (key: ${publicKey.substring(0, 8)}...)');
         }
       },
     );

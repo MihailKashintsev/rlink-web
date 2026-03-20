@@ -136,6 +136,9 @@ class SettingsScreen extends StatelessWidget {
       await BleService.instance.stop();
     } catch (_) {}
 
+    // 1b. Очищаем BLE маппинги ключей
+    BleService.instance.clearMappings();
+
     // 2. Сбрасываем БД через сервис (закрываем соединение, чистим кэш, удаляем файл)
     await ChatStorageService.instance.resetAll();
 

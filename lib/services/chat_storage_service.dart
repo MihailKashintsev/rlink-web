@@ -21,6 +21,8 @@ class ChatStorageService {
 
   Future<void> resetAll() async {
     await close();
+    // Очищаем кэш нотификаторов сообщений
+    _messagesNotifiers.clear();
     final dir = await getApplicationDocumentsDirectory();
     final path = join(dir.path, 'rlink.db');
     final file = File(path);
@@ -88,6 +90,21 @@ class ChatStorageService {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  Future<void> updateContact(Contact contact) async {
+    await _db?.update(
+      'contacts',
+      {
+        'nick': contact.nickname,
+        'color': contact.avatarColor,
+        'emoji': contact.avatarEmoji,
+        'last_seen': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [contact.publicKeyHex],
+    );
+    _contactsNotifier.value = await getContacts();
   }
 
   final _contactsNotifier = ValueNotifier<List<Contact>>([]);
