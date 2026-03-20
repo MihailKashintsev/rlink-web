@@ -32,7 +32,10 @@ class ChatStorageService {
   Future<void> init() async {
     final dir = await getApplicationDocumentsDirectory();
     final path = join(dir.path, 'rlink.db');
-    _db = await openDatabase(path, version: 1, onCreate: (db, v) async {
+    _db = await openDatabase(
+      path,
+      version: 2,
+      onCreate: (db, v) async {
       await db.execute('''
         CREATE TABLE contacts (
           id        TEXT PRIMARY KEY,
@@ -48,6 +51,7 @@ class ChatStorageService {
           id          TEXT PRIMARY KEY,
           peer_id     TEXT NOT NULL,
           text        TEXT NOT NULL,
+          reply_to_message_id TEXT,
           is_outgoing INTEGER NOT NULL,
           timestamp   INTEGER NOT NULL,
           status      INTEGER NOT NULL DEFAULT 1
@@ -55,7 +59,20 @@ class ChatStorageService {
       ''');
       await db.execute(
           'CREATE INDEX idx_messages_peer ON messages(peer_id, timestamp)');
-    });
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        // Phase 2: add reply_to_message_id column.
+        if (oldVersion < 2) {
+          try {
+            await db.execute(
+              'ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT',
+            );
+          } catch (_) {
+            // ignore: column may already exist
+          }
+        }
+      },
+    );
     debugPrint('[DB] Initialized');
   }
 
@@ -120,6 +137,89 @@ class ChatStorageService {
     await _db?.insert('messages', message.toMap(),
         conflictAlgorithm: ConflictAlgorithm.replace);
     _notifyMessages(message.peerId);
+  }
+
+  Future<void> editMessage(String messageId, String newText) async {
+    final peerId = await _getPeerIdForMessage(messageId);
+    if (peerId == null) return;
+    await _db?.update(
+      'messages',
+      {'text': newText},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _notifyMessages(peerId);
+  }
+
+  Future<void> deleteMessage(String messageId) async {
+    final peerId = await _getPeerIdForMessage(messageId);
+    if (peerId == null) return;
+    await _db?.delete(
+      'messages',
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _notifyMessages(peerId);
+  }
+
+  Future<String?> _getPeerIdForMessage(String messageId) async {
+    final rows = await _db?.query(
+      'messages',
+      columns: const ['peer_id'],
+      where: 'id = ?',
+      whereArgs: [messageId],
+      limit: 1,
+    );
+    if (rows == null || rows.isEmpty) return null;
+    return rows.first['peer_id'] as String;
+  }
+
+  Future<void> updateMessageStatus(
+    String messageId,
+    MessageStatus status,
+  ) async {
+    final rows = await _db?.query(
+      'messages',
+      columns: ['peer_id'],
+      where: 'id = ?',
+      whereArgs: [messageId],
+      limit: 1,
+    );
+    if (rows == null || rows.isEmpty) return;
+    final peerId = rows.first['peer_id'] as String;
+
+    await _db?.update(
+      'messages',
+      {'status': status.index},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _notifyMessages(peerId);
+  }
+
+  Future<void> updateMessageStatusPreserveDelivered(
+    String messageId,
+    MessageStatus status,
+  ) async {
+    final deliveredIndex = MessageStatus.delivered.index;
+
+    final updated = await _db?.update(
+      'messages',
+      {'status': status.index},
+      where: 'id = ? AND status != ?',
+      whereArgs: [messageId, deliveredIndex],
+    );
+    if (updated == null || updated == 0) return;
+
+    final rows = await _db?.query(
+      'messages',
+      columns: ['peer_id'],
+      where: 'id = ?',
+      whereArgs: [messageId],
+      limit: 1,
+    );
+    if (rows == null || rows.isEmpty) return;
+    _notifyMessages(rows.first['peer_id'] as String);
   }
 
   Future<List<ChatMessage>> getMessages(String peerId,

@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:uuid/uuid.dart';
 
 import 'models/chat_message.dart';
 import 'models/contact.dart';
@@ -19,7 +18,6 @@ import 'ui/screens/onboarding_screen.dart';
 
 final incomingMessageController = StreamController<IncomingMessage>.broadcast();
 final pendingUpdateNotifier = ValueNotifier<UpdateInfo?>(null);
-const _uuid = Uuid();
 
 class IncomingMessage {
   final String fromId; // Ed25519 public key отправителя
@@ -47,7 +45,7 @@ Future<void> initServices() async {
 
     GossipRouter.instance.init(
       myKey: CryptoService.instance.publicKeyHex,
-      onMessage: (fromId, encrypted) async {
+      onMessage: (fromId, encrypted, messageId, replyToMessageId) async {
         debugPrint(
             '[Main] onMessage fromId=${fromId.substring(0, 16)} ephemeral=${encrypted.ephemeralPublicKey.isEmpty ? "empty" : "set"}');
 
@@ -62,7 +60,7 @@ Future<void> initServices() async {
         }
 
         final now = DateTime.now();
-        final msgId = _uuid.v4();
+        final msgId = messageId;
 
         // Если незнакомец — автоматически создаём временный контакт
         final existing =
@@ -87,10 +85,18 @@ Future<void> initServices() async {
           id: msgId,
           peerId: fromId,
           text: text,
+          replyToMessageId: replyToMessageId,
           isOutgoing: false,
           timestamp: now,
           status: MessageStatus.delivered,
         ));
+
+        // Notify sender that we have stored the message.
+        await GossipRouter.instance.sendAck(
+          messageId: msgId,
+          senderId: CryptoService.instance.publicKeyHex,
+          recipientId: fromId,
+        );
 
         debugPrint('[Main] Adding to stream: fromId=${fromId.substring(0, 16)}');
         incomingMessageController.add(IncomingMessage(
@@ -100,8 +106,22 @@ Future<void> initServices() async {
           msgId: msgId,
         ));
       },
+      onAck: (fromId, messageId) async {
+        // fromId reserved for protocol symmetry; keep referenced to satisfy lints.
+        if (fromId.isEmpty) return;
+        await ChatStorageService.instance.updateMessageStatus(
+          messageId,
+          MessageStatus.delivered,
+        );
+      },
       onForward: (packet) async {
         await BleService.instance.broadcastPacket(packet);
+      },
+      onEdit: (fromId, messageId, newText) async {
+        await ChatStorageService.instance.editMessage(messageId, newText);
+      },
+      onDelete: (fromId, messageId) async {
+        await ChatStorageService.instance.deleteMessage(messageId);
       },
       // bleId — BLE device ID отправителя (для маппинга)
       // publicKey — Ed25519 ключ из профиля

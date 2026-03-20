@@ -2,6 +2,7 @@ class ChatMessage {
   final String id;
   final String peerId;      // ID собеседника
   final String text;
+  final String? replyToMessageId; // ID сообщения, на которое отвечают
   final bool isOutgoing;
   final DateTime timestamp;
   final MessageStatus status;
@@ -10,14 +11,19 @@ class ChatMessage {
     required this.id,
     required this.peerId,
     required this.text,
+    this.replyToMessageId,
     required this.isOutgoing,
     required this.timestamp,
     this.status = MessageStatus.sent,
   });
 
   ChatMessage copyWith({MessageStatus? status}) => ChatMessage(
-        id: id, peerId: peerId, text: text,
-        isOutgoing: isOutgoing, timestamp: timestamp,
+        id: id,
+        peerId: peerId,
+        text: text,
+        replyToMessageId: replyToMessageId,
+        isOutgoing: isOutgoing,
+        timestamp: timestamp,
         status: status ?? this.status,
       );
 
@@ -25,6 +31,7 @@ class ChatMessage {
         'id':          id,
         'peer_id':     peerId,
         'text':        text,
+        'reply_to_message_id': replyToMessageId,
         'is_outgoing': isOutgoing ? 1 : 0,
         'timestamp':   timestamp.millisecondsSinceEpoch,
         'status':      status.index,
@@ -34,6 +41,7 @@ class ChatMessage {
         id:          m['id']          as String,
         peerId:      m['peer_id']     as String,
         text:        m['text']        as String,
+        replyToMessageId: m['reply_to_message_id'] as String?,
         isOutgoing:  (m['is_outgoing'] as int) == 1,
         timestamp:   DateTime.fromMillisecondsSinceEpoch(m['timestamp'] as int),
         status:      MessageStatus.values[m['status'] as int],

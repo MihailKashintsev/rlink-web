@@ -70,11 +70,24 @@ class GossipPacket {
       DateTime.now().millisecondsSinceEpoch - timestamp > 3600 * 1000;
 }
 
-typedef OnMessageReceived = void Function(String fromId, EncryptedMessage msg);
+typedef OnMessageReceived = Future<void> Function(
+  String fromId,
+  EncryptedMessage msg,
+  String messageId,
+  String? replyToMessageId,
+);
+typedef OnAckReceived = void Function(String fromId, String messageId);
 typedef OnForwardPacket = Future<void> Function(GossipPacket packet);
 // bleId — BLE device ID источника (для маппинга), publicKey — Ed25519 ключ
 typedef OnProfileReceived = void Function(
     String bleId, String publicKey, String nick, int color, String emoji);
+
+typedef OnEditReceived = Future<void> Function(
+  String fromId,
+  String messageId,
+  String newText,
+);
+typedef OnDeleteReceived = Future<void> Function(String fromId, String messageId);
 
 class GossipRouter {
   // Публичный ключ этого устройства — устанавливается при инициализации
@@ -87,19 +100,28 @@ class GossipRouter {
   Timer? _cleanupTimer;
 
   OnMessageReceived? onMessageReceived;
+  OnAckReceived? onAckReceived;
   OnForwardPacket? onForwardPacket;
   OnProfileReceived? onProfileReceived;
+  OnEditReceived? onEditReceived;
+  OnDeleteReceived? onDeleteReceived;
 
   void init({
     String? myKey,
     required OnMessageReceived onMessage,
+    OnAckReceived? onAck,
     required OnForwardPacket onForward,
     OnProfileReceived? onProfile,
+    OnEditReceived? onEdit,
+    OnDeleteReceived? onDelete,
   }) {
     myPublicKey = myKey;
     onMessageReceived = onMessage;
+    onAckReceived = onAck;
     onForwardPacket = onForward;
     onProfileReceived = onProfile;
+    onEditReceived = onEdit;
+    onDeleteReceived = onDelete;
     _cleanupTimer =
         Timer.periodic(const Duration(minutes: 10), (_) => _cleanup());
   }
@@ -113,18 +135,80 @@ class GossipRouter {
     required String text,
     required String senderId,
     String? recipientId,
+    String? messageId,
+    String? replyToMessageId,
   }) async {
     final packet = GossipPacket(
-      id: _uuid.v4(),
+      id: messageId ?? _uuid.v4(),
       type: 'raw',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
       recipientId: recipientId,
-      payload: {'text': text, 'from': senderId},
+      payload: {
+        'text': text,
+        'from': senderId,
+        if (replyToMessageId != null) 'replyToMessageId': replyToMessageId,
+      },
     );
     _markSeen(packet.id);
     await _forward(packet);
     return packet;
+  }
+
+  Future<void> sendAck({
+    required String messageId,
+    required String senderId,
+    required String recipientId,
+  }) async {
+    final packet = GossipPacket(
+      id: _uuid.v4(), // ACK packet id must be different (seen-cache dedup)
+      type: 'ack',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
+      payload: {'messageId': messageId, 'from': senderId},
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
+  }
+
+  Future<void> sendEditMessage({
+    required String messageId,
+    required String newText,
+    required String senderId,
+    required String recipientId,
+  }) async {
+    final packet = GossipPacket(
+      id: _uuid.v4(), // separate packet id for dedup
+      type: 'edit',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
+      payload: {
+        'messageId': messageId,
+        'text': newText,
+        'from': senderId,
+      },
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
+  }
+
+  Future<void> sendDeleteMessage({
+    required String messageId,
+    required String senderId,
+    required String recipientId,
+  }) async {
+    final packet = GossipPacket(
+      id: _uuid.v4(), // separate packet id for dedup
+      type: 'delete',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
+      payload: {'messageId': messageId, 'from': senderId},
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
   }
 
   Future<void> broadcastProfile({
@@ -164,24 +248,28 @@ class GossipRouter {
 
   Future<void> _handleIncoming(GossipPacket packet, {String? sourceId}) async {
     try {
+      // Point-to-point filtering for packets that include recipientId.
+      final rid = packet.recipientId;
+      if (rid != null &&
+          rid.isNotEmpty &&
+          myPublicKey != null &&
+          rid != myPublicKey) {
+        debugPrint('[Gossip] Message for $rid — not for us, skip');
+        return;
+      }
+
       if (packet.type == 'raw') {
         final text = packet.payload['text'] as String?;
         final from = packet.payload['from'] as String? ?? 'unknown';
-
-        // Фильтрация получателя: если recipientId задан — принимаем только если это мы
-        final rid = packet.recipientId;
-        if (rid != null &&
-            rid.isNotEmpty &&
-            myPublicKey != null &&
-            rid != myPublicKey) {
-          debugPrint('[Gossip] Message for $rid — not for us, skip');
-          return;
-        }
+        final replyToMessageId =
+            packet.payload['replyToMessageId'] as String?;
 
         debugPrint(
             '[Gossip] Raw message from=$from text=${text?.substring(0, text.length > 20 ? 20 : text.length)}');
         if (text != null) {
-          onMessageReceived?.call(
+          final handler = onMessageReceived;
+          if (handler != null) {
+            await handler(
               from,
               EncryptedMessage(
                 senderPublicKey: from,
@@ -190,7 +278,45 @@ class GossipRouter {
                 cipherText: text,
                 mac: '',
                 signature: '',
-              ));
+              ),
+              packet.id,
+              replyToMessageId,
+            );
+          }
+        }
+        return;
+      }
+
+      if (packet.type == 'ack') {
+        final ackMessageId = packet.payload['messageId'] as String?;
+        final from = packet.payload['from'] as String? ?? 'unknown';
+        if (ackMessageId != null) {
+          onAckReceived?.call(from, ackMessageId);
+        }
+        return;
+      }
+
+      if (packet.type == 'edit') {
+        final messageId = packet.payload['messageId'] as String?;
+        final from = packet.payload['from'] as String? ?? 'unknown';
+        final text = packet.payload['text'] as String?;
+        if (messageId != null && text != null) {
+          final handler = onEditReceived;
+          if (handler != null) {
+            await handler(from, messageId, text);
+          }
+        }
+        return;
+      }
+
+      if (packet.type == 'delete') {
+        final messageId = packet.payload['messageId'] as String?;
+        final from = packet.payload['from'] as String? ?? 'unknown';
+        if (messageId != null) {
+          final handler = onDeleteReceived;
+          if (handler != null) {
+            await handler(from, messageId);
+          }
         }
         return;
       }
@@ -212,7 +338,15 @@ class GossipRouter {
 
       if (packet.type == 'msg') {
         final encrypted = EncryptedMessage.fromJson(packet.payload);
-        onMessageReceived?.call(encrypted.senderPublicKey, encrypted);
+        final handler = onMessageReceived;
+        if (handler != null) {
+          await handler(
+            encrypted.senderPublicKey,
+            encrypted,
+            packet.id,
+            null,
+          );
+        }
       }
     } catch (e) {
       debugPrint('[Gossip] Failed to parse payload: $e');

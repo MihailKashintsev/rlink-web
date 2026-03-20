@@ -37,8 +37,29 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<IncomingMessage>? _msgSub;
   // Резолвленный публичный ключ пира (может отличаться от widget.peerId если тот BLE UUID)
   late String _resolvedPeerId;
+  String? _replyToMessageId;
+  String? _replyPreviewText;
+  String? _editingMessageId;
+  String? _editingPreviewText;
 
   static const _kMaxMessageLength = 280;
+  static final _publicKeyRegExp = RegExp(r'^[0-9a-fA-F]{64}$');
+
+  bool _looksLikePublicKey(String id) =>
+      _publicKeyRegExp.hasMatch(id.trim());
+
+  Future<bool> _waitForPeerPublicKey({Duration timeout = const Duration(seconds: 6)}) async {
+    final deadline = DateTime.now().add(timeout);
+    while (mounted && DateTime.now().isBefore(deadline)) {
+      final resolved = BleService.instance.resolvePublicKey(widget.peerId);
+      if (_looksLikePublicKey(resolved)) {
+        setState(() => _resolvedPeerId = resolved);
+        return true;
+      }
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+    return false;
+  }
 
   @override
   void initState() {
@@ -106,33 +127,83 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     setState(() => _isSending = true);
-    _controller.clear();
 
-    final msgId = _uuid.v4();
-    final msg = ChatMessage(
-      id: msgId,
-      peerId: _resolvedPeerId,
-      text: text,
-      isOutgoing: true,
-      timestamp: DateTime.now(),
-      status: MessageStatus.sending,
-    );
-    await ChatStorageService.instance.saveMessage(msg);
-    _scrollToBottom();
-
+    String? msgId;
     try {
-      // senderId = наш публичный ключ, recipientId = публичный ключ получателя
+      // Peer id might be a BLE UUID until profiles exchange completes.
+      if (!_looksLikePublicKey(_resolvedPeerId)) {
+        final ok = await _waitForPeerPublicKey();
+        if (!ok) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Подождите — идёт обмен профилями'),
+              ),
+            );
+          }
+          return;
+        }
+      }
+
+      // 1) Edit mode: send edit packet for an existing outgoing message.
+      if (_editingMessageId != null) {
+        final targetId = _editingMessageId!;
+        await GossipRouter.instance.sendEditMessage(
+          messageId: targetId,
+          newText: text,
+          senderId: CryptoService.instance.publicKeyHex,
+          recipientId: _resolvedPeerId,
+        );
+        await ChatStorageService.instance.editMessage(targetId, text);
+        if (!mounted) return;
+        _controller.clear();
+        _cancelEdit();
+        return;
+      }
+
+      // 2) Normal mode: send raw message (optionally as a reply).
+      _controller.clear();
+      msgId = _uuid.v4();
+      final msg = ChatMessage(
+        id: msgId,
+        peerId: _resolvedPeerId,
+        text: text,
+        replyToMessageId: _replyToMessageId,
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: MessageStatus.sending,
+      );
+      await ChatStorageService.instance.saveMessage(msg);
+      _scrollToBottom();
+
       await GossipRouter.instance.sendRawMessage(
         text: text,
         senderId: CryptoService.instance.publicKeyHex,
         recipientId: _resolvedPeerId,
+        messageId: msgId,
+        replyToMessageId: _replyToMessageId,
       );
-      await ChatStorageService.instance
-          .saveMessage(msg.copyWith(status: MessageStatus.sent));
+
+      await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
+        msgId,
+        MessageStatus.sent,
+      );
+
+      // Clear reply composer after successful send.
+      if (mounted) {
+        setState(() {
+          _replyToMessageId = null;
+          _replyPreviewText = null;
+        });
+      }
     } catch (e) {
-      await ChatStorageService.instance
-          .saveMessage(msg.copyWith(status: MessageStatus.failed));
       if (!mounted) return;
+      if (msgId != null) {
+        await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
+          msgId,
+          MessageStatus.failed,
+        );
+      }
       // ignore: use_build_context_synchronously
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
@@ -152,6 +223,133 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
     });
+  }
+
+  void _startReply(ChatMessage msg) {
+    setState(() {
+      _editingMessageId = null;
+      _editingPreviewText = null;
+      _replyToMessageId = msg.id;
+      _replyPreviewText = msg.text;
+    });
+  }
+
+  void _cancelReply() {
+    setState(() {
+      _replyToMessageId = null;
+      _replyPreviewText = null;
+    });
+  }
+
+  void _startEdit(ChatMessage msg) {
+    setState(() {
+      _replyToMessageId = null;
+      _replyPreviewText = null;
+      _editingMessageId = msg.id;
+      _editingPreviewText = msg.text;
+      _controller.text = msg.text;
+      _controller.selection = TextSelection.collapsed(
+        offset: _controller.text.length,
+      );
+    });
+  }
+
+  void _cancelEdit() {
+    setState(() {
+      _editingMessageId = null;
+      _editingPreviewText = null;
+      _controller.clear();
+    });
+  }
+
+  Future<void> _confirmAndDelete(ChatMessage msg) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Удалить сообщение?'),
+        content: const Text('Сообщение исчезнет у собеседника.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    setState(() {
+      if (_replyToMessageId == msg.id) {
+        _replyToMessageId = null;
+        _replyPreviewText = null;
+      }
+      if (_editingMessageId == msg.id) {
+        _editingMessageId = null;
+        _editingPreviewText = null;
+        _controller.clear();
+      }
+    });
+
+    try {
+      // Удаляем локально для мгновенного отклика.
+      await ChatStorageService.instance.deleteMessage(msg.id);
+      // Просим получателя удалить копию.
+      await GossipRouter.instance.sendDeleteMessage(
+        messageId: msg.id,
+        senderId: CryptoService.instance.publicKeyHex,
+        recipientId: _resolvedPeerId,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка удаления: $e'), backgroundColor: Colors.red),
+      );
+      // Возвращаем UI в согласованное состояние.
+      await ChatStorageService.instance.loadMessages(_resolvedPeerId);
+    }
+  }
+
+  Future<void> _onLongPressMessage(ChatMessage msg) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.reply),
+              title: const Text('Ответить'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _startReply(msg);
+              },
+            ),
+            if (msg.isOutgoing) ...[
+              ListTile(
+                leading: const Icon(Icons.edit),
+                title: const Text('Редактировать'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _startEdit(msg);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: const Text('Удалить'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _confirmAndDelete(msg);
+                },
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -219,6 +417,9 @@ class _ChatScreenState extends State<ChatScreen> {
                       style: TextStyle(color: Colors.grey.shade600)),
                 );
               }
+              final messageTextById = <String, String>{
+                for (final m in messages) m.id: m.text,
+              };
               return ListView.builder(
                 controller: _scrollController,
                 padding: const EdgeInsets.symmetric(vertical: 8),
@@ -229,13 +430,75 @@ class _ChatScreenState extends State<ChatScreen> {
                       !_sameDay(messages[i - 1].timestamp, msg.timestamp);
                   return Column(children: [
                     if (showDate) _DateDivider(date: msg.timestamp),
-                    _MessageBubble(msg: msg),
+                    GestureDetector(
+                      onLongPress: () => _onLongPressMessage(msg),
+                      child: _MessageBubble(
+                        msg: msg,
+                        replyPreviewText: msg.replyToMessageId == null
+                            ? null
+                            : messageTextById[msg.replyToMessageId],
+                      ),
+                    ),
                   ]);
                 },
               );
             },
           ),
         ),
+        if (_editingMessageId != null || _replyToMessageId != null)
+          Padding(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF121212),
+                border: Border.all(color: Colors.grey.shade800),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _editingMessageId != null
+                            ? 'Редактирование'
+                            : 'Ответ',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade400,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        (_editingMessageId != null
+                                ? _editingPreviewText
+                                : _replyPreviewText) ??
+                            '',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: () {
+                    if (_editingMessageId != null) {
+                      _cancelEdit();
+                    } else {
+                      _cancelReply();
+                    }
+                  },
+                  icon: const Icon(Icons.close, size: 18),
+                  color: Colors.grey.shade400,
+                ),
+              ]),
+            ),
+          ),
         _InputBar(
           controller: _controller,
           isSending: _isSending,
@@ -286,7 +549,12 @@ class _DateDivider extends StatelessWidget {
 
 class _MessageBubble extends StatelessWidget {
   final ChatMessage msg;
-  const _MessageBubble({required this.msg});
+  final String? replyPreviewText;
+
+  const _MessageBubble({
+    required this.msg,
+    this.replyPreviewText,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -308,29 +576,71 @@ class _MessageBubble extends StatelessWidget {
             bottomRight: Radius.circular(isOut ? 4 : 18),
           ),
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Text(
-            msg.text,
-            style: TextStyle(
-              color: isOut ? Colors.white : cs.onSurface,
-              fontSize: 15,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Row(mainAxisSize: MainAxisSize.min, children: [
+        child: Column(
+          crossAxisAlignment:
+              isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            if (msg.replyToMessageId != null)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: isOut
+                      ? Colors.black.withOpacity(0.18)
+                      : Colors.white.withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Ответ',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: isOut ? Colors.white70 : Colors.grey.shade400,
+                      ),
+                    ),
+                    Text(
+                      replyPreviewText ?? '...',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isOut ? Colors.white : cs.onSurface.withOpacity(0.9),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             Text(
-              _fmt(msg.timestamp),
+              msg.text,
               style: TextStyle(
-                fontSize: 10,
-                color: isOut ? Colors.white70 : Colors.grey.shade600,
+                color: isOut ? Colors.white : cs.onSurface,
+                fontSize: 15,
               ),
             ),
-            if (isOut) ...[
-              const SizedBox(width: 4),
-              _statusIcon(msg.status),
-            ],
-          ]),
-        ]),
+            const SizedBox(height: 2),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _fmt(msg.timestamp),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: isOut ? Colors.white70 : Colors.grey.shade600,
+                  ),
+                ),
+                if (isOut) ...[
+                  const SizedBox(width: 4),
+                  _statusIcon(msg.status),
+                ],
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
