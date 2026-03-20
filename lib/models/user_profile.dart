@@ -5,12 +5,14 @@ class UserProfile {
   final String nickname;
   final int avatarColor;
   final String avatarEmoji;
+  final String? avatarImagePath; // локальный путь к фото аватара
 
   const UserProfile({
     required this.publicKeyHex,
     required this.nickname,
     required this.avatarColor,
     required this.avatarEmoji,
+    this.avatarImagePath,
   });
 
   String get initials {
@@ -28,13 +30,15 @@ class UserProfile {
         'nick':  nickname,
         'color': avatarColor,
         'emoji': avatarEmoji,
+        if (avatarImagePath != null) 'imgPath': avatarImagePath,
       };
 
   factory UserProfile.fromJson(Map<String, dynamic> j) => UserProfile(
-        publicKeyHex: j['id']    as String,
-        nickname:     j['nick']  as String,
-        avatarColor:  j['color'] as int,
-        avatarEmoji:  j['emoji'] as String,
+        publicKeyHex:    j['id']      as String,
+        nickname:        j['nick']    as String,
+        avatarColor:     j['color']   as int,
+        avatarEmoji:     j['emoji']   as String,
+        avatarImagePath: j['imgPath'] as String?,
       );
 
   String encode() => jsonEncode(toJson());

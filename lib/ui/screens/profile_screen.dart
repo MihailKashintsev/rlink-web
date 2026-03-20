@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 
+import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
 import '../widgets/avatar_widget.dart';
 
@@ -15,9 +17,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late TextEditingController _controller;
   late int _selectedColor;
   late String _selectedEmoji;
+  String? _selectedImagePath; // null = без изменений
   bool _editing = false;
   bool _saving = false;
   bool _showEmojiPicker = false;
+
+  final _picker = ImagePicker();
 
   @override
   void initState() {
@@ -26,6 +31,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _controller = TextEditingController(text: p.nickname);
     _selectedColor = p.avatarColor;
     _selectedEmoji = p.avatarEmoji;
+    _selectedImagePath = p.avatarImagePath;
+  }
+
+  Future<void> _pickImage() async {
+    final picked = await _picker.pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
+    final path = await ImageService.instance.compressAndSave(
+      picked.path,
+      isAvatar: true,
+    );
+    setState(() => _selectedImagePath = path);
   }
 
   @override
@@ -38,9 +54,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() => _saving = true);
     try {
       await ProfileService.instance.updateProfile(
-        nickname: _controller.text.trim(),
-        avatarColor: _selectedColor,
-        avatarEmoji: _selectedEmoji,
+        nickname:        _controller.text.trim(),
+        avatarColor:     _selectedColor,
+        avatarEmoji:     _selectedEmoji,
+        avatarImagePath: _selectedImagePath,
       );
       setState(() { _editing = false; _showEmojiPicker = false; });
     } finally {
@@ -76,22 +93,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
         child: Column(children: [
           // Аватар
           Center(
-            child: GestureDetector(
-              onTap: _editing
-                  ? () => setState(() => _showEmojiPicker = !_showEmojiPicker)
-                  : null,
-              child: Stack(children: [
-                AvatarWidget(
+            child: Stack(children: [
+              GestureDetector(
+                onTap: _editing
+                    ? () => setState(() => _showEmojiPicker = !_showEmojiPicker)
+                    : null,
+                child: AvatarWidget(
                   initials: (_editing && _controller.text.isNotEmpty)
                       ? _controller.text[0].toUpperCase()
                       : profile.initials,
                   color: _editing ? _selectedColor : profile.avatarColor,
                   emoji: _editing ? _selectedEmoji : profile.avatarEmoji,
+                  imagePath: _editing ? _selectedImagePath : profile.avatarImagePath,
                   size: 88,
                 ),
-                if (_editing)
-                  Positioned(
-                    right: 0, bottom: 0,
+              ),
+              if (_editing) ...[
+                // Кнопка смены эмодзи
+                Positioned(
+                  right: 0, bottom: 0,
+                  child: GestureDetector(
+                    onTap: () => setState(() => _showEmojiPicker = !_showEmojiPicker),
                     child: Container(
                       width: 28, height: 28,
                       decoration: BoxDecoration(
@@ -102,8 +124,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       child: const Icon(Icons.edit, size: 14, color: Colors.white),
                     ),
                   ),
-              ]),
-            ),
+                ),
+                // Кнопка выбора фото
+                Positioned(
+                  left: 0, bottom: 0,
+                  child: GestureDetector(
+                    onTap: _pickImage,
+                    child: Container(
+                      width: 28, height: 28,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade800,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: const Color(0xFF0A0A0A), width: 2),
+                      ),
+                      child: const Icon(Icons.photo_camera, size: 14, color: Colors.white),
+                    ),
+                  ),
+                ),
+              ],
+            ]),
           ),
           const SizedBox(height: 20),
 
@@ -120,7 +159,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         color: const Color(0xFF1A1A1A),
                         borderRadius: BorderRadius.circular(14),
                       ),
-                      child: EmojiPicker(
+                      child: AvatarEmojiPicker(
                         selected: _selectedEmoji,
                         onSelected: (e) => setState(() {
                           _selectedEmoji = e;

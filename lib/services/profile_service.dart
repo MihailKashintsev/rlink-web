@@ -55,13 +55,15 @@ class ProfileService {
     String? nickname,
     int? avatarColor,
     String? avatarEmoji,
+    String? avatarImagePath,
   }) async {
     if (_profile == null) throw StateError('No profile');
     final updated = UserProfile(
-      publicKeyHex: _profile!.publicKeyHex,
-      nickname:     nickname     ?? _profile!.nickname,
-      avatarColor:  avatarColor  ?? _profile!.avatarColor,
-      avatarEmoji:  avatarEmoji  ?? _profile!.avatarEmoji,
+      publicKeyHex:    _profile!.publicKeyHex,
+      nickname:        nickname        ?? _profile!.nickname,
+      avatarColor:     avatarColor     ?? _profile!.avatarColor,
+      avatarEmoji:     avatarEmoji     ?? _profile!.avatarEmoji,
+      avatarImagePath: avatarImagePath ?? _profile!.avatarImagePath,
     );
     await _storage.write(key: _kProfileKey, value: updated.encode());
     _profile = updated;

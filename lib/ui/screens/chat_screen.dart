@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../main.dart';
@@ -9,6 +11,7 @@ import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
+import '../../services/image_service.dart';
 import '../widgets/avatar_widget.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -33,6 +36,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _uuid = const Uuid();
+  final _picker = ImagePicker();
   bool _isSending = false;
   StreamSubscription<IncomingMessage>? _msgSub;
   // Резолвленный публичный ключ пира (может отличаться от widget.peerId если тот BLE UUID)
@@ -208,6 +212,70 @@ class _ChatScreenState extends State<ChatScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
       );
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _sendImage() async {
+    if (_isSending) return;
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
+          );
+        }
+        return;
+      }
+    }
+
+    final picked = await _picker.pickImage(source: ImageSource.gallery);
+    if (picked == null || !mounted) return;
+
+    setState(() => _isSending = true);
+    try {
+      final path = await ImageService.instance.compressAndSave(picked.path);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final msgId = _uuid.v4();
+      final myId = CryptoService.instance.publicKeyHex;
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        recipientId: _resolvedPeerId,
+        isAvatar: false,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+          recipientId: _resolvedPeerId,
+        );
+      }
+
+      final msg = ChatMessage(
+        id: msgId,
+        peerId: _resolvedPeerId,
+        text: '',
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: MessageStatus.sent,
+        imagePath: path,
+      );
+      await ChatStorageService.instance.saveMessage(msg);
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
@@ -504,6 +572,7 @@ class _ChatScreenState extends State<ChatScreen> {
           isSending: _isSending,
           maxLength: _kMaxMessageLength,
           onSend: _send,
+          onPickImage: _sendImage,
         ),
       ]),
     );
@@ -580,6 +649,18 @@ class _MessageBubble extends StatelessWidget {
           crossAxisAlignment:
               isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
+            if (msg.imagePath != null && File(msg.imagePath!).existsSync())
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.file(
+                    File(msg.imagePath!),
+                    width: 220,
+                    fit: BoxFit.cover,
+                  ),
+                ),
+              ),
             if (msg.replyToMessageId != null)
               Container(
                 width: double.infinity,
@@ -673,12 +754,14 @@ class _InputBar extends StatefulWidget {
   final bool isSending;
   final int maxLength;
   final VoidCallback onSend;
+  final VoidCallback onPickImage;
 
   const _InputBar({
     required this.controller,
     required this.isSending,
     required this.maxLength,
     required this.onSend,
+    required this.onPickImage,
   });
 
   @override
@@ -709,6 +792,14 @@ class _InputBarState extends State<_InputBar> {
           border: Border(top: BorderSide(color: Colors.grey.shade800)),
         ),
         child: Row(children: [
+          IconButton(
+            onPressed: widget.isSending ? null : widget.onPickImage,
+            icon: const Icon(Icons.photo_outlined),
+            color: Colors.grey.shade500,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+          ),
+          const SizedBox(width: 4),
           Expanded(
             child: Container(
               decoration: BoxDecoration(

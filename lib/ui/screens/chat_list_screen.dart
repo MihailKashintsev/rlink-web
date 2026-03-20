@@ -91,6 +91,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                     initials: profile.initials,
                     color: profile.avatarColor,
                     emoji: profile.avatarEmoji,
+                    imagePath: profile.avatarImagePath,
                     size: 36,
                   )
                 : const Icon(Icons.account_circle),
@@ -180,6 +181,7 @@ class _ChatsTabState extends State<_ChatsTab> {
         nickname: contact?.nickname ?? '${peerId.substring(0, 8)}...',
         avatarColor: contact?.avatarColor ?? 0xFF607D8B,
         avatarEmoji: contact?.avatarEmoji ?? '',
+        avatarImagePath: contact?.avatarImagePath,
         lastMessage: last.text,
         lastTime: last.timestamp,
         isOnline: BleService.instance.isPeerConnected(peerId),
@@ -215,6 +217,7 @@ class _ChatsTabState extends State<_ChatsTab> {
             initials: item.nickname[0].toUpperCase(),
             color: item.avatarColor,
             emoji: item.avatarEmoji,
+            imagePath: item.avatarImagePath,
             size: 48,
             isOnline: item.isOnline,
           ),
@@ -254,6 +257,7 @@ class _ChatsTabState extends State<_ChatsTab> {
 class _ChatItem {
   final String peerId, nickname, lastMessage, avatarEmoji;
   final int avatarColor;
+  final String? avatarImagePath;
   final DateTime lastTime;
   final bool isOnline;
   const _ChatItem({
@@ -261,6 +265,7 @@ class _ChatItem {
     required this.nickname,
     required this.avatarColor,
     required this.avatarEmoji,
+    this.avatarImagePath,
     required this.lastMessage,
     required this.lastTime,
     required this.isOnline,
@@ -361,23 +366,22 @@ class _NearbyDeviceTile extends StatelessWidget {
   final String publicKeyOrBleId;
   const _NearbyDeviceTile({required this.publicKeyOrBleId});
 
-  Future<Contact?> _resolveContact() async {
-    // Try by public key first (if we have the mapping)
+  Contact? _findContact(List<Contact> contacts) {
     final publicKey = BleService.instance.resolvePublicKey(publicKeyOrBleId);
-    if (publicKey != publicKeyOrBleId) {
-      final c = await ChatStorageService.instance.getContact(publicKey);
-      if (c != null) return c;
+    for (final c in contacts) {
+      if (c.publicKeyHex == publicKey || c.publicKeyHex == publicKeyOrBleId) {
+        return c;
+      }
     }
-    return ChatStorageService.instance.getContact(publicKeyOrBleId);
+    return null;
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<Contact?>(
-      future: _resolveContact(),
-      builder: (_, snap) {
-        final contact = snap.data;
-        // Priority: registered nickname > BT device name > short ID
+    return ValueListenableBuilder<List<Contact>>(
+      valueListenable: ChatStorageService.instance.contactsNotifier,
+      builder: (_, contacts, __) {
+        final contact = _findContact(contacts);
         final btName = BleService.instance.getDeviceName(publicKeyOrBleId);
         final nickname = contact?.nickname ?? btName;
         final color = contact?.avatarColor ?? 0xFF607D8B;
@@ -406,19 +410,19 @@ class _NearbyDeviceTile extends StatelessWidget {
           ),
           subtitle: Text(
             contact != null
-                ? 'Rlink' // контакт найден — показываем что это Rlink пользователь
+                ? 'Rlink'
                 : btName != publicKeyOrBleId
-                    ? btName // BT имя устройства
+                    ? btName
                     : '${publicKeyOrBleId.substring(0, publicKeyOrBleId.length.clamp(0, 12))}...',
             style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
           ),
           trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-            IconButton(
-              icon: const Icon(Icons.person_add_outlined),
-              tooltip: contact == null ? 'Добавить' : 'Изменить',
-              onPressed: () =>
-                  _addContact(context, publicKeyOrBleId, existing: contact),
-            ),
+            if (contact == null)
+              IconButton(
+                icon: const Icon(Icons.person_add_outlined),
+                tooltip: 'Добавить',
+                onPressed: () => _addContact(context, publicKeyOrBleId),
+              ),
             IconButton(
               icon: const Icon(Icons.chat),
               tooltip: 'Написать',
@@ -440,14 +444,13 @@ class _NearbyDeviceTile extends StatelessWidget {
     );
   }
 
-  void _addContact(BuildContext context, String peerId, {Contact? existing}) {
-    // Всегда сохраняем по публичному ключу, а не по BLE UUID
+  void _addContact(BuildContext context, String peerId) {
     final resolvedKey = BleService.instance.resolvePublicKey(peerId);
-    final ctrl = TextEditingController(text: existing?.nickname ?? '');
+    final ctrl = TextEditingController();
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: Text(existing == null ? 'Добавить контакт' : 'Изменить имя'),
+        title: const Text('Добавить контакт'),
         content: TextField(
           controller: ctrl,
           autofocus: true,
@@ -465,9 +468,9 @@ class _NearbyDeviceTile extends StatelessWidget {
               final contact = Contact(
                 publicKeyHex: resolvedKey,
                 nickname: name,
-                avatarColor: existing?.avatarColor ?? 0xFF5C6BC0,
-                avatarEmoji: existing?.avatarEmoji ?? '',
-                addedAt: existing?.addedAt ?? DateTime.now(),
+                avatarColor: 0xFF5C6BC0,
+                avatarEmoji: '',
+                addedAt: DateTime.now(),
               );
               await ChatStorageService.instance.saveContact(contact);
               if (context.mounted) {

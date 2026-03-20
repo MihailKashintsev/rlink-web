@@ -3,6 +3,7 @@ class Contact {
   final String nickname;
   final int avatarColor;
   final String avatarEmoji;
+  final String? avatarImagePath; // локальный путь к фото аватара контакта
   final DateTime addedAt;
   final DateTime? lastSeen;
 
@@ -11,6 +12,7 @@ class Contact {
     required this.nickname,
     required this.avatarColor,
     required this.avatarEmoji,
+    this.avatarImagePath,
     required this.addedAt,
     this.lastSeen,
   });
@@ -25,29 +27,32 @@ class Contact {
       ? publicKeyHex.substring(0, 8)
       : publicKeyHex;
 
-  Contact copyWith({DateTime? lastSeen, String? nickname}) => Contact(
-        publicKeyHex: publicKeyHex,
-        nickname: nickname ?? this.nickname,
-        avatarColor: avatarColor,
-        avatarEmoji: avatarEmoji,
-        addedAt: addedAt,
-        lastSeen: lastSeen ?? this.lastSeen,
+  Contact copyWith({DateTime? lastSeen, String? nickname, String? avatarImagePath}) => Contact(
+        publicKeyHex:    publicKeyHex,
+        nickname:        nickname ?? this.nickname,
+        avatarColor:     avatarColor,
+        avatarEmoji:     avatarEmoji,
+        avatarImagePath: avatarImagePath ?? this.avatarImagePath,
+        addedAt:         addedAt,
+        lastSeen:        lastSeen ?? this.lastSeen,
       );
 
   Map<String, dynamic> toMap() => {
-        'id':       publicKeyHex,
-        'nick':     nickname,
-        'color':    avatarColor,
-        'emoji':    avatarEmoji,
-        'added_at': addedAt.millisecondsSinceEpoch,
-        'last_seen': lastSeen?.millisecondsSinceEpoch,
+        'id':               publicKeyHex,
+        'nick':             nickname,
+        'color':            avatarColor,
+        'emoji':            avatarEmoji,
+        'avatar_img_path':  avatarImagePath,
+        'added_at':         addedAt.millisecondsSinceEpoch,
+        'last_seen':        lastSeen?.millisecondsSinceEpoch,
       };
 
   factory Contact.fromMap(Map<String, dynamic> m) => Contact(
-        publicKeyHex: m['id']    as String,
-        nickname:     m['nick']  as String,
-        avatarColor:  m['color'] as int,
-        avatarEmoji:  m['emoji'] as String,
+        publicKeyHex:    m['id']             as String,
+        nickname:        m['nick']           as String,
+        avatarColor:     m['color']          as int,
+        avatarEmoji:     m['emoji']          as String,
+        avatarImagePath: m['avatar_img_path'] as String?,
         addedAt: DateTime.fromMillisecondsSinceEpoch(m['added_at'] as int),
         lastSeen: m['last_seen'] != null
             ? DateTime.fromMillisecondsSinceEpoch(m['last_seen'] as int)

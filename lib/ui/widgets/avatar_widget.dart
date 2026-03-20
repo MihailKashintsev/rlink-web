@@ -1,9 +1,13 @@
+import 'dart:io';
+
+import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as epf;
 import 'package:flutter/material.dart';
 
 class AvatarWidget extends StatelessWidget {
   final String initials;
   final int color;
-  final String emoji; // если не пустой — показываем эмодзи вместо инициалов
+  final String emoji;      // если не пустой — показываем эмодзи вместо инициалов
+  final String? imagePath; // если задан — показываем фото поверх всего
   final double size;
   final bool isOnline;
 
@@ -12,12 +16,16 @@ class AvatarWidget extends StatelessWidget {
     required this.initials,
     required this.color,
     this.emoji = '',
+    this.imagePath,
     this.size = 48,
     this.isOnline = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final file = imagePath != null ? File(imagePath!) : null;
+    final hasImage = file != null && file.existsSync();
+
     return Stack(
       children: [
         Container(
@@ -27,17 +35,21 @@ class AvatarWidget extends StatelessWidget {
             color: Color(color),
             shape: BoxShape.circle,
           ),
-          child: Center(
-            child: emoji.isNotEmpty
-                ? Text(emoji, style: TextStyle(fontSize: size * 0.46))
-                : Text(
-                    initials.isNotEmpty ? initials : '?',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: size * 0.38,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.5,
-                    ),
+          child: ClipOval(
+            child: hasImage
+                ? Image.file(file, width: size, height: size, fit: BoxFit.cover)
+                : Center(
+                    child: emoji.isNotEmpty
+                        ? Text(emoji, style: TextStyle(fontSize: size * 0.46))
+                        : Text(
+                            initials.isNotEmpty ? initials : '?',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: size * 0.38,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
                   ),
           ),
         ),
@@ -63,82 +75,48 @@ class AvatarWidget extends StatelessWidget {
   }
 }
 
-// ── Выбор эмодзи ─────────────────────────────────────────────────
+// ── Выбор эмодзи (полный набор Unicode через emoji_picker_flutter) ──
 
-class EmojiPicker extends StatelessWidget {
+class AvatarEmojiPicker extends StatelessWidget {
   final String selected;
   final void Function(String emoji) onSelected;
 
-  const EmojiPicker({
+  const AvatarEmojiPicker({
     super.key,
     required this.selected,
     required this.onSelected,
   });
 
-  // Категории: люди, животные, природа, объекты, еда, символы
-  static const _emojis = [
-    // Люди & персонажи
-    '😎', '🥷', '🧙', '🧛', '🧜', '🧝', '🧞', '🦸',
-    '🦹', '🧚', '🤡', '👽', '🧟', '🤖', '👾', '👻',
-    '💀', '😈', '🧠', '🫀', '🧑‍🚀', '🧑‍💻', '🧑‍🎤', '🧑‍🎨',
-    '🧑‍🔬', '🧑‍⚕️', '🧑‍🍳', '🧑‍🏫', '🧑‍🌾', '🧑‍🔧', '🕵️', '🧑‍🦯',
-    // Животные
-    '🦊', '🐺', '🦁', '🐯', '🐻', '🐼', '🐨', '🦄',
-    '🐲', '🐸', '🦋', '🦅', '🦉', '🦇', '🦈', '🐙',
-    '🦝', '🐬', '🦭', '🦧', '🐆', '🐘', '🦏', '🦛',
-    '🐊', '🦕', '🦖', '🐉', '🦎', '🐍', '🦜', '🦚',
-    '🦩', '🦢', '🦔', '🐿️', '🦫', '🦦', '🦥', '🐇',
-    // Природа & стихии
-    '🔥', '⚡', '🌊', '🌪️', '❄️', '🌸', '🌺', '🌻',
-    '🍀', '🌙', '⭐', '🌟', '✨', '💫', '🌈', '☀️',
-    '🌑', '🌕', '🌠', '⛈️', '🌋', '🏔️', '🌊', '🏝️',
-    // Объекты & техника
-    '💎', '🚀', '🛸', '🎮', '🎸', '🎺', '🎻', '🏆',
-    '🔮', '💣', '⚔️', '🛡️', '🗡️', '🎪', '🎲', '🎯',
-    '🔭', '🔬', '💻', '📡', '⚙️', '🔑', '🗝️', '🧲',
-    '🎸', '🥁', '🎹', '🎤', '🎧', '📻', '🎬', '🎭',
-    // Еда & напитки
-    '🍕', '🍔', '🌮', '🍜', '🍣', '🍩', '🍦', '🧁',
-    '☕', '🧃', '🍺', '🥤', '🍷', '🧋', '🍓', '🍉',
-    // Символы & знаки
-    '🌀', '🔱', '⚜️', '🌐', '💥', '🎆', '🎇', '🏵️',
-    '🔴', '🟠', '🟡', '🟢', '🔵', '🟣', '⚫', '⚪',
-    '♾️', '☯️', '☮️', '✡️', '🔯', '🧿', '🪬', '🫧',
-  ];
-
   @override
   Widget build(BuildContext context) {
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 8,
-        mainAxisSpacing: 6,
-        crossAxisSpacing: 6,
-      ),
-      itemCount: _emojis.length,
-      itemBuilder: (_, i) {
-        final e = _emojis[i];
-        final isSelected = e == selected;
-        return GestureDetector(
-          onTap: () => onSelected(e),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            decoration: BoxDecoration(
-              color: isSelected
-                  ? const Color(0xFF1DB954).withValues(alpha: 0.2)
-                  : Colors.grey.shade900,
-              borderRadius: BorderRadius.circular(8),
-              border: isSelected
-                  ? Border.all(color: const Color(0xFF1DB954), width: 2)
-                  : null,
-            ),
-            child: Center(
-              child: Text(e, style: const TextStyle(fontSize: 22)),
-            ),
+    return SizedBox(
+      height: 280,
+      child: epf.EmojiPicker(
+        onEmojiSelected: (_, emoji) => onSelected(emoji.emoji),
+        config: const epf.Config(
+          height: 280,
+          checkPlatformCompatibility: true,
+          emojiViewConfig: epf.EmojiViewConfig(
+            backgroundColor: Color(0xFF1A1A1A),
+            columns: 8,
+            emojiSizeMax: 26,
           ),
-        );
-      },
+          categoryViewConfig: epf.CategoryViewConfig(
+            backgroundColor: Color(0xFF1A1A1A),
+            iconColorSelected: Color(0xFF1DB954),
+            indicatorColor: Color(0xFF1DB954),
+            iconColor: Colors.grey,
+          ),
+          bottomActionBarConfig: epf.BottomActionBarConfig(
+            backgroundColor: Color(0xFF1A1A1A),
+            buttonIconColor: Colors.grey,
+          ),
+          searchViewConfig: epf.SearchViewConfig(
+            backgroundColor: Color(0xFF1A1A1A),
+            buttonIconColor: Colors.grey,
+          ),
+        ),
+      ),
     );
   }
 }

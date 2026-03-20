@@ -11,6 +11,7 @@ import 'services/ble_service.dart';
 import 'services/chat_storage_service.dart';
 import 'services/crypto_service.dart';
 import 'services/gossip_router.dart';
+import 'services/image_service.dart';
 import 'services/profile_service.dart';
 import 'services/update_service.dart';
 import 'ui/screens/chat_list_screen.dart';
@@ -122,6 +123,64 @@ Future<void> initServices() async {
       },
       onDelete: (fromId, messageId) async {
         await ChatStorageService.instance.deleteMessage(messageId);
+      },
+      onImgMetaReceived: (fromId, msgId, totalChunks, isAvatar) {
+        ImageService.instance.initAssembly(
+          msgId, totalChunks, isAvatar: isAvatar, fromId: fromId,
+        );
+      },
+      onImgChunkReceived: (fromId, msgId, totalChunks, index, base64Data) async {
+        ImageService.instance.receiveChunk(
+          msgId: msgId,
+          totalChunks: totalChunks,
+          index: index,
+          base64Data: base64Data,
+        );
+        if (!ImageService.instance.isComplete(msgId)) return;
+
+        final isAvatar = ImageService.instance.isAvatarAssembly(msgId);
+        final senderKey = ImageService.instance.assemblyFromId(msgId).isNotEmpty
+            ? ImageService.instance.assemblyFromId(msgId)
+            : fromId;
+
+        if (isAvatar) {
+          final path = await ImageService.instance.assembleAndSave(
+            msgId, forContactKey: senderKey,
+          );
+          if (path != null) {
+            await ChatStorageService.instance.updateContactAvatarImage(senderKey, path);
+          }
+        } else {
+          final path = await ImageService.instance.assembleAndSave(msgId);
+          if (path == null) return;
+
+          final existing = await ChatStorageService.instance.getContact(senderKey);
+          if (existing == null) {
+            await ChatStorageService.instance.saveContact(Contact(
+              publicKeyHex: senderKey,
+              nickname: '${senderKey.substring(0, 8)}...',
+              avatarColor: 0xFF607D8B,
+              avatarEmoji: '',
+              addedAt: DateTime.now(),
+            ));
+          }
+          final msg = ChatMessage(
+            id: msgId,
+            peerId: senderKey,
+            text: '',
+            isOutgoing: false,
+            timestamp: DateTime.now(),
+            status: MessageStatus.delivered,
+            imagePath: path,
+          );
+          await ChatStorageService.instance.saveMessage(msg);
+          incomingMessageController.add(IncomingMessage(
+            fromId: senderKey,
+            text: '',
+            timestamp: msg.timestamp,
+            msgId: msgId,
+          ));
+        }
       },
       // bleId — BLE device ID отправителя (для маппинга)
       // publicKey — Ed25519 ключ из профиля

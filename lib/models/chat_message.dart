@@ -3,6 +3,7 @@ class ChatMessage {
   final String peerId;      // ID собеседника
   final String text;
   final String? replyToMessageId; // ID сообщения, на которое отвечают
+  final String? imagePath;  // локальный путь к прикреплённому изображению
   final bool isOutgoing;
   final DateTime timestamp;
   final MessageStatus status;
@@ -12,39 +13,43 @@ class ChatMessage {
     required this.peerId,
     required this.text,
     this.replyToMessageId,
+    this.imagePath,
     required this.isOutgoing,
     required this.timestamp,
     this.status = MessageStatus.sent,
   });
 
-  ChatMessage copyWith({MessageStatus? status}) => ChatMessage(
-        id: id,
-        peerId: peerId,
-        text: text,
+  ChatMessage copyWith({MessageStatus? status, String? imagePath}) => ChatMessage(
+        id:               id,
+        peerId:           peerId,
+        text:             text,
         replyToMessageId: replyToMessageId,
-        isOutgoing: isOutgoing,
-        timestamp: timestamp,
-        status: status ?? this.status,
+        imagePath:        imagePath ?? this.imagePath,
+        isOutgoing:       isOutgoing,
+        timestamp:        timestamp,
+        status:           status ?? this.status,
       );
 
   Map<String, dynamic> toMap() => {
-        'id':          id,
-        'peer_id':     peerId,
-        'text':        text,
+        'id':                  id,
+        'peer_id':             peerId,
+        'text':                text,
         'reply_to_message_id': replyToMessageId,
-        'is_outgoing': isOutgoing ? 1 : 0,
-        'timestamp':   timestamp.millisecondsSinceEpoch,
-        'status':      status.index,
+        'image_path':          imagePath,
+        'is_outgoing':         isOutgoing ? 1 : 0,
+        'timestamp':           timestamp.millisecondsSinceEpoch,
+        'status':              status.index,
       };
 
   factory ChatMessage.fromMap(Map<String, dynamic> m) => ChatMessage(
-        id:          m['id']          as String,
-        peerId:      m['peer_id']     as String,
-        text:        m['text']        as String,
+        id:               m['id']               as String,
+        peerId:           m['peer_id']           as String,
+        text:             m['text']              as String,
         replyToMessageId: m['reply_to_message_id'] as String?,
-        isOutgoing:  (m['is_outgoing'] as int) == 1,
-        timestamp:   DateTime.fromMillisecondsSinceEpoch(m['timestamp'] as int),
-        status:      MessageStatus.values[m['status'] as int],
+        imagePath:        m['image_path']        as String?,
+        isOutgoing:       (m['is_outgoing'] as int) == 1,
+        timestamp:        DateTime.fromMillisecondsSinceEpoch(m['timestamp'] as int),
+        status:           MessageStatus.values[m['status'] as int],
       );
 }
 

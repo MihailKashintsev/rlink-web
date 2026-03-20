@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../models/user_profile.dart';
 import '../../services/crypto_service.dart';
+import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
 import '../widgets/avatar_widget.dart';
 import 'chat_list_screen.dart';
@@ -17,8 +19,21 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final _controller = TextEditingController();
   int _selectedColor = UserProfile.avatarColors[0];
   String _selectedEmoji = UserProfile.avatarEmojis[0];
+  String? _selectedImagePath;
   bool _loading = false;
   bool _showEmojiPicker = false;
+
+  final _picker = ImagePicker();
+
+  Future<void> _pickImage() async {
+    final picked = await _picker.pickImage(source: ImageSource.gallery);
+    if (picked == null || !mounted) return;
+    final path = await ImageService.instance.compressAndSave(
+      picked.path,
+      isAvatar: true,
+    );
+    setState(() => _selectedImagePath = path);
+  }
 
   String get _initials {
     final text = _controller.text.trim();
@@ -51,11 +66,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         publicKeyHex: CryptoService.instance.publicKeyHex,
         nickname: nick,
       );
-      // Обновляем эмодзи и цвет
+      // Обновляем эмодзи, цвет и фото
       await ProfileService.instance.updateProfile(
-        nickname: nick,
-        avatarColor: _selectedColor,
-        avatarEmoji: _selectedEmoji,
+        nickname:        nick,
+        avatarColor:     _selectedColor,
+        avatarEmoji:     _selectedEmoji,
+        avatarImagePath: _selectedImagePath,
       );
       if (mounted) {
         Navigator.of(context).pushReplacement(
@@ -106,24 +122,30 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               ),
               const SizedBox(height: 36),
 
-              // Аватар — тап для смены эмодзи
-              GestureDetector(
-                onTap: () =>
-                    setState(() => _showEmojiPicker = !_showEmojiPicker),
-                child: Stack(
-                  children: [
-                    AnimatedBuilder(
+              // Аватар — тап для смены эмодзи, кнопка фото слева
+              Stack(
+                children: [
+                  GestureDetector(
+                    onTap: () =>
+                        setState(() => _showEmojiPicker = !_showEmojiPicker),
+                    child: AnimatedBuilder(
                       animation: _controller,
                       builder: (_, __) => AvatarWidget(
                         initials: _initials,
                         color: _selectedColor,
                         emoji: _selectedEmoji,
+                        imagePath: _selectedImagePath,
                         size: 84,
                       ),
                     ),
-                    Positioned(
-                      right: 0,
-                      bottom: 0,
+                  ),
+                  // Кнопка смены эмодзи
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: GestureDetector(
+                      onTap: () =>
+                          setState(() => _showEmojiPicker = !_showEmojiPicker),
                       child: Container(
                         width: 26,
                         height: 26,
@@ -137,8 +159,28 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                             size: 14, color: Colors.white),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  // Кнопка выбора фото из галереи
+                  Positioned(
+                    left: 0,
+                    bottom: 0,
+                    child: GestureDetector(
+                      onTap: _pickImage,
+                      child: Container(
+                        width: 26,
+                        height: 26,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade800,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: const Color(0xFF0A0A0A), width: 2),
+                        ),
+                        child: const Icon(Icons.photo_camera,
+                            size: 14, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 8),
               Text(
@@ -158,7 +200,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                           color: const Color(0xFF1A1A1A),
                           borderRadius: BorderRadius.circular(14),
                         ),
-                        child: EmojiPicker(
+                        child: AvatarEmojiPicker(
                           selected: _selectedEmoji,
                           onSelected: (e) => setState(() {
                             _selectedEmoji = e;

@@ -10,6 +10,7 @@ const _kDefaultTtl = 7;
 const _kProfileTtl = 4; // Профили распространяются на 4 хопа для лучшего discovery
 const _kSeenCacheTtl = Duration(minutes: 30);
 const _kMaxPayloadBytes = 512;
+const _kMaxImgPayloadBytes = 285; // img_meta ≈ 233 б, img_chunk ≈ 274 б < BLE MTU 290
 
 class GossipPacket {
   final String id;
@@ -89,6 +90,23 @@ typedef OnEditReceived = Future<void> Function(
 );
 typedef OnDeleteReceived = Future<void> Function(String fromId, String messageId);
 
+/// Вызывается при получении img_meta (начало передачи изображения).
+typedef OnImgMeta = void Function(
+  String fromId,
+  String msgId,
+  int totalChunks,
+  bool isAvatar, // true — аватар, false — чат-изображение
+);
+
+/// Вызывается при получении очередного img_chunk.
+typedef OnImgChunk = void Function(
+  String fromId,
+  String msgId,
+  int totalChunks,
+  int index,
+  String base64Data,
+);
+
 class GossipRouter {
   // Публичный ключ этого устройства — устанавливается при инициализации
   String? myPublicKey;
@@ -105,6 +123,8 @@ class GossipRouter {
   OnProfileReceived? onProfileReceived;
   OnEditReceived? onEditReceived;
   OnDeleteReceived? onDeleteReceived;
+  OnImgMeta? onImgMeta;
+  OnImgChunk? onImgChunk;
 
   void init({
     String? myKey,
@@ -114,6 +134,8 @@ class GossipRouter {
     OnProfileReceived? onProfile,
     OnEditReceived? onEdit,
     OnDeleteReceived? onDelete,
+    OnImgMeta? onImgMetaReceived,
+    OnImgChunk? onImgChunkReceived,
   }) {
     myPublicKey = myKey;
     onMessageReceived = onMessage;
@@ -122,6 +144,8 @@ class GossipRouter {
     onProfileReceived = onProfile;
     onEditReceived = onEdit;
     onDeleteReceived = onDelete;
+    onImgMeta = onImgMetaReceived;
+    onImgChunk = onImgChunkReceived;
     _cleanupTimer =
         Timer.periodic(const Duration(minutes: 10), (_) => _cleanup());
   }
@@ -209,6 +233,57 @@ class GossipRouter {
     );
     _markSeen(packet.id);
     await _forward(packet);
+  }
+
+  /// Отправляет метаданные изображения получателю (или broadcast для аватара).
+  /// img_meta ≈ 233 байт (без rid): id36 + type + ttl + ts + msgId36 + chunks + from64 + avatar
+  Future<void> sendImgMeta({
+    required String msgId,
+    required int totalChunks,
+    required String fromId,
+    String? recipientId, // не используется в пакете — не помещается в BLE MTU 290
+    bool isAvatar = false,
+  }) async {
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'img_meta',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      // recipientId намеренно не передаётся — добавляет 70 байт и превышает MTU
+      payload: {
+        'msgId': msgId,
+        'chunks': totalChunks,
+        'from': fromId,
+        'avatar': isAvatar,
+      },
+    );
+    _markSeen(packet.id);
+    await _forwardImg(packet);
+  }
+
+  /// img_chunk ≈ 154 + base64(90 байт) = 274 байт < BLE MTU 290 байт.
+  /// rid и from исключены из пакета — получатель берёт fromId из img_meta.
+  Future<void> sendImgChunk({
+    required String msgId,
+    required int index,
+    required String base64Data,
+    required String fromId, // используется только для img_meta; здесь для API симметрии
+    String? recipientId,    // не используется — не помещается в MTU
+  }) async {
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'img_chunk',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      // recipientId и from намеренно исключены — вместе добавляют ~142 байта
+      payload: {
+        'msgId': msgId,
+        'idx': index,
+        'data': base64Data,
+      },
+    );
+    _markSeen(packet.id);
+    await _forwardImg(packet);
   }
 
   Future<void> broadcastProfile({
@@ -347,6 +422,31 @@ class GossipRouter {
             null,
           );
         }
+        return;
+      }
+
+      if (packet.type == 'img_meta') {
+        final msgId      = packet.payload['msgId']   as String?;
+        final totalChunks= packet.payload['chunks']  as int?;
+        final from       = packet.payload['from']    as String? ?? 'unknown';
+        final isAvatar   = (packet.payload['avatar'] as bool?) ?? false;
+        if (msgId != null && totalChunks != null) {
+          onImgMeta?.call(from, msgId, totalChunks, isAvatar);
+        }
+        return;
+      }
+
+      if (packet.type == 'img_chunk') {
+        final msgId      = packet.payload['msgId'] as String?;
+        final index      = packet.payload['idx']   as int?;
+        final data       = packet.payload['data']  as String?;
+        final from       = packet.payload['from']  as String? ?? 'unknown';
+        // totalChunks не хранится в chunk-пакете — передаём 0 как sentinel;
+        // ImageService уже знает totalChunks из img_meta.
+        if (msgId != null && index != null && data != null) {
+          onImgChunk?.call(from, msgId, 0, index, data);
+        }
+        return;
       }
     } catch (e) {
       debugPrint('[Gossip] Failed to parse payload: $e');
@@ -364,6 +464,21 @@ class GossipRouter {
       await onForwardPacket!(packet);
     } catch (e) {
       debugPrint('[Gossip] Forward failed: $e');
+    }
+  }
+
+  /// Для img_meta/img_chunk используем увеличенный лимит.
+  Future<void> _forwardImg(GossipPacket packet) async {
+    if (onForwardPacket == null) return;
+    final bytes = packet.encode();
+    if (bytes.length > _kMaxImgPayloadBytes) {
+      debugPrint('[Gossip] Img packet too large (${bytes.length} bytes), dropping');
+      return;
+    }
+    try {
+      await onForwardPacket!(packet);
+    } catch (e) {
+      debugPrint('[Gossip] Img forward failed: $e');
     }
   }
 

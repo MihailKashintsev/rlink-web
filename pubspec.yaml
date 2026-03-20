@@ -1,4 +1,4 @@
-name: mesh_chat
+name: rlink
 description: Rlink — Bluetooth mesh messenger
 version: 1.0.0+1
 
@@ -47,6 +47,15 @@ dependencies:
 
   # Fonts
   google_fonts: ^6.2.1
+
+  # Emoji picker (full unicode set)
+  emoji_picker_flutter: ^4.4.0
+
+  # Image picking
+  image_picker: ^1.1.2
+
+  # Image compression (avatars)
+  flutter_image_compress: ^2.4.0
 
 dev_dependencies:
   flutter_test:

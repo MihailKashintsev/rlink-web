@@ -34,42 +34,53 @@ class ChatStorageService {
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, v) async {
-      await db.execute('''
-        CREATE TABLE contacts (
-          id        TEXT PRIMARY KEY,
-          nick      TEXT NOT NULL,
-          color     INTEGER NOT NULL,
-          emoji     TEXT NOT NULL,
-          added_at  INTEGER NOT NULL,
-          last_seen INTEGER
-        )
-      ''');
-      await db.execute('''
-        CREATE TABLE messages (
-          id          TEXT PRIMARY KEY,
-          peer_id     TEXT NOT NULL,
-          text        TEXT NOT NULL,
-          reply_to_message_id TEXT,
-          is_outgoing INTEGER NOT NULL,
-          timestamp   INTEGER NOT NULL,
-          status      INTEGER NOT NULL DEFAULT 1
-        )
-      ''');
-      await db.execute(
-          'CREATE INDEX idx_messages_peer ON messages(peer_id, timestamp)');
+        await db.execute('''
+          CREATE TABLE contacts (
+            id                TEXT PRIMARY KEY,
+            nick              TEXT NOT NULL,
+            color             INTEGER NOT NULL,
+            emoji             TEXT NOT NULL,
+            avatar_img_path   TEXT,
+            added_at          INTEGER NOT NULL,
+            last_seen         INTEGER
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE messages (
+            id                   TEXT PRIMARY KEY,
+            peer_id              TEXT NOT NULL,
+            text                 TEXT NOT NULL,
+            reply_to_message_id  TEXT,
+            image_path           TEXT,
+            is_outgoing          INTEGER NOT NULL,
+            timestamp            INTEGER NOT NULL,
+            status               INTEGER NOT NULL DEFAULT 1
+          )
+        ''');
+        await db.execute(
+            'CREATE INDEX idx_messages_peer ON messages(peer_id, timestamp)');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
-        // Phase 2: add reply_to_message_id column.
         if (oldVersion < 2) {
           try {
             await db.execute(
               'ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT',
             );
-          } catch (_) {
-            // ignore: column may already exist
-          }
+          } catch (_) {}
+        }
+        if (oldVersion < 3) {
+          try {
+            await db.execute(
+              'ALTER TABLE contacts ADD COLUMN avatar_img_path TEXT',
+            );
+          } catch (_) {}
+          try {
+            await db.execute(
+              'ALTER TABLE messages ADD COLUMN image_path TEXT',
+            );
+          } catch (_) {}
         }
       },
     );
@@ -113,13 +124,24 @@ class ChatStorageService {
     await _db?.update(
       'contacts',
       {
-        'nick': contact.nickname,
-        'color': contact.avatarColor,
-        'emoji': contact.avatarEmoji,
-        'last_seen': DateTime.now().millisecondsSinceEpoch,
+        'nick':             contact.nickname,
+        'color':            contact.avatarColor,
+        'emoji':            contact.avatarEmoji,
+        'avatar_img_path':  contact.avatarImagePath,
+        'last_seen':        DateTime.now().millisecondsSinceEpoch,
       },
       where: 'id = ?',
       whereArgs: [contact.publicKeyHex],
+    );
+    _contactsNotifier.value = await getContacts();
+  }
+
+  Future<void> updateContactAvatarImage(String id, String imagePath) async {
+    await _db?.update(
+      'contacts',
+      {'avatar_img_path': imagePath},
+      where: 'id = ?',
+      whereArgs: [id],
     );
     _contactsNotifier.value = await getContacts();
   }
