@@ -5,10 +5,12 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart';
 
+import '../../models/contact.dart';
 import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/profile_service.dart';
 import '../screens/onboarding_screen.dart';
+import '../screens/chat_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -42,6 +44,15 @@ class SettingsScreen extends StatelessWidget {
                 );
               },
             ),
+          ),
+
+          // ── Поиск по ID ────────────────────────────────────────
+          _SectionHeader('Найти пользователя'),
+          ListTile(
+            leading: const Icon(Icons.search),
+            title: const Text('Поиск по уникальному ID'),
+            subtitle: const Text('Открыть чат зная публичный ключ собеседника'),
+            onTap: () => _showSearchById(context),
           ),
 
           // ── Данные ─────────────────────────────────────────────
@@ -120,6 +131,82 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+
+  void _showSearchById(BuildContext context) {
+    final ctrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Поиск по ID'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Введи публичный ключ собеседника (hex). '
+              'Его можно найти в Профиле → Публичный ключ.',
+              style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              maxLines: 3,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              decoration: InputDecoration(
+                hintText: '1e326bb1a4f2...',
+                hintStyle: TextStyle(color: Colors.grey.shade600),
+                border: const OutlineInputBorder(),
+                contentPadding: const EdgeInsets.all(12),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final id = ctrl.text.trim().toLowerCase();
+              if (id.length < 8) return;
+              Navigator.pop(ctx);
+              // Ищем контакт по этому ID
+              final contact = await ChatStorageService.instance.getContact(id);
+              final nickname = contact?.nickname ?? '${id.substring(0, 8)}...';
+              final color = contact?.avatarColor ?? 0xFF607D8B;
+              final emoji = contact?.avatarEmoji ?? '';
+              // Если контакта нет — создаём временный
+              if (contact == null) {
+                await ChatStorageService.instance.saveContact(Contact(
+                  publicKeyHex: id,
+                  nickname: nickname,
+                  avatarColor: color,
+                  avatarEmoji: emoji,
+                  addedAt: DateTime.now(),
+                ));
+              }
+              if (context.mounted) {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ChatScreen(
+                      peerId: id,
+                      peerNickname: nickname,
+                      peerAvatarColor: color,
+                      peerAvatarEmoji: emoji,
+                    ),
+                  ),
+                );
+              }
+            },
+            child: const Text('Открыть чат'),
+          ),
         ],
       ),
     );

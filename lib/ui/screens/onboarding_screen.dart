@@ -28,11 +28,19 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     return text[0].toUpperCase();
   }
 
+  static const _maxNickLength = 20;
+
   Future<void> _create() async {
     final nick = _controller.text.trim();
     if (nick.length < 2) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Имя должно быть не короче 2 символов')),
+      );
+      return;
+    }
+    if (nick.length > _maxNickLength) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Имя не должно превышать $_maxNickLength символов')),
       );
       return;
     }
@@ -140,26 +148,25 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               const SizedBox(height: 16),
 
               // Выбор эмодзи (раскрывается)
-              AnimatedCrossFade(
-                firstChild: const SizedBox.shrink(),
-                secondChild: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1A1A1A),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: EmojiPicker(
-                    selected: _selectedEmoji,
-                    onSelected: (e) => setState(() {
-                      _selectedEmoji = e;
-                      _showEmojiPicker = false;
-                    }),
-                  ),
-                ),
-                crossFadeState: _showEmojiPicker
-                    ? CrossFadeState.showSecond
-                    : CrossFadeState.showFirst,
+              AnimatedSize(
                 duration: const Duration(milliseconds: 250),
+                curve: Curves.easeInOut,
+                child: _showEmojiPicker
+                    ? Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1A1A1A),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: EmojiPicker(
+                          selected: _selectedEmoji,
+                          onSelected: (e) => setState(() {
+                            _selectedEmoji = e;
+                            _showEmojiPicker = false;
+                          }),
+                        ),
+                      )
+                    : const SizedBox.shrink(),
               ),
 
               if (!_showEmojiPicker) ...[
@@ -177,6 +184,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   autofocus: true,
                   textCapitalization: TextCapitalization.words,
                   textAlign: TextAlign.center,
+                  maxLength: _maxNickLength,
                   style: const TextStyle(
                       fontSize: 20, fontWeight: FontWeight.w500),
                   decoration: InputDecoration(
@@ -190,6 +198,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     fillColor: const Color(0xFF1A1A1A),
                     contentPadding: const EdgeInsets.symmetric(
                         horizontal: 20, vertical: 16),
+                    counterStyle: TextStyle(color: Colors.grey.shade600, fontSize: 11),
                   ),
                   onSubmitted: (_) => _create(),
                   onChanged: (_) => setState(() {}),

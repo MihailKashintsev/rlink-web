@@ -38,6 +38,8 @@ class BleService {
   final ValueNotifier<int> peersCount = ValueNotifier(0);
   // Устройства подключены но профиль ещё не получен — показываем лоадер
   final ValueNotifier<Set<String>> pendingProfiles = ValueNotifier({});
+  // Инкрементируется при каждом registerPeerKey — для надёжного уведомления UI
+  final ValueNotifier<int> peerMappingsVersion = ValueNotifier(0);
 
   void Function(String peerId)? onPeerConnected;
 
@@ -66,7 +68,16 @@ class BleService {
     _bleIdToPublicKey[bleId] = publicKey;
     _publicKeyToBleId[publicKey] = bleId;
     debugPrint('[BLE] Mapped $bleId → ${publicKey.substring(0, 16)}...');
-    peersCount.value = _connectedPeers.length; // триггерим UI обновление
+    peersCount.value = _connectedPeers.length;
+    peerMappingsVersion.value++;
+  }
+
+  /// Возвращает true если профиль пира ещё не получен (загружается)
+  /// Проверяет и по BLE ID, и по публичному ключу
+  bool isPeerProfilePending(String peerId) {
+    if (pendingProfiles.value.contains(peerId)) return true;
+    final bleId = _publicKeyToBleId[peerId];
+    return bleId != null && pendingProfiles.value.contains(bleId);
   }
 
   /// Возвращает Bluetooth-имя устройства по его ID (BLE address или public key)

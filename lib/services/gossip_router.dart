@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import 'crypto_service.dart';
 
 const _kDefaultTtl = 7;
+const _kProfileTtl = 4; // Профили распространяются на 4 хопа для лучшего discovery
 const _kSeenCacheTtl = Duration(minutes: 30);
 const _kMaxPayloadBytes = 512;
 
@@ -135,7 +136,7 @@ class GossipRouter {
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'profile',
-      ttl: 2,
+      ttl: _kProfileTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
       payload: {'id': id, 'nick': nick, 'color': color, 'emoji': emoji},
     );

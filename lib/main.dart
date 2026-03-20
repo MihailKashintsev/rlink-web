@@ -108,10 +108,10 @@ Future<void> initServices() async {
       onProfile: (bleId, publicKey, nick, color, emoji) async {
         // Регистрируем маппинг BLE ID → публичный ключ
         BleService.instance.registerPeerKey(bleId, publicKey);
-        // Профиль получен — убираем лоадер
-        BleService.instance.markProfileReceived(bleId);
 
-        // Сохраняем контакт с его именем
+        // Сохраняем контакт в БД ПЕРЕД тем как убрать лоадер
+        // Порядок критичен: markProfileReceived триггерит UI rebuild,
+        // который должен найти контакт уже в БД
         final existing =
             await ChatStorageService.instance.getContact(publicKey);
         if (existing == null) {
@@ -137,6 +137,9 @@ Future<void> initServices() async {
           debugPrint(
               '[Profile] Updated contact: $nick (key: ${publicKey.substring(0, 8)}...)');
         }
+
+        // Убираем лоадер ПОСЛЕ сохранения контакта — UI увидит правильные данные
+        BleService.instance.markProfileReceived(bleId);
       },
     );
 

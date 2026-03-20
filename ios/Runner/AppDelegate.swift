@@ -17,6 +17,9 @@ import UserNotifications
     private var dataChannel: FlutterMethodChannel?
     private var flushTimer: Timer?
 
+    // Ограничитель буфера — не больше 50 пакетов
+    private let maxBufferSize = 50
+
     override func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -24,14 +27,150 @@ import UserNotifications
         GeneratedPluginRegistrant.register(with: self)
         let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
         peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
-        DispatchQueue.main.async { self.setupChannels() }
         // Запрашиваем разрешение на уведомления
         UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(
             options: [.alert, .sound, .badge]
         ) { _, _ in }
+        // Настраиваем каналы после старта — retry пока не найдём FlutterViewController
+        DispatchQueue.main.async { self.setupChannels() }
         return result
     }
+
+    // MARK: - Channel Setup
+
+    private func setupChannels() {
+        // Ищем FlutterViewController: сначала через AppDelegate.window,
+        // потом через сцены (FlutterSceneDelegate держит окно в сцене, не в AppDelegate)
+        var flutterVC: FlutterViewController?
+
+        if let vc = self.window?.rootViewController as? FlutterViewController {
+            flutterVC = vc
+        }
+
+        if flutterVC == nil {
+            for scene in UIApplication.shared.connectedScenes {
+                if let windowScene = scene as? UIWindowScene {
+                    for window in windowScene.windows {
+                        if let vc = window.rootViewController as? FlutterViewController {
+                            flutterVC = vc
+                            break
+                        }
+                    }
+                }
+                if flutterVC != nil { break }
+            }
+        }
+
+        guard let vc = flutterVC else {
+            // Flutter ещё не готов — ретрай через 100мс
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.setupChannels() }
+            return
+        }
+
+        NSLog("[AppDelegate] setupChannels OK")
+        let m = vc.binaryMessenger
+
+        let method = FlutterMethodChannel(name: "com.rendergames.rlink/ble", binaryMessenger: m)
+        method.setMethodCallHandler { [weak self] call, result in
+            guard let self = self else { return }
+            switch call.method {
+            case "startAdvertising": result(nil) // iOS рекламирует сам через CBPeripheralManager
+            case "stopAdvertising":
+                self.peripheralManager?.stopAdvertising()
+                result(nil)
+            case "sendPacket":
+                if let a = call.arguments as? [String: Any],
+                   let d = a["data"] as? FlutterStandardTypedData {
+                    self.notifySubscribers(data: d.data)
+                }
+                result(nil)
+            case "flushPendingEvents":
+                NSLog("[AppDelegate] flushPendingEvents from Flutter, pending=%d", self.pendingEvents.count)
+                self.flushPendingEvents()
+                result(nil)
+            default: result(FlutterMethodNotImplemented)
+            }
+        }
+
+        dataChannel = FlutterMethodChannel(name: "com.rendergames.rlink/ble_data", binaryMessenger: m)
+        NSLog("[AppDelegate] dataChannel created")
+
+        FlutterEventChannel(name: "com.rendergames.rlink/ble_events", binaryMessenger: m)
+            .setStreamHandler(self)
+
+        // Каналы готовы — сбрасываем накопленный буфер
+        if !pendingEvents.isEmpty {
+            NSLog("[AppDelegate] setupChannels: flushing %d buffered events", pendingEvents.count)
+            // Небольшая задержка чтобы Flutter успел подписаться на EventChannel
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.flushPendingEvents()
+            }
+        }
+    }
+
+    // MARK: - Buffer
+
+    private func bufferEvent(deviceId: String, data: Data) {
+        // Отбрасываем самый старый пакет если буфер переполнен
+        if pendingEvents.count >= maxBufferSize {
+            pendingEvents.removeFirst()
+        }
+        pendingEvents.append(["device": deviceId, "data": data])
+        NSLog("[AppDelegate] buffered event, total=%d", pendingEvents.count)
+    }
+
+    private func trySendOrBuffer(deviceId: String, data: Data) {
+        DispatchQueue.main.async {
+            if let sink = self.eventSink {
+                sink(["type": "data", "device": deviceId,
+                      "data": FlutterStandardTypedData(bytes: data)])
+                return
+            }
+            if let ch = self.dataChannel {
+                ch.invokeMethod("onBleData", arguments: [
+                    "device": deviceId,
+                    "data": FlutterStandardTypedData(bytes: data)
+                ])
+                return
+            }
+            // Каналы не готовы — буферизуем
+            self.bufferEvent(deviceId: deviceId, data: data)
+        }
+    }
+
+    private func flushPendingEvents() {
+        guard !pendingEvents.isEmpty else { return }
+        // Не пытаемся сбросить если каналы не готовы — это вызывает бесконечный цикл
+        guard eventSink != nil || dataChannel != nil else {
+            NSLog("[AppDelegate] flush skipped — channels not ready yet")
+            return
+        }
+        NSLog("[AppDelegate] flushing %d pending events", pendingEvents.count)
+        let toFlush = pendingEvents
+        pendingEvents.removeAll()
+        for item in toFlush {
+            if let dev = item["device"] as? String,
+               let dat = item["data"] as? Data {
+                trySendOrBuffer(deviceId: dev, data: dat)
+            }
+        }
+    }
+
+    // Таймер-ретрай: запускается только если есть буфер И каналы уже готовы
+    private func startFlushTimer() {
+        flushTimer?.invalidate()
+        flushTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if self.pendingEvents.isEmpty {
+                self.flushTimer?.invalidate()
+                return
+            }
+            self.flushPendingEvents()
+        }
+    }
+
+    // MARK: - Notifications
 
     private func showMessageNotification(from deviceId: String) {
         let content = UNMutableNotificationContent()
@@ -46,100 +185,7 @@ import UserNotifications
         UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
-    private func bufferEvent(deviceId: String, data: Data) {
-        pendingEvents.append(["device": deviceId, "data": data])
-        NSLog("[AppDelegate] buffered event, total=%d", pendingEvents.count)
-    }
-
-    private func trySendOrBuffer(deviceId: String, data: Data) {
-        DispatchQueue.main.async {
-            // Попытка 1: через EventChannel
-            if let sink = self.eventSink {
-                sink(["type": "data", "device": deviceId,
-                      "data": FlutterStandardTypedData(bytes: data)])
-                return
-            }
-            // Попытка 2: через MethodChannel push
-            if let ch = self.dataChannel {
-                ch.invokeMethod("onBleData", arguments: [
-                    "device": deviceId,
-                    "data": FlutterStandardTypedData(bytes: data)
-                ])
-                return
-            }
-            // Буферизируем
-            self.bufferEvent(deviceId: deviceId, data: data)
-        }
-    }
-
-    private func flushPendingEvents() {
-        guard !pendingEvents.isEmpty else { return }
-        NSLog("[AppDelegate] flushing %d pending events", pendingEvents.count)
-        let toFlush = pendingEvents
-        pendingEvents.removeAll()
-        for item in toFlush {
-            if let dev = item["device"] as? String,
-               let dat = item["data"] as? Data {
-                trySendOrBuffer(deviceId: dev, data: dat)
-            }
-        }
-    }
-
-    // Таймер-ретрай: пока есть буфер — пробуем отправить каждые 500мс
-    private func startFlushTimer() {
-        flushTimer?.invalidate()
-        flushTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            if self.pendingEvents.isEmpty {
-                self.flushTimer?.invalidate()
-                return
-            }
-            self.flushPendingEvents()
-        }
-    }
-
-    private func setupChannels() {
-        guard let vc = window?.rootViewController as? FlutterViewController else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.setupChannels() }
-            return
-        }
-        NSLog("[AppDelegate] setupChannels OK")
-        let m = vc.binaryMessenger
-
-        let method = FlutterMethodChannel(name: "com.rendergames.rlink/ble", binaryMessenger: m)
-        method.setMethodCallHandler { [weak self] call, result in
-            guard let self = self else { return }
-            switch call.method {
-            case "startAdvertising": result(nil)
-            case "stopAdvertising":
-                self.peripheralManager?.stopAdvertising()
-                result(nil)
-            case "sendPacket":
-                if let a = call.arguments as? [String: Any],
-                   let d = a["data"] as? FlutterStandardTypedData {
-                    self.notifySubscribers(data: d.data)
-                }
-                result(nil)
-            case "flushPendingEvents":
-                // Flutter готов принимать — сбрасываем буфер
-                NSLog("[AppDelegate] flushPendingEvents called from Flutter, pending=%d", self.pendingEvents.count)
-                self.flushPendingEvents()
-                result(nil)
-            default: result(FlutterMethodNotImplemented)
-            }
-        }
-
-        dataChannel = FlutterMethodChannel(name: "com.rendergames.rlink/ble_data", binaryMessenger: m)
-        NSLog("[AppDelegate] dataChannel created")
-
-        FlutterEventChannel(name: "com.rendergames.rlink/ble_events", binaryMessenger: m)
-            .setStreamHandler(self)
-
-        // Запускаем таймер-ретрай для буферизованных событий
-        if !pendingEvents.isEmpty {
-            startFlushTimer()
-        }
-    }
+    // MARK: - BLE Peripheral
 
     private func startAdvertisingAndService() {
         NSLog("[AppDelegate] startAdvertisingAndService")
@@ -163,7 +209,19 @@ import UserNotifications
         guard let char = txCharacteristic else { return }
         peripheralManager?.updateValue(data, for: char, onSubscribedCentrals: nil)
     }
+
+    // FlutterAppDelegate уже наследует UNUserNotificationCenterDelegate
+    override func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        // В активном режиме Flutter сам покажет — не дублируем
+        completionHandler([])
+    }
 }
+
+// MARK: - CBPeripheralManagerDelegate
 
 extension AppDelegate: CBPeripheralManagerDelegate {
 
@@ -192,9 +250,11 @@ extension AppDelegate: CBPeripheralManagerDelegate {
                 let deviceId = req.central.identifier.uuidString
                 NSLog("[AppDelegate] write len=%d from=%@", data.count, deviceId)
                 trySendOrBuffer(deviceId: deviceId, data: data)
-                // Запускаем таймер на случай если буфер растёт
-                if !pendingEvents.isEmpty { startFlushTimer() }
-                // Показываем уведомление если приложение в фоне
+                // Запускаем таймер только если каналы уже готовы
+                if !pendingEvents.isEmpty && (eventSink != nil || dataChannel != nil) {
+                    startFlushTimer()
+                }
+                // Уведомление в фоне
                 DispatchQueue.main.async {
                     if UIApplication.shared.applicationState != .active {
                         self.showMessageNotification(from: deviceId)
@@ -219,28 +279,23 @@ extension AppDelegate: CBPeripheralManagerDelegate {
     }
 }
 
+// MARK: - FlutterStreamHandler
+
 extension AppDelegate: FlutterStreamHandler {
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         NSLog("[AppDelegate] onListen SET, pending=%d", pendingEvents.count)
         self.eventSink = events
-        flushPendingEvents()
+        // EventChannel готов — сбрасываем буфер
+        if !pendingEvents.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.flushPendingEvents()
+            }
+        }
         return nil
     }
     func onCancel(withArguments arguments: Any?) -> FlutterError? {
         NSLog("[AppDelegate] onCancel")
         self.eventSink = nil
         return nil
-    }
-}
-
-extension AppDelegate: UNUserNotificationCenterDelegate {
-    // Показываем уведомления даже когда приложение активно (foreground)
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification,
-        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
-    ) {
-        // В активном режиме уведомления не показываем — Flutter сам обработает
-        completionHandler([])
     }
 }

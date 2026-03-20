@@ -109,27 +109,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
           // Эмодзи пикер
           if (_editing) ...[
-            AnimatedCrossFade(
-              firstChild: const SizedBox.shrink(),
-              secondChild: Container(
-                padding: const EdgeInsets.all(12),
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1A1A1A),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: EmojiPicker(
-                  selected: _selectedEmoji,
-                  onSelected: (e) => setState(() {
-                    _selectedEmoji = e;
-                    _showEmojiPicker = false;
-                  }),
-                ),
-              ),
-              crossFadeState: _showEmojiPicker
-                  ? CrossFadeState.showSecond
-                  : CrossFadeState.showFirst,
+            AnimatedSize(
               duration: const Duration(milliseconds: 250),
+              curve: Curves.easeInOut,
+              child: _showEmojiPicker
+                  ? Container(
+                      padding: const EdgeInsets.all(12),
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1A1A1A),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: EmojiPicker(
+                        selected: _selectedEmoji,
+                        onSelected: (e) => setState(() {
+                          _selectedEmoji = e;
+                          _showEmojiPicker = false;
+                        }),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
             ),
 
             AvatarColorPicker(
@@ -143,9 +142,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
           _editing
               ? TextField(
                   controller: _controller,
-                  decoration: const InputDecoration(
+                  maxLength: 20,
+                  decoration: InputDecoration(
                     labelText: 'Имя',
-                    border: OutlineInputBorder(),
+                    border: const OutlineInputBorder(),
+                    counterStyle: TextStyle(color: Colors.grey.shade600, fontSize: 11),
                   ),
                   textCapitalization: TextCapitalization.words,
                   onChanged: (_) => setState(() {}),

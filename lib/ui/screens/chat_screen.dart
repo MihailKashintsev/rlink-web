@@ -47,6 +47,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _load();
     // Следим за изменением маппингов BLE UUID → public key
     BleService.instance.peersCount.addListener(_onPeersChanged);
+    BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
     _msgSub = incomingMessageController.stream.listen((msg) {
       // fromId — Ed25519 public key. Сообщение уже сохранено в main.dart.
       // Проверяем по обоим вариантам: resolvedPeerId и widget.peerId.
@@ -79,6 +80,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     BleService.instance.peersCount.removeListener(_onPeersChanged);
+    BleService.instance.peerMappingsVersion.removeListener(_onPeersChanged);
     _controller.dispose();
     _scrollController.dispose();
     _msgSub?.cancel();

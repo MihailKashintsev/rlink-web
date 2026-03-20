@@ -274,38 +274,46 @@ class _NearbyTab extends StatelessWidget {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<int>(
       valueListenable: BleService.instance.peersCount,
-      builder: (_, count, __) {
-        return ValueListenableBuilder<Set<String>>(
-          valueListenable: BleService.instance.pendingProfiles,
-          builder: (_, pending, __) {
-            final peers = BleService.instance.connectedPeerIds;
-            if (peers.isEmpty && pending.isEmpty) {
-              return Center(
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.bluetooth_searching,
-                      size: 72, color: Colors.grey.shade700),
-                  const SizedBox(height: 16),
-                  Text('Ищем устройства...',
-                      style:
-                          TextStyle(color: Colors.grey.shade400, fontSize: 16)),
-                  const SizedBox(height: 8),
-                  Text('Убедись что Bluetooth включён\nна обоих устройствах',
-                      textAlign: TextAlign.center,
-                      style:
-                          TextStyle(color: Colors.grey.shade600, fontSize: 13)),
-                ]),
-              );
-            }
-            return ListView(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              children: [
-                // Устройства которые загружают профиль
-                ...pending.map((bleId) => _PendingDeviceTile(bleId: bleId)),
-                // Устройства с полученным профилем
-                ...peers
-                    .where((id) => !pending.contains(id))
-                    .map((id) => _NearbyDeviceTile(publicKeyOrBleId: id)),
-              ],
+      builder: (_, __, ___) {
+        return ValueListenableBuilder<int>(
+          valueListenable: BleService.instance.peerMappingsVersion,
+          builder: (_, __, ___) {
+            return ValueListenableBuilder<Set<String>>(
+              valueListenable: BleService.instance.pendingProfiles,
+              builder: (_, pending, __) {
+                final peers = BleService.instance.connectedPeerIds;
+                if (peers.isEmpty && pending.isEmpty) {
+                  return Center(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.bluetooth_searching,
+                          size: 72, color: Colors.grey.shade700),
+                      const SizedBox(height: 16),
+                      Text('Ищем устройства...',
+                          style: TextStyle(
+                              color: Colors.grey.shade400, fontSize: 16)),
+                      const SizedBox(height: 8),
+                      Text('Убедись что Bluetooth включён\nна обоих устройствах',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              color: Colors.grey.shade600, fontSize: 13)),
+                    ]),
+                  );
+                }
+                return ListView(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  children: [
+                    // Устройства которые загружают профиль (pending по BLE ID)
+                    ...pending.map((bleId) => _PendingDeviceTile(bleId: bleId)),
+                    // Устройства с полученным профилем
+                    // Используем isPeerProfilePending чтобы корректно фильтровать
+                    // (peers содержит publicKey, pending содержит bleId)
+                    ...peers
+                        .where((id) =>
+                            !BleService.instance.isPeerProfilePending(id))
+                        .map((id) => _NearbyDeviceTile(publicKeyOrBleId: id)),
+                  ],
+                );
+              },
             );
           },
         );
@@ -433,6 +441,8 @@ class _NearbyDeviceTile extends StatelessWidget {
   }
 
   void _addContact(BuildContext context, String peerId, {Contact? existing}) {
+    // Всегда сохраняем по публичному ключу, а не по BLE UUID
+    final resolvedKey = BleService.instance.resolvePublicKey(peerId);
     final ctrl = TextEditingController(text: existing?.nickname ?? '');
     showDialog(
       context: context,
@@ -453,11 +463,11 @@ class _NearbyDeviceTile extends StatelessWidget {
               final name = ctrl.text.trim();
               if (name.isEmpty) return;
               final contact = Contact(
-                publicKeyHex: peerId,
+                publicKeyHex: resolvedKey,
                 nickname: name,
-                avatarColor: 0xFF5C6BC0,
-                avatarEmoji: '',
-                addedAt: DateTime.now(),
+                avatarColor: existing?.avatarColor ?? 0xFF5C6BC0,
+                avatarEmoji: existing?.avatarEmoji ?? '',
+                addedAt: existing?.addedAt ?? DateTime.now(),
               );
               await ChatStorageService.instance.saveContact(contact);
               if (context.mounted) {
