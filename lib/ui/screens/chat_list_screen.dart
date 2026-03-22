@@ -6,6 +6,7 @@ import '../../main.dart';
 import '../../models/contact.dart';
 import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/profile_service.dart';
 import '../widgets/avatar_widget.dart';
@@ -24,8 +25,9 @@ class ChatListScreen extends StatefulWidget {
 class _ChatListScreenState extends State<ChatListScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabs;
-  StreamSubscription<IncomingMessage>? _msgSub;
   int _currentTab = 0;
+  bool _searchActive = false;
+  final _searchController = TextEditingController();
 
   @override
   void initState() {
@@ -35,15 +37,14 @@ class _ChatListScreenState extends State<ChatListScreen>
       if (mounted) setState(() => _currentTab = _tabs.index);
     });
     ChatStorageService.instance.loadContacts();
-    _msgSub = incomingMessageController.stream.listen((_) {
-      if (mounted) setState(() {});
-    });
+    // Лишний setState удалён: _ChatsTab сам слушает стрим через дебаунс,
+    // а бейдж BLE обновляется через ValueListenableBuilder.
   }
 
   @override
   void dispose() {
     _tabs.dispose();
-    _msgSub?.cancel();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -60,6 +61,24 @@ class _ChatListScreenState extends State<ChatListScreen>
     _tabs.animateTo(2);
   }
 
+  /// Кнопка поиска + обновления: переключает поиск и обновляет данные текущей вкладки
+  Future<void> _toggleSearch() async {
+    final wasActive = _searchActive;
+    setState(() {
+      _searchActive = !_searchActive;
+      if (!_searchActive) _searchController.clear();
+    });
+    // При открытии поиска — сразу обновляем данные
+    if (!wasActive) {
+      await ChatStorageService.instance.loadContacts();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Список обновлён'), duration: Duration(seconds: 1)),
+      );
+    }
+  }
+
   Future<void> _broadcastProfile() async {
     final profile = ProfileService.instance.profile;
     if (profile == null) return;
@@ -68,6 +87,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       nick: profile.nickname,
       color: profile.avatarColor,
       emoji: profile.avatarEmoji,
+      x25519Key: CryptoService.instance.x25519PublicKeyBase64,
     );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -82,53 +102,89 @@ class _ChatListScreenState extends State<ChatListScreen>
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Rlink',
-            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22)),
-        leading: GestureDetector(
-          onTap: () => Navigator.push(context,
-              MaterialPageRoute(builder: (_) => const ProfileScreen())),
-          child: Padding(
-            padding: const EdgeInsets.all(10),
-            child: profile != null
-                ? AvatarWidget(
-                    initials: profile.initials,
-                    color: profile.avatarColor,
-                    emoji: profile.avatarEmoji,
-                    imagePath: profile.avatarImagePath,
-                    size: 36,
-                  )
-                : const Icon(Icons.account_circle),
-          ),
-        ),
+        title: _searchActive
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: const TextStyle(fontSize: 16),
+                decoration: InputDecoration(
+                  hintText: _currentTab == 0
+                      ? 'Поиск по чатам...'
+                      : _currentTab == 1
+                          ? 'Поиск контактов...'
+                          : 'Поиск устройств...',
+                  hintStyle: TextStyle(color: Colors.grey.shade500),
+                  border: InputBorder.none,
+                ),
+                onChanged: (_) => setState(() {}),
+              )
+            : const Text('Rlink',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22)),
+        leading: _searchActive
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () {
+                  setState(() {
+                    _searchActive = false;
+                    _searchController.clear();
+                  });
+                },
+              )
+            : GestureDetector(
+                onTap: () => Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => const ProfileScreen())),
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: profile != null
+                      ? AvatarWidget(
+                          initials: profile.initials,
+                          color: profile.avatarColor,
+                          emoji: profile.avatarEmoji,
+                          imagePath: profile.avatarImagePath,
+                          size: 36,
+                        )
+                      : const Icon(Icons.account_circle),
+                ),
+              ),
         actions: [
-          if (_currentTab == 2)
+          if (!_searchActive) ...[
+            if (_currentTab == 2)
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                tooltip: 'Обновить профили',
+                onPressed: _broadcastProfile,
+              ),
+            ValueListenableBuilder<int>(
+              valueListenable: BleService.instance.peersCount,
+              builder: (_, count, __) => IconButton(
+                icon: count > 0
+                    ? Badge(
+                        label: Text('$count'),
+                        child: const Icon(Icons.bluetooth_searching))
+                    : const Icon(Icons.bluetooth_searching),
+                tooltip: 'Найти устройства',
+                onPressed: _rescan,
+              ),
+            ),
+          ],
+          // Единая кнопка поиска + обновления для вкладок чатов и контактов
+          if (_currentTab != 2)
             IconButton(
-              icon: const Icon(Icons.refresh),
-              tooltip: 'Обновить профили',
-              onPressed: _broadcastProfile,
+              icon: Icon(_searchActive ? Icons.close : Icons.search),
+              tooltip: _searchActive ? 'Закрыть поиск' : 'Поиск и обновление',
+              onPressed: _toggleSearch,
             ),
-          ValueListenableBuilder<int>(
-            valueListenable: BleService.instance.peersCount,
-            builder: (_, count, __) => IconButton(
-              icon: count > 0
-                  ? Badge(
-                      label: Text('$count'),
-                      child: const Icon(Icons.bluetooth_searching))
-                  : const Icon(Icons.bluetooth_searching),
-              tooltip: 'Найти устройства',
-              onPressed: _rescan,
+          if (!_searchActive)
+            IconButton(
+              icon: const Icon(Icons.settings_outlined),
+              tooltip: 'Настройки',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                );
+              },
             ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: 'Настройки',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SettingsScreen()),
-              );
-            },
-          ),
         ],
         bottom: TabBar(
           controller: _tabs,
@@ -141,7 +197,12 @@ class _ChatListScreenState extends State<ChatListScreen>
       ),
       body: TabBarView(
         controller: _tabs,
-        children: [_ChatsTab(), const ContactsScreen(), _NearbyTab()],
+        children: [
+          _ChatsTab(searchQuery: _searchActive ? _searchController.text : ''),
+          ContactsScreen(
+              searchQuery: _searchActive ? _searchController.text : ''),
+          _NearbyTab(),
+        ],
       ),
     );
   }
@@ -150,6 +211,9 @@ class _ChatListScreenState extends State<ChatListScreen>
 // ── Чаты ────────────────────────────────────────────────────────
 
 class _ChatsTab extends StatefulWidget {
+  final String searchQuery;
+  const _ChatsTab({this.searchQuery = ''});
+
   @override
   State<_ChatsTab> createState() => _ChatsTabState();
 }
@@ -157,45 +221,54 @@ class _ChatsTab extends StatefulWidget {
 class _ChatsTabState extends State<_ChatsTab> {
   List<_ChatItem> _items = [];
   StreamSubscription<IncomingMessage>? _sub;
+  Timer? _loadDebounce;
 
   @override
   void initState() {
     super.initState();
     _load();
-    _sub = incomingMessageController.stream.listen((_) => _load());
+    // Дебаунс 300мс — не перезагружаем весь список на каждое сообщение
+    _sub = incomingMessageController.stream.listen((_) {
+      _loadDebounce?.cancel();
+      _loadDebounce = Timer(const Duration(milliseconds: 300), _load);
+    });
   }
 
   @override
   void dispose() {
+    _loadDebounce?.cancel();
     _sub?.cancel();
     super.dispose();
   }
 
+  /// Единый SQL JOIN вместо N+1 запросов — критично для производительности на iOS.
   Future<void> _load() async {
-    final storage = ChatStorageService.instance;
-    final peerIds = await storage.getChatPeerIds();
-    final items = <_ChatItem>[];
-    for (final peerId in peerIds) {
-      final last = await storage.getLastMessage(peerId);
-      if (last == null) continue;
-      final contact = await storage.getContact(peerId);
-      items.add(_ChatItem(
-        peerId: peerId,
-        nickname: contact?.nickname ??
-            '${peerId.substring(0, peerId.length.clamp(0, 8))}...',
-        avatarColor: contact?.avatarColor ?? 0xFF607D8B,
-        avatarEmoji: contact?.avatarEmoji ?? '',
-        avatarImagePath: contact?.avatarImagePath,
-        lastMessage: last.text,
-        lastTime: last.timestamp,
-        isOnline: BleService.instance.isPeerConnected(peerId),
-      ));
-    }
-    if (mounted) setState(() => _items = items);
+    final summaries = await ChatStorageService.instance.getChatSummaries();
+    if (!mounted) return;
+    setState(() => _items = summaries.map((s) => _ChatItem(
+      peerId: s.peerId,
+      nickname: s.nickname ??
+          '${s.peerId.substring(0, s.peerId.length.clamp(0, 8))}...',
+      avatarColor: s.avatarColor ?? 0xFF607D8B,
+      avatarEmoji: s.avatarEmoji ?? '',
+      avatarImagePath: s.avatarImagePath,
+      lastMessage: s.displayText,
+      lastTime: s.timestamp,
+      isOnline: BleService.instance.isPeerConnected(s.peerId),
+    )).toList());
   }
 
   @override
   Widget build(BuildContext context) {
+    final q = widget.searchQuery.toLowerCase().trim();
+    final visible = q.isEmpty
+        ? _items
+        : _items
+            .where((item) =>
+                item.nickname.toLowerCase().contains(q) ||
+                item.lastMessage.toLowerCase().contains(q))
+            .toList();
+
     if (_items.isEmpty) {
       return Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -210,12 +283,18 @@ class _ChatsTabState extends State<_ChatsTab> {
         ]),
       );
     }
+    if (visible.isEmpty) {
+      return Center(
+        child: Text('Ничего не найдено',
+            style: TextStyle(color: Colors.grey.shade500, fontSize: 15)),
+      );
+    }
     return ListView.separated(
-      itemCount: _items.length,
+      itemCount: visible.length,
       separatorBuilder: (_, __) =>
           Divider(height: 1, indent: 72, color: Colors.grey.shade800),
       itemBuilder: (_, i) {
-        final item = _items[i];
+        final item = visible[i];
         return ListTile(
           leading: AvatarWidget(
             initials: item.nickname[0].toUpperCase(),

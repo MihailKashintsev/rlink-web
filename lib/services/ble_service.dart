@@ -27,6 +27,8 @@ class BleService {
   final Map<String, String> _bleIdToPublicKey = {};
   // Ed25519 public key → BLE device ID
   final Map<String, String> _publicKeyToBleId = {};
+  // Ed25519 public key → X25519 public key base64 (для E2E шифрования)
+  final Map<String, String> _x25519Keys = {};
 
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<dynamic>? _eventSub;
@@ -60,9 +62,20 @@ class BleService {
   void clearMappings() {
     _bleIdToPublicKey.clear();
     _publicKeyToBleId.clear();
+    _x25519Keys.clear();
     debugPrint('[BLE] Key mappings cleared');
     peerMappingsVersion.value++;
   }
+
+  /// Регистрирует X25519 публичный ключ пира (для E2E шифрования).
+  void registerPeerX25519Key(String publicKey, String x25519KeyBase64) {
+    if (x25519KeyBase64.isNotEmpty) {
+      _x25519Keys[publicKey] = x25519KeyBase64;
+    }
+  }
+
+  /// Возвращает X25519 публичный ключ пира (base64) или null если неизвестен.
+  String? getPeerX25519Key(String publicKey) => _x25519Keys[publicKey];
 
   /// Повторно запрашивает профили для всех уже подключённых устройств.
   /// Вызывается после clearMappings() чтобы загрузить профили заново.
@@ -135,6 +148,11 @@ class BleService {
         .toSet()
         .toList();
   }
+
+  /// Проверяет, является ли bleId прямым (физически подключённым) устройством.
+  /// Используется чтобы отличить прямые профили от пересланных через промежуточные узлы.
+  bool isDirectBleId(String bleId) =>
+      _connectedPeers.containsKey(DeviceIdentifier(bleId));
 
   /// Проверяет подключён ли пир (по публичному ключу или BLE ID)
   bool isPeerConnected(String peerId) {
@@ -386,12 +404,21 @@ class BleService {
       debugPrint('[BLE] Connected to ${device.remoteId}');
       // Отправляем свой профиль
       onPeerConnected?.call(device.remoteId.str);
-      // Таймаут: если профиль не пришёл за 5 сек — убираем лоадер
+      // Таймаут: если профиль не пришёл за 5 сек — повторяем запрос профиля
       Future.delayed(const Duration(seconds: 5), () {
         if (pendingProfiles.value.contains(device.remoteId.str)) {
-          final upd = Set<String>.from(pendingProfiles.value)
-            ..remove(device.remoteId.str);
-          pendingProfiles.value = upd;
+          debugPrint('[BLE] Profile timeout for ${device.remoteId.str}, retrying');
+          // Повторно отправляем свой профиль — пир ответит своим
+          onPeerConnected?.call(device.remoteId.str);
+          // Финальный таймаут через ещё 6 сек — убираем лоадер если всё равно нет
+          Future.delayed(const Duration(seconds: 6), () {
+            if (pendingProfiles.value.contains(device.remoteId.str)) {
+              final upd = Set<String>.from(pendingProfiles.value)
+                ..remove(device.remoteId.str);
+              pendingProfiles.value = upd;
+              debugPrint('[BLE] Profile never received for ${device.remoteId.str}');
+            }
+          });
         }
       });
     } catch (e) {

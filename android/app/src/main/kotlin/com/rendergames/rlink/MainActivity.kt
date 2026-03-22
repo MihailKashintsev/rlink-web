@@ -1,4 +1,4 @@
-package com.example.mesh_chat
+package com.rendergames.rlink
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -67,17 +67,32 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun showMessageNotification() {
+    private fun showMessageNotification(title: String = "Rlink", body: String = "Новое сообщение", sound: Boolean = true, vibration: Boolean = true) {
         if (isAppInForeground) return
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+
+        // Recreate channel with correct sound/vibration settings
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val importance = if (sound) NotificationManager.IMPORTANCE_DEFAULT else NotificationManager.IMPORTANCE_LOW
+            val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, "Сообщения Rlink", importance).apply {
+                description = "Уведомления о новых сообщениях"
+                enableVibration(vibration)
+                if (!sound) setSound(null, null)
+            }
+            manager.createNotificationChannel(channel)
+        }
+
+        val builder = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
-            .setContentTitle("Rlink")
-            .setContentText("Новое сообщение")
+            .setContentTitle(title)
+            .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
-            .build()
-        manager.notify(System.currentTimeMillis().toInt(), notification)
+
+        if (!sound) builder.setSound(null)
+        if (!vibration) builder.setVibrate(null)
+
+        manager.notify(System.currentTimeMillis().toInt(), builder.build())
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -100,6 +115,14 @@ class MainActivity : FlutterActivity() {
                     "sendPacket" -> {
                         val bytes = call.argument<ByteArray>("data")
                         if (bytes != null) notifySubscribers(bytes)
+                        result.success(null)
+                    }
+                    "showNotification" -> {
+                        val title = call.argument<String>("title") ?: "Rlink"
+                        val body = call.argument<String>("body") ?: "Новое сообщение"
+                        val sound = call.argument<Boolean>("sound") ?: true
+                        val vibration = call.argument<Boolean>("vibration") ?: true
+                        showMessageNotification(title, body, sound, vibration)
                         result.success(null)
                     }
                     else -> result.notImplemented()

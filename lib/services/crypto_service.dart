@@ -4,12 +4,12 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-/// Хранит Ed25519 keypair пользователя (его "аккаунт") и
-/// предоставляет методы для шифрования/подписи сообщений.
+/// Хранит Ed25519 keypair пользователя (его "аккаунт") и отдельный X25519
+/// keypair для ECDH шифрования сообщений.
 ///
 /// Схема:
-///   Identity  → Ed25519  (подпись сообщений + публичный ID)
-///   Session   → X25519   (ECDH key exchange per-peer)
+///   Identity  → Ed25519  (публичный ID пользователя)
+///   X25519    → X25519   (ECDH key exchange per-message)
 ///   Payload   → ChaCha20-Poly1305 (AEAD шифрование)
 class CryptoService {
   CryptoService._();
@@ -17,6 +17,8 @@ class CryptoService {
 
   static const _keyPrivate = 'mesh_identity_private';
   static const _keyPublic = 'mesh_identity_public';
+  static const _keyX25519Private = 'mesh_x25519_private';
+  static const _keyX25519Public = 'mesh_x25519_public';
 
   final _storage = const FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
@@ -29,31 +31,35 @@ class CryptoService {
 
   late SimpleKeyPair _identityKeyPair;
 
+  /// X25519 keypair для ECDH — хранится отдельно от Ed25519 идентити.
+  /// Это обязательно: Ed25519 байты нельзя напрямую использовать как X25519.
+  late SimpleKeyPair _x25519IdentityKeyPair;
+
   /// Публичный ключ как hex — это ID пользователя (аналог номера телефона)
   late String publicKeyHex;
 
-  /// Инициализация: загружаем или генерируем keypair
+  /// X25519 публичный ключ в base64 — передаётся в profile broadcast
+  /// и используется получателем для ECDH при шифровании сообщений.
+  late String x25519PublicKeyBase64;
+
+  /// Инициализация: загружаем или генерируем Ed25519 + X25519 keypairs
   Future<void> init() async {
+    // ── Ed25519 identity keypair ──────────────────────────────────
     final storedPrivate = await _storage.read(key: _keyPrivate);
     final storedPublic = await _storage.read(key: _keyPublic);
 
     if (storedPrivate != null && storedPublic != null) {
-      // Восстанавливаем из хранилища
       final privateBytes = base64.decode(storedPrivate);
       final publicBytes = base64.decode(storedPublic);
-
       _identityKeyPair = SimpleKeyPairData(
         privateBytes,
         publicKey: SimplePublicKey(publicBytes, type: KeyPairType.ed25519),
         type: KeyPairType.ed25519,
       );
     } else {
-      // Генерируем новый keypair
       _identityKeyPair = await _ed25519.newKeyPair();
-
       final privateBytes = await _identityKeyPair.extractPrivateKeyBytes();
       final publicKey = await _identityKeyPair.extractPublicKey();
-
       await _storage.write(
           key: _keyPrivate, value: base64.encode(privateBytes));
       await _storage.write(
@@ -62,9 +68,35 @@ class CryptoService {
 
     final pubKey = await _identityKeyPair.extractPublicKey();
     publicKeyHex = _bytesToHex(pubKey.bytes);
+
+    // ── X25519 ECDH keypair ───────────────────────────────────────
+    final storedX25519Priv = await _storage.read(key: _keyX25519Private);
+    final storedX25519Pub = await _storage.read(key: _keyX25519Public);
+
+    if (storedX25519Priv != null && storedX25519Pub != null) {
+      final privBytes = base64.decode(storedX25519Priv);
+      final pubBytes = base64.decode(storedX25519Pub);
+      _x25519IdentityKeyPair = SimpleKeyPairData(
+        privBytes,
+        publicKey: SimplePublicKey(pubBytes, type: KeyPairType.x25519),
+        type: KeyPairType.x25519,
+      );
+    } else {
+      _x25519IdentityKeyPair = await _x25519.newKeyPair();
+      final privBytes =
+          await _x25519IdentityKeyPair.extractPrivateKeyBytes();
+      final pubKeyX = await _x25519IdentityKeyPair.extractPublicKey();
+      await _storage.write(
+          key: _keyX25519Private, value: base64.encode(privBytes));
+      await _storage.write(
+          key: _keyX25519Public, value: base64.encode(pubKeyX.bytes));
+    }
+
+    final x25519Pub = await _x25519IdentityKeyPair.extractPublicKey();
+    x25519PublicKeyBase64 = base64.encode(x25519Pub.bytes);
   }
 
-  /// Возвращает байты публичного ключа (передаём в BLE advertising)
+  /// Возвращает байты Ed25519 публичного ключа (для BLE advertising)
   Future<Uint8List> getPublicKeyBytes() async {
     final pub = await _identityKeyPair.extractPublicKey();
     return Uint8List.fromList(pub.bytes);
@@ -72,114 +104,72 @@ class CryptoService {
 
   // ─── Шифрование сообщений ─────────────────────────────────
 
-  /// Шифрует [plaintext] для получателя с публичным ключом [recipientPublicKeyHex].
+  /// Шифрует [plaintext] для получателя с X25519 ключом [recipientX25519KeyBase64].
   ///
-  /// Возвращает [EncryptedMessage] — структуру для передачи по сети.
+  /// Использует эфемерный X25519 keypair + ECDH + ChaCha20-Poly1305.
+  /// Поля кодируются в base64 для компактности (укладывается в BLE MTU ~490 байт).
   Future<EncryptedMessage> encryptMessage({
     required String plaintext,
-    required String recipientPublicKeyHex,
+    required String recipientX25519KeyBase64,
   }) async {
     // 1. Эфемерный X25519 keypair для этого сообщения
     final ephemeralKeyPair = await _x25519.newKeyPair();
     final ephemeralPublicKey = await ephemeralKeyPair.extractPublicKey();
 
-    // 2. X25519 ECDH с получателем → общий секрет
-    final recipientPublicBytes = _hexToBytes(recipientPublicKeyHex);
-    // Ed25519 → X25519 conversion: в реальном продакшне используй
-    // libsodium-совместимое преобразование. Здесь используем байты напрямую
-    // для простоты прототипа.
+    // 2. X25519 ECDH с X25519 ключом получателя → общий секрет
     final recipientX25519Key = SimplePublicKey(
-      recipientPublicBytes,
+      base64.decode(recipientX25519KeyBase64),
       type: KeyPairType.x25519,
     );
-
     final sharedSecret = await _x25519.sharedSecretKey(
       keyPair: ephemeralKeyPair,
       remotePublicKey: recipientX25519Key,
     );
 
-    // 3. Шифруем ChaCha20-Poly1305
+    // 3. ChaCha20-Poly1305 шифрование
     final nonce = _chacha.newNonce();
     final secretBox = await _chacha.encrypt(
-      utf8.encode(plaintext),
+      plaintext.codeUnits,
       secretKey: sharedSecret,
       nonce: nonce,
     );
 
-    // 4. Подписываем отправителем (authenticity)
-    final payload = Uint8List.fromList([
-      ...ephemeralPublicKey.bytes,
-      ...secretBox.nonce,
-      ...secretBox.cipherText,
-      ...secretBox.mac.bytes,
-    ]);
-    final signature = await _ed25519.sign(payload, keyPair: _identityKeyPair);
-
     return EncryptedMessage(
       senderPublicKey: publicKeyHex,
-      ephemeralPublicKey: _bytesToHex(ephemeralPublicKey.bytes),
-      nonce: _bytesToHex(secretBox.nonce),
+      ephemeralPublicKey: base64.encode(ephemeralPublicKey.bytes),
+      nonce: base64.encode(secretBox.nonce),
       cipherText: base64.encode(secretBox.cipherText),
-      mac: _bytesToHex(secretBox.mac.bytes),
-      signature: _bytesToHex(signature.bytes),
+      mac: base64.encode(secretBox.mac.bytes),
+      signature: '', // подпись убрана для экономии 88+ байт в BLE MTU
     );
   }
 
   /// Расшифровывает [message] адресованное нам.
+  /// Использует наш X25519 identity keypair.
   Future<String?> decryptMessage(EncryptedMessage message) async {
     try {
-      // 1. Проверяем подпись отправителя
-      final senderPubBytes = _hexToBytes(message.senderPublicKey);
-      final ephemeralBytes = _hexToBytes(message.ephemeralPublicKey);
-      final nonceBytes = _hexToBytes(message.nonce);
+      final ephemeralBytes = base64.decode(message.ephemeralPublicKey);
+      final nonceBytes = base64.decode(message.nonce);
       final cipherBytes = base64.decode(message.cipherText);
-      final macBytes = _hexToBytes(message.mac);
-      final sigBytes = _hexToBytes(message.signature);
+      final macBytes = base64.decode(message.mac);
 
-      final payload = Uint8List.fromList([
-        ...ephemeralBytes,
-        ...nonceBytes,
-        ...cipherBytes,
-        ...macBytes,
-      ]);
-
-      final senderKey =
-          SimplePublicKey(senderPubBytes, type: KeyPairType.ed25519);
-      final isValid = await _ed25519.verify(
-        payload,
-        signature: Signature(sigBytes, publicKey: senderKey),
-      );
-      if (!isValid) return null;
-
-      // 2. X25519 ECDH: наш приватный ключ + эфемерный публичный
-      // Конвертируем наш Ed25519 в X25519 (упрощённо для прототипа)
-      final ourPrivateBytes = await _identityKeyPair.extractPrivateKeyBytes();
-      final ourX25519KeyPair = SimpleKeyPairData(
-        ourPrivateBytes,
-        publicKey: SimplePublicKey(
-          (await _identityKeyPair.extractPublicKey()).bytes,
-          type: KeyPairType.x25519,
-        ),
-        type: KeyPairType.x25519,
-      );
-
+      // X25519 ECDH: наш X25519 приватный ключ + эфемерный публичный ключ
       final ephemeralPublicKey =
           SimplePublicKey(ephemeralBytes, type: KeyPairType.x25519);
       final sharedSecret = await _x25519.sharedSecretKey(
-        keyPair: ourX25519KeyPair,
+        keyPair: _x25519IdentityKeyPair,
         remotePublicKey: ephemeralPublicKey,
       );
 
-      // 3. Расшифровываем
+      // Расшифровываем
       final secretBox = SecretBox(
         cipherBytes,
         nonce: nonceBytes,
         mac: Mac(macBytes),
       );
-
       final plainBytes =
           await _chacha.decrypt(secretBox, secretKey: sharedSecret);
-      return utf8.decode(plainBytes);
+      return String.fromCharCodes(plainBytes);
     } catch (e) {
       return null;
     }
@@ -189,24 +179,17 @@ class CryptoService {
 
   String _bytesToHex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-
-  Uint8List _hexToBytes(String hex) {
-    final result = Uint8List(hex.length ~/ 2);
-    for (int i = 0; i < hex.length; i += 2) {
-      result[i ~/ 2] = int.parse(hex.substring(i, i + 2), radix: 16);
-    }
-    return result;
-  }
 }
 
-/// Зашифрованное сообщение — то, что реально летит по BLE
+/// Зашифрованное сообщение — то, что реально летит по BLE в 'msg' пакете.
+/// Все бинарные поля кодируются в base64 для компактности.
 class EncryptedMessage {
-  final String senderPublicKey; // Ed25519 публичный ключ отправителя (его ID)
-  final String ephemeralPublicKey; // X25519 эфемерный ключ (для ECDH)
-  final String nonce; // 12 байт, hex
+  final String senderPublicKey; // Ed25519 публичный ключ отправителя hex (его ID)
+  final String ephemeralPublicKey; // X25519 эфемерный ключ base64 (для ECDH)
+  final String nonce; // 12 байт base64
   final String cipherText; // base64
-  final String mac; // Poly1305 тег, hex
-  final String signature; // Ed25519 подпись, hex
+  final String mac; // Poly1305 тег base64
+  final String signature; // не используется, оставлен для API совместимости
 
   const EncryptedMessage({
     required this.senderPublicKey,
@@ -214,24 +197,23 @@ class EncryptedMessage {
     required this.nonce,
     required this.cipherText,
     required this.mac,
-    required this.signature,
+    this.signature = '',
   });
 
   factory EncryptedMessage.fromJson(Map<String, dynamic> j) => EncryptedMessage(
-        senderPublicKey: j['spk'] as String,
-        ephemeralPublicKey: j['epk'] as String,
-        nonce: j['n'] as String,
-        cipherText: j['ct'] as String,
-        mac: j['mac'] as String,
-        signature: j['sig'] as String,
+        senderPublicKey: j['spk'] as String? ?? '',
+        ephemeralPublicKey: j['epk'] as String? ?? '',
+        nonce: j['n'] as String? ?? '',
+        cipherText: j['ct'] as String? ?? '',
+        mac: j['mac'] as String? ?? '',
       );
 
+  /// Сериализация без подписи — умещается в BLE MTU ~490 байт.
   Map<String, dynamic> toJson() => {
         'spk': senderPublicKey,
         'epk': ephemeralPublicKey,
         'n': nonce,
         'ct': cipherText,
         'mac': mac,
-        'sig': signature,
       };
 }

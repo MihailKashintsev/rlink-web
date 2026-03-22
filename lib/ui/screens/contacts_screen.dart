@@ -7,13 +7,21 @@ import '../widgets/avatar_widget.dart';
 import 'chat_screen.dart';
 
 class ContactsScreen extends StatelessWidget {
-  const ContactsScreen({super.key});
+  final String searchQuery;
+  const ContactsScreen({super.key, this.searchQuery = ''});
 
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<List<Contact>>(
       valueListenable: ChatStorageService.instance.contactsNotifier,
       builder: (_, contacts, __) {
+        final q = searchQuery.toLowerCase().trim();
+        final visible = q.isEmpty
+            ? contacts
+            : contacts
+                .where((c) => c.nickname.toLowerCase().contains(q))
+                .toList();
+
         if (contacts.isEmpty) {
           return Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -30,12 +38,19 @@ class ContactsScreen extends StatelessWidget {
           );
         }
 
+        if (visible.isEmpty) {
+          return Center(
+            child: Text('Ничего не найдено',
+                style: TextStyle(color: Colors.grey.shade500, fontSize: 15)),
+          );
+        }
+
         return ListView.separated(
-          itemCount: contacts.length,
+          itemCount: visible.length,
           separatorBuilder: (_, __) =>
               Divider(height: 1, indent: 72, color: Colors.grey.shade800),
           itemBuilder: (_, i) {
-            final c = contacts[i];
+            final c = visible[i];
             return _ContactTile(contact: c);
           },
         );

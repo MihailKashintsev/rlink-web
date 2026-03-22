@@ -36,7 +36,7 @@ class ChatStorageService {
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE contacts (
@@ -58,6 +58,8 @@ class ChatStorageService {
             image_path           TEXT,
             video_path           TEXT,
             voice_path           TEXT,
+            latitude             REAL,
+            longitude            REAL,
             is_outgoing          INTEGER NOT NULL,
             timestamp            INTEGER NOT NULL,
             status               INTEGER NOT NULL DEFAULT 1,
@@ -106,6 +108,14 @@ class ChatStorageService {
             await db.execute(
               'ALTER TABLE messages ADD COLUMN video_path TEXT',
             );
+          } catch (_) {}
+        }
+        if (oldVersion < 7) {
+          try {
+            await db.execute('ALTER TABLE messages ADD COLUMN latitude REAL');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE messages ADD COLUMN longitude REAL');
           } catch (_) {}
         }
       },
@@ -303,6 +313,20 @@ class ChatStorageService {
     _messagesNotifiers.remove(peerId);
   }
 
+  /// Переносит все сообщения с [oldPeerId] на [newPeerId].
+  /// Используется при смене ключа контакта (переустановка приложения).
+  Future<void> migrateMessages(String oldPeerId, String newPeerId) async {
+    if (oldPeerId == newPeerId) return;
+    await _db?.update(
+      'messages',
+      {'peer_id': newPeerId},
+      where: 'peer_id = ?',
+      whereArgs: [oldPeerId],
+    );
+    _messagesNotifiers.remove(oldPeerId);
+    _notifyMessages(newPeerId);
+  }
+
   Future<ChatMessage?> getLastMessage(String peerId) async {
     final rows = await _db?.query(
       'messages',
@@ -326,6 +350,45 @@ class ChatStorageService {
     return rows.map((r) => r['peer_id'] as String).toList();
   }
 
+  /// Возвращает сводку всех чатов одним SQL JOIN запросом.
+  /// Избегает N+1 паттерна при загрузке списка чатов.
+  Future<List<ChatSummary>> getChatSummaries() async {
+    final rows = await _db?.rawQuery('''
+      SELECT
+        m.peer_id,
+        m.text,
+        m.image_path,
+        m.voice_path,
+        m.video_path,
+        m.timestamp,
+        c.nick,
+        c.color,
+        c.emoji,
+        c.avatar_img_path
+      FROM messages m
+      INNER JOIN (
+        SELECT peer_id, MAX(timestamp) AS max_ts
+        FROM messages
+        GROUP BY peer_id
+      ) latest ON m.peer_id = latest.peer_id AND m.timestamp = latest.max_ts
+      LEFT JOIN contacts c ON m.peer_id = c.id
+      GROUP BY m.peer_id
+      ORDER BY m.timestamp DESC
+    ''') ?? [];
+    return rows.map((r) => ChatSummary(
+      peerId: r['peer_id'] as String,
+      lastText: (r['text'] as String?) ?? '',
+      lastImagePath: r['image_path'] as String?,
+      lastVoicePath: r['voice_path'] as String?,
+      lastVideoPath: r['video_path'] as String?,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
+      nickname: r['nick'] as String?,
+      avatarColor: r['color'] as int?,
+      avatarEmoji: r['emoji'] as String?,
+      avatarImagePath: r['avatar_img_path'] as String?,
+    )).toList();
+  }
+
   final Map<String, ValueNotifier<List<ChatMessage>>> _messagesNotifiers = {};
 
   ValueNotifier<List<ChatMessage>> messagesNotifier(String peerId) {
@@ -347,8 +410,7 @@ class ChatStorageService {
     }
   }
 
-  Future<void> toggleReaction(
-      String messageId, String emoji, String fromId) async {
+  Future<void> toggleReaction(String messageId, String emoji, String fromId) async {
     final rows = await _db?.query(
       'messages',
       where: 'id = ?',
@@ -375,5 +437,41 @@ class ChatStorageService {
       whereArgs: [messageId],
     );
     _notifyMessages(msg.peerId);
+  }
+}
+
+/// Сводка чата — возвращается из getChatSummaries() единым SQL запросом.
+class ChatSummary {
+  final String peerId;
+  final String lastText;
+  final String? lastImagePath;
+  final String? lastVoicePath;
+  final String? lastVideoPath;
+  final DateTime timestamp;
+  final String? nickname;
+  final int? avatarColor;
+  final String? avatarEmoji;
+  final String? avatarImagePath;
+
+  const ChatSummary({
+    required this.peerId,
+    required this.lastText,
+    required this.timestamp,
+    this.lastImagePath,
+    this.lastVoicePath,
+    this.lastVideoPath,
+    this.nickname,
+    this.avatarColor,
+    this.avatarEmoji,
+    this.avatarImagePath,
+  });
+
+  /// Текст для отображения в превью последнего сообщения.
+  String get displayText {
+    if (lastText.isNotEmpty) return lastText;
+    if (lastImagePath != null) return '📷 Фото';
+    if (lastVoicePath != null) return '🎤 Голосовое';
+    if (lastVideoPath != null) return '📹 Видео';
+    return '';
   }
 }

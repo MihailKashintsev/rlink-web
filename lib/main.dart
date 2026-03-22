@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'models/chat_message.dart';
 import 'models/contact.dart';
+import 'services/app_settings.dart';
 import 'services/ble_service.dart';
 import 'services/chat_storage_service.dart';
 import 'services/crypto_service.dart';
@@ -18,6 +20,8 @@ import 'services/profile_service.dart';
 import 'services/update_service.dart';
 import 'ui/screens/chat_list_screen.dart';
 import 'ui/screens/onboarding_screen.dart';
+
+const _kBleChannel = MethodChannel('com.rendergames.rlink/ble');
 
 final incomingMessageController = StreamController<IncomingMessage>.broadcast();
 final pendingUpdateNotifier = ValueNotifier<UpdateInfo?>(null);
@@ -42,6 +46,7 @@ Future<void> main() async {
 
 Future<void> initServices() async {
   try {
+    await AppSettings.instance.init();
     await CryptoService.instance.init();
     await ProfileService.instance.init();
     await ChatStorageService.instance.init();
@@ -54,8 +59,17 @@ Future<void> initServices() async {
 
         final String text;
         if (encrypted.ephemeralPublicKey.isEmpty) {
+          // raw (plaintext) message — cipherText contains the actual text
+          if (encrypted.cipherText.isEmpty) return;
           text = encrypted.cipherText;
         } else {
+          // encrypted msg — validate all fields before decrypting
+          if (encrypted.nonce.isEmpty ||
+              encrypted.cipherText.isEmpty ||
+              encrypted.mac.isEmpty) {
+            debugPrint('[Main] Dropping malformed encrypted message (missing fields)');
+            return;
+          }
           final plaintext =
               await CryptoService.instance.decryptMessage(encrypted);
           if (plaintext == null) return;
@@ -102,6 +116,21 @@ Future<void> initServices() async {
           recipientId: fromId,
         );
 
+        // Android foreground notification bridge
+        if (Platform.isAndroid && AppSettings.instance.notificationsEnabled) {
+          try {
+            final contact = await ChatStorageService.instance.getContact(fromId);
+            final senderName = contact?.nickname ?? '${fromId.substring(0, 8)}…';
+            final preview = text.length > 60 ? '${text.substring(0, 60)}…' : text;
+            await _kBleChannel.invokeMethod('showNotification', {
+              'title': senderName,
+              'body': preview,
+              'sound': AppSettings.instance.notifSound,
+              'vibration': AppSettings.instance.notifVibration,
+            });
+          } catch (_) {}
+        }
+
         debugPrint(
             '[Main] Adding to stream: fromId=${fromId.substring(0, 16)}');
         incomingMessageController.add(IncomingMessage(
@@ -133,7 +162,7 @@ Future<void> initServices() async {
             .toggleReaction(messageId, emoji, fromId);
       },
       onImgMetaReceived: (String fromId, String msgId, int totalChunks,
-          bool isAvatar, bool isVoice, bool isVideo) {
+          bool isAvatar, bool isVoice, bool isVideo, bool isSquare) {
         ImageService.instance.initAssembly(
           msgId,
           totalChunks,
@@ -141,6 +170,7 @@ Future<void> initServices() async {
           isVoice: isVoice,
           fromId: fromId,
           isVideo: isVideo,
+          isSquare: isSquare,
         );
       },
       onImgChunkReceived:
@@ -205,13 +235,15 @@ Future<void> initServices() async {
             msgId: msgId,
           ));
         } else if (isVideo) {
-          final path = await ImageService.instance.assembleAndSaveVideo(msgId);
+          final isSquare = ImageService.instance.isSquareAssembly(msgId);
+          final path = await ImageService.instance.assembleAndSaveVideo(msgId, isSquare: isSquare);
           if (path == null) return;
           await ensureContact();
+          final label = isSquare ? '⬛ Видео' : '📹 Видео';
           final msg = ChatMessage(
             id: msgId,
             peerId: senderKey,
-            text: '📹 Видео',
+            text: label,
             isOutgoing: false,
             timestamp: DateTime.now(),
             status: MessageStatus.delivered,
@@ -220,7 +252,7 @@ Future<void> initServices() async {
           await ChatStorageService.instance.saveMessage(msg);
           incomingMessageController.add(IncomingMessage(
             fromId: senderKey,
-            text: '📹 Видео',
+            text: label,
             timestamp: msg.timestamp,
             msgId: msgId,
           ));
@@ -246,27 +278,74 @@ Future<void> initServices() async {
           ));
         }
       },
-      // bleId — BLE device ID отправителя (для маппинга)
-      // publicKey — Ed25519 ключ из профиля
-      onProfile: (bleId, publicKey, nick, color, emoji) async {
-        // Регистрируем маппинг BLE ID → публичный ключ
-        BleService.instance.registerPeerKey(bleId, publicKey);
+      // bleId — BLE device ID источника пакета (для маппинга)
+      // publicKey — Ed25519 ключ из payload профиля
+      // x25519Key — X25519 ключ base64 для E2E шифрования (пустая строка у старых версий)
+      onProfile: (bleId, publicKey, nick, color, emoji, x25519Key) async {
+        // ВАЖНО: регистрируем маппинг BLE ID → publicKey ТОЛЬКО для прямых пиров.
+        // Если профиль пересылается через промежуточное устройство (gossip),
+        // bleId — это BLE ID пересыльщика, а не владельца профиля.
+        // Ошибочный маппинг создаёт "раздвоенное" подключение в UI.
+        final isDirect = BleService.instance.isDirectBleId(bleId);
+        if (isDirect) {
+          BleService.instance.registerPeerKey(bleId, publicKey);
+        }
+        // X25519 ключ сохраняем для любого профиля (прямого или пересланного).
+        if (x25519Key.isNotEmpty) {
+          BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
+        }
 
-        // Сохраняем контакт в БД ПЕРЕД тем как убрать лоадер.
+        // Контакт сохраняем в БД при любом профиле (прямом или пересланном).
         // finally гарантирует markProfileReceived даже при ошибке БД.
         try {
           final existing =
               await ChatStorageService.instance.getContact(publicKey);
           if (existing == null) {
-            await ChatStorageService.instance.saveContact(Contact(
-              publicKeyHex: publicKey,
-              nickname: nick,
-              avatarColor: color,
-              avatarEmoji: emoji,
-              addedAt: DateTime.now(),
-            ));
-            debugPrint(
-                '[Profile] Auto-saved contact: $nick (key: ${publicKey.substring(0, 8)}...)');
+            // Смена ключа (переустановка приложения): ищем контакт с тем же ником
+            // но другим ключом ТОЛЬКО для прямых пиров (защита от спуфинга).
+            Contact? oldContact;
+            if (isDirect) {
+              final allContacts =
+                  await ChatStorageService.instance.getContacts();
+              try {
+                oldContact = allContacts.firstWhere(
+                  (c) =>
+                      c.nickname == nick &&
+                      c.publicKeyHex != publicKey,
+                );
+              } catch (_) {
+                oldContact = null;
+              }
+            }
+
+            if (oldContact != null) {
+              // Миграция: переносим историю со старого ключа на новый
+              debugPrint(
+                  '[Profile] Key rotation detected for $nick: '
+                  '${oldContact.publicKeyHex.substring(0, 8)} → ${publicKey.substring(0, 8)}');
+              await ChatStorageService.instance
+                  .migrateMessages(oldContact.publicKeyHex, publicKey);
+              await ChatStorageService.instance.saveContact(Contact(
+                publicKeyHex: publicKey,
+                nickname: nick,
+                avatarColor: color,
+                avatarEmoji: emoji,
+                avatarImagePath: oldContact.avatarImagePath,
+                addedAt: oldContact.addedAt,
+              ));
+              await ChatStorageService.instance
+                  .deleteContact(oldContact.publicKeyHex);
+            } else {
+              await ChatStorageService.instance.saveContact(Contact(
+                publicKeyHex: publicKey,
+                nickname: nick,
+                avatarColor: color,
+                avatarEmoji: emoji,
+                addedAt: DateTime.now(),
+              ));
+              debugPrint(
+                  '[Profile] Auto-saved contact: $nick (key: ${publicKey.substring(0, 8)}...) direct=$isDirect');
+            }
           } else {
             await ChatStorageService.instance.updateContact(Contact(
               publicKeyHex: publicKey,
@@ -277,13 +356,15 @@ Future<void> initServices() async {
               addedAt: existing.addedAt,
             ));
             debugPrint(
-                '[Profile] Updated contact: $nick (key: ${publicKey.substring(0, 8)}...)');
+                '[Profile] Updated contact: $nick (key: ${publicKey.substring(0, 8)}...) direct=$isDirect');
           }
         } catch (e) {
           debugPrint('[Profile] DB error saving contact: $e');
         } finally {
-          // Убираем лоадер ПОСЛЕ сохранения контакта — UI увидит правильные данные
-          BleService.instance.markProfileReceived(bleId);
+          // Убираем лоадер только для прямого пира — только у него есть pending запись
+          if (isDirect) {
+            BleService.instance.markProfileReceived(bleId);
+          }
         }
       },
     );
@@ -298,6 +379,7 @@ Future<void> initServices() async {
         nick: profile.nickname,
         color: profile.avatarColor,
         emoji: profile.avatarEmoji,
+        x25519Key: CryptoService.instance.x25519PublicKeyBase64,
       );
       debugPrint('[Profile] Sent my profile to $peerId');
       // Отправляем аватар в фоне после текстового профиля
@@ -366,6 +448,7 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    AppSettings.instance.addListener(_onSettingsChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await initServices();
       if (mounted) {
@@ -377,8 +460,13 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
     });
   }
 
+  void _onSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    AppSettings.instance.removeListener(_onSettingsChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -421,10 +509,13 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    final settings = AppSettings.instance;
     return MaterialApp(
       title: 'Rlink',
       debugShowCheckedModeBanner: false,
-      theme: _buildTheme(),
+      themeMode: settings.themeMode,
+      theme: _buildTheme(settings.accentColor, Brightness.light),
+      darkTheme: _buildTheme(settings.accentColor, Brightness.dark),
       home: !_ready
           ? const _SplashScreen()
           : _hasProfile
@@ -433,29 +524,32 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
     );
   }
 
-  ThemeData _buildTheme() {
+  ThemeData _buildTheme(Color accent, Brightness brightness) {
+    final isDark = brightness == Brightness.dark;
+    final base = isDark ? ThemeData.dark() : ThemeData.light();
     return ThemeData(
-      brightness: Brightness.dark,
-      scaffoldBackgroundColor: const Color(0xFF0A0A0A),
+      brightness: brightness,
+      scaffoldBackgroundColor: isDark ? const Color(0xFF0A0A0A) : const Color(0xFFF5F5F5),
       colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xFF1DB954),
-        brightness: Brightness.dark,
+        seedColor: accent,
+        brightness: brightness,
       ).copyWith(
-        surface: const Color(0xFF121212),
-        surfaceContainerHigh: const Color(0xFF1E1E1E),
+        surface: isDark ? const Color(0xFF121212) : Colors.white,
+        surfaceContainerHigh: isDark ? const Color(0xFF1E1E1E) : const Color(0xFFF0F0F0),
       ),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: Color(0xFF121212),
+      appBarTheme: AppBarTheme(
+        backgroundColor: isDark ? const Color(0xFF121212) : Colors.white,
         elevation: 0,
         scrolledUnderElevation: 1,
         surfaceTintColor: Colors.transparent,
+        foregroundColor: isDark ? Colors.white : Colors.black87,
       ),
-      tabBarTheme: const TabBarThemeData(
-        indicatorColor: Color(0xFF1DB954),
-        labelColor: Color(0xFF1DB954),
+      tabBarTheme: TabBarThemeData(
+        indicatorColor: accent,
+        labelColor: accent,
         unselectedLabelColor: Colors.grey,
       ),
-      textTheme: GoogleFonts.interTextTheme(ThemeData.dark().textTheme),
+      textTheme: GoogleFonts.interTextTheme(base.textTheme),
       useMaterial3: true,
     );
   }

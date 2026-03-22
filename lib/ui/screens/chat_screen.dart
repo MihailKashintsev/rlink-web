@@ -2,9 +2,10 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:open_filex/open_filex.dart';
 import 'package:uuid/uuid.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../main.dart';
 import '../../models/chat_message.dart';
@@ -53,8 +54,13 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isRecording = false;
   double _recordingSeconds = 0;
   Timer? _recordingTimer;
+  double? _pendingLat;
+  double? _pendingLng;
 
-  static const _kMaxMessageLength = 280;
+  // BLE ATT MTU ≈ 288 байт. Фиксированный overhead пакета ≈ 186 байт
+  // (id36 + t + ttl + ts + from64 + r8 + структура JSON).
+  // Оставляем 90 символов для текста — гарантированно уместится в MTU.
+  static const _kMaxMessageLength = 90;
   static final _publicKeyRegExp = RegExp(r'^[0-9a-fA-F]{64}$');
 
   bool _looksLikePublicKey(String id) => _publicKeyRegExp.hasMatch(id.trim());
@@ -214,6 +220,56 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _toggleLocation() async {
+    if (_pendingLat != null) {
+      // Already attached — clear it
+      setState(() {
+        _pendingLat = null;
+        _pendingLng = null;
+      });
+      return;
+    }
+    try {
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Нет доступа к геолокации')),
+          );
+        }
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.medium,
+          timeLimit: Duration(seconds: 8),
+        ),
+      );
+      setState(() {
+        _pendingLat = pos.latitude;
+        _pendingLng = pos.longitude;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('📍 Геолокация будет прикреплена к следующему сообщению'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка геолокации: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> _load() async {
     await ChatStorageService.instance.loadMessages(_resolvedPeerId);
     _scrollToBottom();
@@ -279,17 +335,22 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
 
-      // 2) Normal mode: send raw message (optionally as a reply).
+      // 2) Normal mode: send message (encrypted if X25519 key known, else raw).
       _controller.clear();
       msgId = _uuid.v4();
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
           ? _resolvedPeerId
           : widget.peerId;
+      final lat = _pendingLat;
+      final lng = _pendingLng;
+      setState(() { _pendingLat = null; _pendingLng = null; });
       final msg = ChatMessage(
         id: msgId,
         peerId: targetPeerId,
         text: text,
         replyToMessageId: _replyToMessageId,
+        latitude: lat,
+        longitude: lng,
         isOutgoing: true,
         timestamp: DateTime.now(),
         status: MessageStatus.sending,
@@ -297,13 +358,29 @@ class _ChatScreenState extends State<ChatScreen> {
       await ChatStorageService.instance.saveMessage(msg);
       _scrollToBottom();
 
-      await GossipRouter.instance.sendRawMessage(
-        text: text,
-        senderId: myId,
-        recipientId: targetPeerId,
-        messageId: msgId,
-        replyToMessageId: _replyToMessageId,
-      );
+      final x25519Key = BleService.instance.getPeerX25519Key(targetPeerId);
+      if (x25519Key != null && x25519Key.isNotEmpty) {
+        // Зашифрованная отправка — ChaCha20-Poly1305 + X25519 ECDH
+        final encrypted = await CryptoService.instance.encryptMessage(
+          plaintext: text,
+          recipientX25519KeyBase64: x25519Key,
+        );
+        await GossipRouter.instance.sendEncryptedMessage(
+          encrypted: encrypted,
+          senderId: myId,
+          recipientId: targetPeerId,
+          messageId: msgId,
+        );
+      } else {
+        // Fallback — plaintext если X25519 ключ ещё не получен (обмен профилями в процессе)
+        await GossipRouter.instance.sendRawMessage(
+          text: text,
+          senderId: myId,
+          recipientId: targetPeerId,
+          messageId: msgId,
+          replyToMessageId: _replyToMessageId,
+        );
+      }
 
       await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
         msgId,
@@ -445,7 +522,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     setState(() => _isSending = true);
     try {
-      final path = await ImageService.instance.saveVideo(videoPath);
+      final path = await ImageService.instance.saveVideo(videoPath, isSquare: true);
       final bytes = await File(path).readAsBytes();
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final msgId = _uuid.v4();
@@ -460,6 +537,7 @@ class _ChatScreenState extends State<ChatScreen> {
         recipientId: targetPeerId,
         isAvatar: false,
         isVideo: true,
+        isSquare: true,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -474,7 +552,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final msg = ChatMessage(
         id: msgId,
         peerId: targetPeerId,
-        text: '📹 Видео',
+        text: '⬛ Видео',
         isOutgoing: true,
         timestamp: DateTime.now(),
         status: MessageStatus.sent,
@@ -867,11 +945,13 @@ class _ChatScreenState extends State<ChatScreen> {
           isRecording: _isRecording,
           recordingSeconds: _recordingSeconds,
           maxLength: _kMaxMessageLength,
+          locationActive: _pendingLat != null,
           onSend: _send,
           onPickImage: _sendImage,
           onPickVideo: _sendVideo,
           onMicDown: _startVoiceRecording,
           onMicUp: _stopAndSendVoice,
+          onLocation: _toggleLocation,
         ),
       ]),
     );
@@ -938,7 +1018,7 @@ class _MessageBubble extends StatelessWidget {
             left: isOut ? 64 : 12, right: isOut ? 12 : 64, bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: isOut ? const Color(0xFF1DB954) : const Color(0xFF1E1E1E),
+          color: isOut ? cs.primary : cs.surfaceContainerHigh,
           borderRadius: BorderRadius.only(
             topLeft: const Radius.circular(18),
             topRight: const Radius.circular(18),
@@ -1008,7 +1088,9 @@ class _MessageBubble extends StatelessWidget {
                       'Ответ',
                       style: TextStyle(
                         fontSize: 10,
-                        color: isOut ? Colors.white70 : Colors.grey.shade400,
+                        color: isOut
+                            ? cs.onPrimary.withValues(alpha: 0.6)
+                            : cs.onSurface.withValues(alpha: 0.5),
                       ),
                     ),
                     Text(
@@ -1018,7 +1100,7 @@ class _MessageBubble extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 12,
                         color: isOut
-                            ? Colors.white
+                            ? cs.onPrimary
                             : cs.onSurface.withValues(alpha: 0.9),
                       ),
                     ),
@@ -1029,9 +1111,15 @@ class _MessageBubble extends StatelessWidget {
               Text(
                 msg.text,
                 style: TextStyle(
-                  color: isOut ? Colors.white : cs.onSurface,
+                  color: isOut ? cs.onPrimary : cs.onSurface,
                   fontSize: 15,
                 ),
+              ),
+            if (msg.latitude != null && msg.longitude != null)
+              _LocationChip(
+                lat: msg.latitude!,
+                lng: msg.longitude!,
+                isOut: isOut,
               ),
             if (msg.reactions.isNotEmpty)
               _ReactionsWidget(reactions: msg.reactions, isOut: isOut),
@@ -1043,12 +1131,14 @@ class _MessageBubble extends StatelessWidget {
                   _fmt(msg.timestamp),
                   style: TextStyle(
                     fontSize: 10,
-                    color: isOut ? Colors.white70 : Colors.grey.shade600,
+                    color: isOut
+                        ? cs.onPrimary.withValues(alpha: 0.7)
+                        : cs.onSurfaceVariant,
                   ),
                 ),
                 if (isOut) ...[
                   const SizedBox(width: 4),
-                  _statusIcon(msg.status),
+                  _statusIcon(msg.status, cs),
                 ],
               ],
             ),
@@ -1058,18 +1148,19 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  Widget _statusIcon(MessageStatus status) {
+  Widget _statusIcon(MessageStatus status, ColorScheme cs) {
+    final dimColor = cs.onPrimary.withValues(alpha: 0.6);
+    final brightColor = cs.onPrimary;
     switch (status) {
       case MessageStatus.sending:
-        return const SizedBox(
+        return SizedBox(
             width: 12,
             height: 12,
-            child: CircularProgressIndicator(
-                strokeWidth: 1.5, color: Colors.white70));
+            child: CircularProgressIndicator(strokeWidth: 1.5, color: dimColor));
       case MessageStatus.sent:
-        return const Icon(Icons.check, size: 12, color: Colors.white70);
+        return Icon(Icons.check, size: 12, color: dimColor);
       case MessageStatus.delivered:
-        return const Icon(Icons.done_all, size: 12, color: Colors.white);
+        return Icon(Icons.done_all, size: 12, color: brightColor);
       case MessageStatus.failed:
         return const Icon(Icons.error_outline, size: 12, color: Colors.red);
     }
@@ -1109,9 +1200,93 @@ class _ReactionsWidget extends StatelessWidget {
                   child: Text('${e.key} ${e.value.length}',
                       style: TextStyle(
                           fontSize: 12,
-                          color: isOut ? Colors.white : Colors.grey.shade300)),
+                          color: isOut ? cs.onPrimary : cs.onSurface)),
                 ))
             .toList(),
+      ),
+    );
+  }
+}
+
+// ── Геолокация ───────────────────────────────────────────────────
+
+class _LocationChip extends StatelessWidget {
+  final double lat;
+  final double lng;
+  final bool isOut;
+
+  const _LocationChip({
+    required this.lat,
+    required this.lng,
+    required this.isOut,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => _showLocationDialog(context),
+      child: Container(
+        margin: const EdgeInsets.only(top: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isOut
+              ? Colors.black.withValues(alpha: 0.18)
+              : Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(
+            Icons.location_on,
+            size: 14,
+            color: isOut ? Colors.white70 : Colors.greenAccent,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            'Геолокация',
+            style: TextStyle(
+              fontSize: 12,
+              color: isOut ? Colors.white70 : Colors.greenAccent,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  void _showLocationDialog(BuildContext context) {
+    final latStr = lat.toStringAsFixed(6);
+    final lngStr = lng.toStringAsFixed(6);
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Row(children: [
+          Icon(Icons.location_on, color: Colors.green, size: 20),
+          SizedBox(width: 8),
+          Text('Местоположение'),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Широта: $latStr',
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+            const SizedBox(height: 4),
+            Text('Долгота: $lngStr',
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+            const SizedBox(height: 12),
+            Text(
+              'Место где было отправлено сообщение',
+              style: TextStyle(
+                  fontSize: 12, color: Theme.of(context).hintColor),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Закрыть'),
+          ),
+        ],
       ),
     );
   }
@@ -1125,11 +1300,13 @@ class _InputBar extends StatefulWidget {
   final bool isRecording;
   final double recordingSeconds;
   final int maxLength;
+  final bool locationActive;
   final VoidCallback onSend;
   final VoidCallback onPickImage;
   final VoidCallback onPickVideo;
   final VoidCallback onMicDown;
   final VoidCallback onMicUp;
+  final VoidCallback onLocation;
 
   const _InputBar({
     required this.controller,
@@ -1137,11 +1314,13 @@ class _InputBar extends StatefulWidget {
     required this.isRecording,
     required this.recordingSeconds,
     required this.maxLength,
+    required this.locationActive,
     required this.onSend,
     required this.onPickImage,
     required this.onPickVideo,
     required this.onMicDown,
     required this.onMicUp,
+    required this.onLocation,
   });
 
   @override
@@ -1167,26 +1346,37 @@ class _InputBarState extends State<_InputBar> {
     final secs = widget.recordingSeconds.floor();
     final tenths = ((widget.recordingSeconds % 1) * 10).floor();
 
+    final cs = Theme.of(context).colorScheme;
     return SafeArea(
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
-          color: const Color(0xFF121212),
-          border: Border(top: BorderSide(color: Colors.grey.shade800)),
+          color: cs.surface,
+          border: Border(top: BorderSide(color: cs.outline.withValues(alpha: 0.3))),
         ),
         child: Row(children: [
           IconButton(
             onPressed: widget.isSending ? null : widget.onPickImage,
             icon: const Icon(Icons.photo_outlined),
-            color: Colors.grey.shade500,
+            color: cs.onSurfaceVariant,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+          ),
+          IconButton(
+            onPressed: widget.isSending ? null : widget.onLocation,
+            icon: Icon(
+              widget.locationActive ? Icons.location_on : Icons.location_on_outlined,
+              color: widget.locationActive ? cs.primary : cs.onSurfaceVariant,
+            ),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            tooltip: widget.locationActive ? 'Убрать геолокацию' : 'Прикрепить геолокацию',
           ),
           const SizedBox(width: 4),
           Expanded(
             child: Container(
               decoration: BoxDecoration(
-                color: const Color(0xFF1E1E1E),
+                color: cs.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(24),
               ),
               child: TextField(
@@ -1200,7 +1390,7 @@ class _InputBarState extends State<_InputBar> {
                   hintText: widget.isRecording
                       ? 'Запись... ${secs}s.$tenths'
                       : 'Сообщение...',
-                  hintStyle: TextStyle(color: Colors.grey.shade600),
+                  hintStyle: TextStyle(color: cs.onSurfaceVariant.withValues(alpha: 0.6)),
                   border: InputBorder.none,
                   contentPadding:
                       const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -1209,7 +1399,7 @@ class _InputBarState extends State<_InputBar> {
                           '${widget.maxLength - _length}',
                           style: TextStyle(
                             fontSize: 11,
-                            color: over ? Colors.red : Colors.grey.shade500,
+                            color: over ? Colors.red : cs.onSurfaceVariant,
                           ),
                         )
                       : null,
@@ -1229,17 +1419,17 @@ class _InputBarState extends State<_InputBar> {
                 height: 44,
                 decoration: BoxDecoration(
                   color: (widget.isSending || over || widget.isRecording)
-                      ? Colors.grey.shade700
-                      : const Color(0xFF1DB954),
+                      ? cs.onSurface.withValues(alpha: 0.3)
+                      : cs.primary,
                   shape: BoxShape.circle,
                 ),
                 child: widget.isSending
-                    ? const Padding(
-                        padding: EdgeInsets.all(12),
+                    ? Padding(
+                        padding: const EdgeInsets.all(12),
                         child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
-                    : const Icon(Icons.send_rounded,
-                        color: Colors.white, size: 20),
+                            strokeWidth: 2, color: cs.onPrimary))
+                    : Icon(Icons.send_rounded,
+                        color: cs.onPrimary, size: 20),
               ),
             )
           else
@@ -1252,12 +1442,12 @@ class _InputBarState extends State<_InputBar> {
                   height: 44,
                   decoration: BoxDecoration(
                     color: widget.isSending
-                        ? Colors.grey.shade700
-                        : const Color(0xFF1DB954),
+                        ? cs.onSurface.withValues(alpha: 0.3)
+                        : cs.primary,
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(Icons.videocam_rounded,
-                      color: Colors.white, size: 22),
+                  child: Icon(Icons.videocam_rounded,
+                      color: cs.onPrimary, size: 22),
                 ),
               ),
               const SizedBox(width: 8),
@@ -1272,11 +1462,11 @@ class _InputBarState extends State<_InputBar> {
                   decoration: BoxDecoration(
                     color: widget.isRecording
                         ? Colors.redAccent
-                        : const Color(0xFF1DB954),
+                        : cs.primary,
                     shape: BoxShape.circle,
                   ),
-                  child: const Icon(Icons.mic_rounded,
-                      color: Colors.white, size: 20),
+                  child: Icon(Icons.mic_rounded,
+                      color: cs.onPrimary, size: 20),
                 ),
               ),
             ]),
@@ -1344,38 +1534,134 @@ class _VideoMessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        IconButton(
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-          onPressed: () async {
-            try {
-              await OpenFilex.open(videoPath);
-            } catch (e) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Не удалось открыть видео: $e'),
-                  backgroundColor: Colors.red,
+    final exists = File(videoPath).existsSync();
+    final isSquare = videoPath.endsWith('_sq.mp4');
+    return GestureDetector(
+      onTap: exists
+          ? () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => _VideoPlayerScreen(path: videoPath),
                 ),
-              );
-            }
-          },
-          icon: Icon(
-            Icons.play_circle_outline,
-            color: isOut ? Colors.white : Colors.white70,
-            size: 22,
-          ),
+              )
+          : null,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(isSquare ? 16 : 12),
+        child: Stack(
+          children: [
+            Container(
+              width: 180,
+              height: 180,
+              color: isSquare ? const Color(0xFF1A1A1A) : Colors.black87,
+              child: exists
+                  ? null
+                  : const Center(
+                      child: Text('Файл не найден',
+                          style: TextStyle(color: Colors.white54, fontSize: 12),
+                          textAlign: TextAlign.center),
+                    ),
+            ),
+            if (exists)
+              Positioned.fill(
+                child: Center(
+                  child: Icon(
+                    isSquare ? Icons.play_circle_fill : Icons.play_circle_outline,
+                    color: Colors.white,
+                    size: isSquare ? 56 : 52,
+                  ),
+                ),
+              ),
+            Positioned(
+              bottom: 6,
+              right: 8,
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(
+                  isSquare ? Icons.videocam_rounded : Icons.videocam,
+                  color: Colors.white70,
+                  size: 14,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  isSquare ? 'Видео-кружок' : 'Видео',
+                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                ),
+              ]),
+            ),
+          ],
         ),
-        Text(
-          'Видео',
-          style: TextStyle(
-            color: isOut ? Colors.white : Colors.white70,
-            fontSize: 13,
-          ),
-        ),
-      ],
+      ),
+    );
+  }
+}
+
+// ── Встроенный видеоплеер ─────────────────────────────────────────
+
+class _VideoPlayerScreen extends StatefulWidget {
+  final String path;
+  const _VideoPlayerScreen({required this.path});
+
+  @override
+  State<_VideoPlayerScreen> createState() => _VideoPlayerScreenState();
+}
+
+class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
+  late VideoPlayerController _ctrl;
+  bool _initialized = false;
+  bool _error = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = VideoPlayerController.file(File(widget.path))
+      ..initialize().then((_) {
+        if (mounted) setState(() => _initialized = true);
+        _ctrl.play();
+      }).catchError((e) {
+        debugPrint('[VideoPlayer] init error: $e');
+        if (mounted) setState(() => _error = true);
+      });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          if (_initialized)
+            ValueListenableBuilder<VideoPlayerValue>(
+              valueListenable: _ctrl,
+              builder: (_, val, __) => IconButton(
+                icon: Icon(
+                  val.isPlaying ? Icons.pause : Icons.play_arrow,
+                  color: Colors.white,
+                ),
+                onPressed: () {
+                  val.isPlaying ? _ctrl.pause() : _ctrl.play();
+                },
+              ),
+            ),
+        ],
+      ),
+      body: Center(
+        child: _error
+            ? const Text('Ошибка воспроизведения',
+                style: TextStyle(color: Colors.white))
+            : _initialized
+                ? AspectRatio(
+                    aspectRatio: _ctrl.value.aspectRatio,
+                    child: VideoPlayer(_ctrl),
+                  )
+                : const CircularProgressIndicator(color: Color(0xFF1DB954)),
+      ),
     );
   }
 }

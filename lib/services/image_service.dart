@@ -81,10 +81,10 @@ class ImageService {
     required int index,
     required String base64Data,
   }) {
-    final assembly = _assemblies.putIfAbsent(
-      msgId,
-      () => _ImageAssembly(totalChunks: totalChunks),
-    );
+    // Only add to existing assembly — if img_meta was filtered (not for us),
+    // there's no assembly and we silently drop the chunk.
+    final assembly = _assemblies[msgId];
+    if (assembly == null) return;
     assembly.add(index, base64Decode(base64Data));
   }
 
@@ -114,6 +114,7 @@ class ImageService {
       {bool isAvatar = false,
       bool isVoice = false,
       bool isVideo = false,
+      bool isSquare = false,
       String fromId = ''}) {
     _assemblies.putIfAbsent(
       msgId,
@@ -122,6 +123,7 @@ class ImageService {
         isAvatar: isAvatar,
         isVoice: isVoice,
         isVideo: isVideo,
+        isSquare: isSquare,
         fromId: fromId,
       ),
     );
@@ -130,6 +132,7 @@ class ImageService {
   bool isAvatarAssembly(String msgId) => _assemblies[msgId]?.isAvatar ?? false;
   bool isVoiceAssembly(String msgId) => _assemblies[msgId]?.isVoice ?? false;
   bool isVideoAssembly(String msgId) => _assemblies[msgId]?.isVideo ?? false;
+  bool isSquareAssembly(String msgId) => _assemblies[msgId]?.isSquare ?? false;
   String assemblyFromId(String msgId) => _assemblies[msgId]?.fromId ?? '';
 
   void cancelAssembly(String msgId) => _assemblies.remove(msgId);
@@ -168,20 +171,22 @@ class ImageService {
     return dir;
   }
 
-  Future<String> saveVideo(String sourcePath) async {
+  Future<String> saveVideo(String sourcePath, {bool isSquare = false}) async {
     final dir = await _videosDir();
-    final name = '${_uuid.v4()}.mp4';
+    final suffix = isSquare ? '_sq' : '';
+    final name = '${_uuid.v4()}$suffix.mp4';
     final targetPath = p.join(dir.path, name);
     await File(sourcePath).copy(targetPath);
     return targetPath;
   }
 
-  Future<String?> assembleAndSaveVideo(String msgId) async {
+  Future<String?> assembleAndSaveVideo(String msgId, {bool isSquare = false}) async {
     final assembly = _assemblies.remove(msgId);
     if (assembly == null || !assembly.isComplete) return null;
     final data = assembly.assemble();
     final dir = await _videosDir();
-    final path = p.join(dir.path, '$msgId.mp4');
+    final suffix = isSquare ? '_sq' : '';
+    final path = p.join(dir.path, '$msgId$suffix.mp4');
     await File(path).writeAsBytes(data);
     return path;
   }
@@ -192,6 +197,7 @@ class _ImageAssembly {
   final bool isAvatar;
   final bool isVoice;
   final bool isVideo;
+  final bool isSquare;
   final String fromId;
   final Map<int, Uint8List> _chunks = {};
 
@@ -200,6 +206,7 @@ class _ImageAssembly {
     this.isAvatar = false,
     this.isVoice = false,
     this.isVideo = false,
+    this.isSquare = false,
     this.fromId = '',
   });
 

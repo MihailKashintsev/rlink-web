@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 /// Экран быстрой записи квадратного видео (аналог кружков Telegram, но квадрат).
 /// Возвращает путь к записанному файлу через Navigator.pop(context, path).
@@ -24,7 +25,7 @@ class _SquareVideoRecorderScreenState
   bool _isInitializing = true;
   String? _initError;
 
-  static const _maxDuration = 30.0;
+  static const _maxDuration = 15.0;
 
   @override
   void initState() {
@@ -45,6 +46,15 @@ class _SquareVideoRecorderScreenState
       _initError = null;
     });
     try {
+      final camStatus = await Permission.camera.request();
+      final micStatus = await Permission.microphone.request();
+      if (!camStatus.isGranted || !micStatus.isGranted) {
+        setState(() {
+          _initError = 'Нет доступа к камере или микрофону';
+          _isInitializing = false;
+        });
+        return;
+      }
       _cameras = await availableCameras();
       if (_cameras.isEmpty) {
         setState(() {
@@ -56,7 +66,7 @@ class _SquareVideoRecorderScreenState
       final idx = cameraIndex.clamp(0, _cameras.length - 1);
       final controller = CameraController(
         _cameras[idx],
-        ResolutionPreset.medium,
+        ResolutionPreset.low,
         enableAudio: true,
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
