@@ -23,6 +23,12 @@
     <!-- Галерея изображений (Android 13+) -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
+    <!-- Камера (видеосообщения) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Видео в галерее (Android 13+) -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
     <!-- Голосовые сообщения -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 

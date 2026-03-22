@@ -541,7 +541,7 @@ class _MessageBubble extends StatelessWidget {
               style: TextStyle(
                 fontSize: 10,
                 color: (msg.isOutgoing ? cs.onPrimary : cs.onSurface)
-                    .withOpacity(0.5),
+                    .withValues(alpha: 0.5),
               ),
             ),
           ],

@@ -7,10 +7,13 @@ import 'package:uuid/uuid.dart';
 import 'crypto_service.dart';
 
 const _kDefaultTtl = 7;
-const _kProfileTtl = 4; // Профили распространяются на 4 хопа для лучшего discovery
+const _kProfileTtl =
+    4; // Профили распространяются на 4 хопа для лучшего discovery
 const _kSeenCacheTtl = Duration(minutes: 30);
-const _kMaxPayloadBytes = 288; // hard limit: iOS ATT MTU ≈ 290, leave 2 bytes margin
-const _kMaxImgPayloadBytes = 285; // img_meta ≈ 233 б, img_chunk ≈ 274 б < BLE MTU 290
+const _kMaxPayloadBytes =
+    288; // hard limit: iOS ATT MTU ≈ 290, leave 2 bytes margin
+const _kMaxImgPayloadBytes =
+    285; // img_meta ≈ 233 б, img_chunk ≈ 274 б < BLE MTU 290
 
 class GossipPacket {
   final String id;
@@ -88,8 +91,10 @@ typedef OnEditReceived = Future<void> Function(
   String messageId,
   String newText,
 );
-typedef OnDeleteReceived = Future<void> Function(String fromId, String messageId);
-typedef OnReactReceived = Future<void> Function(String fromId, String messageId, String emoji);
+typedef OnDeleteReceived = Future<void> Function(
+    String fromId, String messageId);
+typedef OnReactReceived = Future<void> Function(
+    String fromId, String messageId, String emoji);
 
 /// Вызывается при получении img_meta (начало передачи изображения/голоса).
 typedef OnImgMeta = void Function(
@@ -97,7 +102,8 @@ typedef OnImgMeta = void Function(
   String msgId,
   int totalChunks,
   bool isAvatar, // true — аватар
-  bool isVoice,  // true — голосовое сообщение
+  bool isVoice, // true — голосовое сообщение
+  bool isVideo, // true — видеосообщение
 );
 
 /// Вызывается при получении очередного img_chunk.
@@ -248,9 +254,11 @@ class GossipRouter {
     required String msgId,
     required int totalChunks,
     required String fromId,
-    String? recipientId, // не используется в пакете — не помещается в BLE MTU 290
+    String?
+        recipientId, // не используется в пакете — не помещается в BLE MTU 290
     bool isAvatar = false,
     bool isVoice = false,
+    bool isVideo = false,
   }) async {
     final packet = GossipPacket(
       id: _uuid.v4(),
@@ -264,6 +272,7 @@ class GossipRouter {
         'from': fromId,
         'avatar': isAvatar,
         if (isVoice) 'voice': true,
+        if (isVideo) 'video': true,
       },
     );
     _markSeen(packet.id);
@@ -276,8 +285,9 @@ class GossipRouter {
     required String msgId,
     required int index,
     required String base64Data,
-    required String fromId, // используется только для img_meta; здесь для API симметрии
-    String? recipientId,    // не используется — не помещается в MTU
+    required String
+        fromId, // используется только для img_meta; здесь для API симметрии
+    String? recipientId, // не используется — не помещается в MTU
   }) async {
     final packet = GossipPacket(
       id: _uuid.v4(),
@@ -361,8 +371,7 @@ class GossipRouter {
       if (packet.type == 'raw') {
         final text = packet.payload['text'] as String?;
         final from = packet.payload['from'] as String? ?? 'unknown';
-        final replyToMessageId =
-            packet.payload['replyToMessageId'] as String?;
+        final replyToMessageId = packet.payload['replyToMessageId'] as String?;
 
         debugPrint(
             '[Gossip] Raw message from=$from text=${text?.substring(0, text.length > 20 ? 20 : text.length)}');
@@ -464,22 +473,23 @@ class GossipRouter {
       }
 
       if (packet.type == 'img_meta') {
-        final msgId      = packet.payload['msgId']   as String?;
-        final totalChunks= packet.payload['chunks']  as int?;
-        final from       = packet.payload['from']    as String? ?? 'unknown';
-        final isAvatar   = (packet.payload['avatar'] as bool?) ?? false;
-        final isVoice    = (packet.payload['voice']  as bool?) ?? false;
+        final msgId = packet.payload['msgId'] as String?;
+        final totalChunks = packet.payload['chunks'] as int?;
+        final from = packet.payload['from'] as String? ?? 'unknown';
+        final isAvatar = (packet.payload['avatar'] as bool?) ?? false;
+        final isVoice = (packet.payload['voice'] as bool?) ?? false;
+        final isVideo = (packet.payload['video'] as bool?) ?? false;
         if (msgId != null && totalChunks != null) {
-          onImgMeta?.call(from, msgId, totalChunks, isAvatar, isVoice);
+          onImgMeta?.call(from, msgId, totalChunks, isAvatar, isVoice, isVideo);
         }
         return;
       }
 
       if (packet.type == 'img_chunk') {
-        final msgId      = packet.payload['msgId'] as String?;
-        final index      = packet.payload['idx']   as int?;
-        final data       = packet.payload['data']  as String?;
-        final from       = packet.payload['from']  as String? ?? 'unknown';
+        final msgId = packet.payload['msgId'] as String?;
+        final index = packet.payload['idx'] as int?;
+        final data = packet.payload['data'] as String?;
+        final from = packet.payload['from'] as String? ?? 'unknown';
         // totalChunks не хранится в chunk-пакете — передаём 0 как sentinel;
         // ImageService уже знает totalChunks из img_meta.
         if (msgId != null && index != null && data != null) {
@@ -511,7 +521,8 @@ class GossipRouter {
     if (onForwardPacket == null) return;
     final bytes = packet.encode();
     if (bytes.length > _kMaxImgPayloadBytes) {
-      debugPrint('[Gossip] Img packet too large (${bytes.length} bytes), dropping');
+      debugPrint(
+          '[Gossip] Img packet too large (${bytes.length} bytes), dropping');
       return;
     }
     try {

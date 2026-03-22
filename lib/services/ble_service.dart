@@ -61,12 +61,49 @@ class BleService {
     _bleIdToPublicKey.clear();
     _publicKeyToBleId.clear();
     debugPrint('[BLE] Key mappings cleared');
+    peerMappingsVersion.value++;
+  }
+
+  /// Повторно запрашивает профили для всех уже подключённых устройств.
+  /// Вызывается после clearMappings() чтобы загрузить профили заново.
+  Future<void> refreshProfiles() async {
+    if (_connectedPeers.isEmpty) return;
+    // Добавляем все подключённые устройства в pending
+    final newPending = Set<String>.from(pendingProfiles.value);
+    for (final id in _connectedPeers.keys) {
+      newPending.add(id.str);
+    }
+    pendingProfiles.value = newPending;
+    peerMappingsVersion.value++;
+    // Повторно отправляем свой профиль — пиры ответят своими
+    for (final id in _connectedPeers.keys) {
+      onPeerConnected?.call(id.str);
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+  }
+
+  /// Снимает устройство из pending и сбрасывает его маппинг для переподключения
+  void resetPeerMapping(String peerId) {
+    final bleId = _publicKeyToBleId[peerId] ?? peerId;
+    if (bleId.isNotEmpty) {
+      _bleIdToPublicKey.remove(bleId);
+      _publicKeyToBleId.remove(peerId);
+      final upd = Set<String>.from(pendingProfiles.value)..add(bleId);
+      pendingProfiles.value = upd;
+      peerMappingsVersion.value++;
+      debugPrint('[BLE] Reset mapping for $peerId (BLE: $bleId)');
+    }
   }
 
   /// Регистрирует маппинг BLE ID → публичный ключ
   void registerPeerKey(String bleId, String publicKey) {
+    final oldPublicKey = _bleIdToPublicKey[bleId];
+    if (oldPublicKey != null && oldPublicKey != publicKey) {
+      _publicKeyToBleId.remove(oldPublicKey);
+    }
     _bleIdToPublicKey[bleId] = publicKey;
     _publicKeyToBleId[publicKey] = bleId;
+    markProfileReceived(bleId);
     debugPrint('[BLE] Mapped $bleId → ${publicKey.substring(0, 16)}...');
     peersCount.value = _connectedPeers.length;
     peerMappingsVersion.value++;

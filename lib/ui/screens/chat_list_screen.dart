@@ -48,6 +48,9 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   Future<void> _rescan() async {
+    BleService.instance.clearMappings();
+    await ChatStorageService.instance.loadContacts();
+    await BleService.instance.refreshProfiles();
     await BleService.instance.rescan();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -178,7 +181,8 @@ class _ChatsTabState extends State<_ChatsTab> {
       final contact = await storage.getContact(peerId);
       items.add(_ChatItem(
         peerId: peerId,
-        nickname: contact?.nickname ?? '${peerId.substring(0, 8)}...',
+        nickname: contact?.nickname ??
+            '${peerId.substring(0, peerId.length.clamp(0, 8))}...',
         avatarColor: contact?.avatarColor ?? 0xFF607D8B,
         avatarEmoji: contact?.avatarEmoji ?? '',
         avatarImagePath: contact?.avatarImagePath,
@@ -278,52 +282,57 @@ class _ChatItem {
 class _NearbyTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<int>(
-      valueListenable: BleService.instance.peersCount,
-      builder: (_, __, ___) {
-        return ValueListenableBuilder<int>(
-          valueListenable: BleService.instance.peerMappingsVersion,
-          builder: (_, __, ___) {
-            return ValueListenableBuilder<Set<String>>(
-              valueListenable: BleService.instance.pendingProfiles,
-              builder: (_, pending, __) {
-                final peers = BleService.instance.connectedPeerIds;
-                if (peers.isEmpty && pending.isEmpty) {
-                  return Center(
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.bluetooth_searching,
-                          size: 72, color: Colors.grey.shade700),
-                      const SizedBox(height: 16),
-                      Text('Ищем устройства...',
-                          style: TextStyle(
-                              color: Colors.grey.shade400, fontSize: 16)),
-                      const SizedBox(height: 8),
-                      Text('Убедись что Bluetooth включён\nна обоих устройствах',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                              color: Colors.grey.shade600, fontSize: 13)),
-                    ]),
+    return ValueListenableBuilder<List<Contact>>(
+      valueListenable: ChatStorageService.instance.contactsNotifier,
+      builder: (_, __, ___) => ValueListenableBuilder<int>(
+        valueListenable: BleService.instance.peersCount,
+        builder: (_, ___, ____) {
+          return ValueListenableBuilder<int>(
+            valueListenable: BleService.instance.peerMappingsVersion,
+            builder: (_, __, ___) {
+              return ValueListenableBuilder<Set<String>>(
+                valueListenable: BleService.instance.pendingProfiles,
+                builder: (_, pending, __) {
+                  final peers = BleService.instance.connectedPeerIds;
+                  if (peers.isEmpty && pending.isEmpty) {
+                    return Center(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.bluetooth_searching,
+                            size: 72, color: Colors.grey.shade700),
+                        const SizedBox(height: 16),
+                        Text('Ищем устройства...',
+                            style: TextStyle(
+                                color: Colors.grey.shade400, fontSize: 16)),
+                        const SizedBox(height: 8),
+                        Text(
+                            'Убедись что Bluetooth включён\nна обоих устройствах',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                color: Colors.grey.shade600, fontSize: 13)),
+                      ]),
+                    );
+                  }
+                  return ListView(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    children: [
+                      // Устройства которые загружают профиль (pending по BLE ID)
+                      ...pending
+                          .map((bleId) => _PendingDeviceTile(bleId: bleId)),
+                      // Устройства с полученным профилем
+                      // Используем isPeerProfilePending чтобы корректно фильтровать
+                      // (peers содержит publicKey, pending содержит bleId)
+                      ...peers
+                          .where((id) =>
+                              !BleService.instance.isPeerProfilePending(id))
+                          .map((id) => _NearbyDeviceTile(publicKeyOrBleId: id)),
+                    ],
                   );
-                }
-                return ListView(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  children: [
-                    // Устройства которые загружают профиль (pending по BLE ID)
-                    ...pending.map((bleId) => _PendingDeviceTile(bleId: bleId)),
-                    // Устройства с полученным профилем
-                    // Используем isPeerProfilePending чтобы корректно фильтровать
-                    // (peers содержит publicKey, pending содержит bleId)
-                    ...peers
-                        .where((id) =>
-                            !BleService.instance.isPeerProfilePending(id))
-                        .map((id) => _NearbyDeviceTile(publicKeyOrBleId: id)),
-                  ],
-                );
-              },
-            );
-          },
-        );
-      },
+                },
+              );
+            },
+          );
+        },
+      ),
     );
   }
 }

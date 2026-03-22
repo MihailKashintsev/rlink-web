@@ -16,16 +16,16 @@ class CryptoService {
   static final CryptoService instance = CryptoService._();
 
   static const _keyPrivate = 'mesh_identity_private';
-  static const _keyPublic  = 'mesh_identity_public';
+  static const _keyPublic = 'mesh_identity_public';
 
   final _storage = const FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
   );
 
-  final _ed25519    = Ed25519();
-  final _x25519     = X25519();
-  final _chacha     = Chacha20.poly1305Aead();
+  final _ed25519 = Ed25519();
+  final _x25519 = X25519();
+  final _chacha = Chacha20.poly1305Aead();
 
   late SimpleKeyPair _identityKeyPair;
 
@@ -35,12 +35,12 @@ class CryptoService {
   /// Инициализация: загружаем или генерируем keypair
   Future<void> init() async {
     final storedPrivate = await _storage.read(key: _keyPrivate);
-    final storedPublic  = await _storage.read(key: _keyPublic);
+    final storedPublic = await _storage.read(key: _keyPublic);
 
     if (storedPrivate != null && storedPublic != null) {
       // Восстанавливаем из хранилища
       final privateBytes = base64.decode(storedPrivate);
-      final publicBytes  = base64.decode(storedPublic);
+      final publicBytes = base64.decode(storedPublic);
 
       _identityKeyPair = SimpleKeyPairData(
         privateBytes,
@@ -52,10 +52,12 @@ class CryptoService {
       _identityKeyPair = await _ed25519.newKeyPair();
 
       final privateBytes = await _identityKeyPair.extractPrivateKeyBytes();
-      final publicKey    = await _identityKeyPair.extractPublicKey();
+      final publicKey = await _identityKeyPair.extractPublicKey();
 
-      await _storage.write(key: _keyPrivate, value: base64.encode(privateBytes));
-      await _storage.write(key: _keyPublic,  value: base64.encode(publicKey.bytes));
+      await _storage.write(
+          key: _keyPrivate, value: base64.encode(privateBytes));
+      await _storage.write(
+          key: _keyPublic, value: base64.encode(publicKey.bytes));
     }
 
     final pubKey = await _identityKeyPair.extractPublicKey();
@@ -127,12 +129,12 @@ class CryptoService {
   Future<String?> decryptMessage(EncryptedMessage message) async {
     try {
       // 1. Проверяем подпись отправителя
-      final senderPubBytes  = _hexToBytes(message.senderPublicKey);
-      final ephemeralBytes  = _hexToBytes(message.ephemeralPublicKey);
-      final nonceBytes      = _hexToBytes(message.nonce);
-      final cipherBytes     = base64.decode(message.cipherText);
-      final macBytes        = _hexToBytes(message.mac);
-      final sigBytes        = _hexToBytes(message.signature);
+      final senderPubBytes = _hexToBytes(message.senderPublicKey);
+      final ephemeralBytes = _hexToBytes(message.ephemeralPublicKey);
+      final nonceBytes = _hexToBytes(message.nonce);
+      final cipherBytes = base64.decode(message.cipherText);
+      final macBytes = _hexToBytes(message.mac);
+      final sigBytes = _hexToBytes(message.signature);
 
       final payload = Uint8List.fromList([
         ...ephemeralBytes,
@@ -141,7 +143,8 @@ class CryptoService {
         ...macBytes,
       ]);
 
-      final senderKey = SimplePublicKey(senderPubBytes, type: KeyPairType.ed25519);
+      final senderKey =
+          SimplePublicKey(senderPubBytes, type: KeyPairType.ed25519);
       final isValid = await _ed25519.verify(
         payload,
         signature: Signature(sigBytes, publicKey: senderKey),
@@ -160,7 +163,8 @@ class CryptoService {
         type: KeyPairType.x25519,
       );
 
-      final ephemeralPublicKey = SimplePublicKey(ephemeralBytes, type: KeyPairType.x25519);
+      final ephemeralPublicKey =
+          SimplePublicKey(ephemeralBytes, type: KeyPairType.x25519);
       final sharedSecret = await _x25519.sharedSecretKey(
         keyPair: ourX25519KeyPair,
         remotePublicKey: ephemeralPublicKey,
@@ -173,7 +177,8 @@ class CryptoService {
         mac: Mac(macBytes),
       );
 
-      final plainBytes = await _chacha.decrypt(secretBox, secretKey: sharedSecret);
+      final plainBytes =
+          await _chacha.decrypt(secretBox, secretKey: sharedSecret);
       return utf8.decode(plainBytes);
     } catch (e) {
       return null;
@@ -196,12 +201,12 @@ class CryptoService {
 
 /// Зашифрованное сообщение — то, что реально летит по BLE
 class EncryptedMessage {
-  final String senderPublicKey;     // Ed25519 публичный ключ отправителя (его ID)
-  final String ephemeralPublicKey;  // X25519 эфемерный ключ (для ECDH)
-  final String nonce;               // 12 байт, hex
-  final String cipherText;          // base64
-  final String mac;                 // Poly1305 тег, hex
-  final String signature;           // Ed25519 подпись, hex
+  final String senderPublicKey; // Ed25519 публичный ключ отправителя (его ID)
+  final String ephemeralPublicKey; // X25519 эфемерный ключ (для ECDH)
+  final String nonce; // 12 байт, hex
+  final String cipherText; // base64
+  final String mac; // Poly1305 тег, hex
+  final String signature; // Ed25519 подпись, hex
 
   const EncryptedMessage({
     required this.senderPublicKey,
@@ -213,20 +218,20 @@ class EncryptedMessage {
   });
 
   factory EncryptedMessage.fromJson(Map<String, dynamic> j) => EncryptedMessage(
-        senderPublicKey:    j['spk']  as String,
-        ephemeralPublicKey: j['epk']  as String,
-        nonce:              j['n']    as String,
-        cipherText:         j['ct']   as String,
-        mac:                j['mac']  as String,
-        signature:          j['sig']  as String,
+        senderPublicKey: j['spk'] as String,
+        ephemeralPublicKey: j['epk'] as String,
+        nonce: j['n'] as String,
+        cipherText: j['ct'] as String,
+        mac: j['mac'] as String,
+        signature: j['sig'] as String,
       );
 
   Map<String, dynamic> toJson() => {
-        'spk':  senderPublicKey,
-        'epk':  ephemeralPublicKey,
-        'n':    nonce,
-        'ct':   cipherText,
-        'mac':  mac,
-        'sig':  signature,
+        'spk': senderPublicKey,
+        'epk': ephemeralPublicKey,
+        'n': nonce,
+        'ct': cipherText,
+        'mac': mac,
+        'sig': signature,
       };
 }

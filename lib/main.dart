@@ -66,11 +66,12 @@ Future<void> initServices() async {
         final msgId = messageId;
 
         // Если незнакомец — автоматически создаём временный контакт
-        final existing =
-            await ChatStorageService.instance.getContact(fromId);
+        final existing = await ChatStorageService.instance.getContact(fromId);
         if (existing == null) {
           final btName = BleService.instance.getDeviceName(fromId);
-          final displayName = btName.isNotEmpty && btName != fromId.substring(0, btName.length.clamp(0, fromId.length))
+          final displayName = btName.isNotEmpty &&
+                  btName !=
+                      fromId.substring(0, btName.length.clamp(0, fromId.length))
               ? btName
               : '${fromId.substring(0, 8)}...';
           await ChatStorageService.instance.saveContact(Contact(
@@ -101,7 +102,8 @@ Future<void> initServices() async {
           recipientId: fromId,
         );
 
-        debugPrint('[Main] Adding to stream: fromId=${fromId.substring(0, 16)}');
+        debugPrint(
+            '[Main] Adding to stream: fromId=${fromId.substring(0, 16)}');
         incomingMessageController.add(IncomingMessage(
           fromId: fromId,
           text: text,
@@ -127,14 +129,22 @@ Future<void> initServices() async {
         await ChatStorageService.instance.deleteMessage(messageId);
       },
       onReact: (fromId, messageId, emoji) async {
-        await ChatStorageService.instance.addReaction(messageId, emoji, fromId);
+        await ChatStorageService.instance
+            .toggleReaction(messageId, emoji, fromId);
       },
-      onImgMetaReceived: (fromId, msgId, totalChunks, isAvatar, isVoice) {
+      onImgMetaReceived: (String fromId, String msgId, int totalChunks,
+          bool isAvatar, bool isVoice, bool isVideo) {
         ImageService.instance.initAssembly(
-          msgId, totalChunks, isAvatar: isAvatar, isVoice: isVoice, fromId: fromId,
+          msgId,
+          totalChunks,
+          isAvatar: isAvatar,
+          isVoice: isVoice,
+          fromId: fromId,
+          isVideo: isVideo,
         );
       },
-      onImgChunkReceived: (fromId, msgId, totalChunks, index, base64Data) async {
+      onImgChunkReceived:
+          (fromId, msgId, totalChunks, index, base64Data) async {
         ImageService.instance.receiveChunk(
           msgId: msgId,
           totalChunks: totalChunks,
@@ -144,14 +154,16 @@ Future<void> initServices() async {
         if (!ImageService.instance.isComplete(msgId)) return;
 
         final isAvatar = ImageService.instance.isAvatarAssembly(msgId);
-        final isVoice  = ImageService.instance.isVoiceAssembly(msgId);
+        final isVoice = ImageService.instance.isVoiceAssembly(msgId);
+        final isVideo = ImageService.instance.isVideoAssembly(msgId);
         final senderKey = ImageService.instance.assemblyFromId(msgId).isNotEmpty
             ? ImageService.instance.assemblyFromId(msgId)
             : fromId;
 
         // Helper: ensure contact exists
         Future<void> ensureContact() async {
-          final existing = await ChatStorageService.instance.getContact(senderKey);
+          final existing =
+              await ChatStorageService.instance.getContact(senderKey);
           if (existing == null) {
             await ChatStorageService.instance.saveContact(Contact(
               publicKeyHex: senderKey,
@@ -165,10 +177,12 @@ Future<void> initServices() async {
 
         if (isAvatar) {
           final path = await ImageService.instance.assembleAndSave(
-            msgId, forContactKey: senderKey,
+            msgId,
+            forContactKey: senderKey,
           );
           if (path != null) {
-            await ChatStorageService.instance.updateContactAvatarImage(senderKey, path);
+            await ChatStorageService.instance
+                .updateContactAvatarImage(senderKey, path);
           }
         } else if (isVoice) {
           final path = await ImageService.instance.assembleAndSaveVoice(msgId);
@@ -187,6 +201,26 @@ Future<void> initServices() async {
           incomingMessageController.add(IncomingMessage(
             fromId: senderKey,
             text: '🎤 Голосовое',
+            timestamp: msg.timestamp,
+            msgId: msgId,
+          ));
+        } else if (isVideo) {
+          final path = await ImageService.instance.assembleAndSaveVideo(msgId);
+          if (path == null) return;
+          await ensureContact();
+          final msg = ChatMessage(
+            id: msgId,
+            peerId: senderKey,
+            text: '📹 Видео',
+            isOutgoing: false,
+            timestamp: DateTime.now(),
+            status: MessageStatus.delivered,
+            videoPath: path,
+          );
+          await ChatStorageService.instance.saveMessage(msg);
+          incomingMessageController.add(IncomingMessage(
+            fromId: senderKey,
+            text: '📹 Видео',
             timestamp: msg.timestamp,
             msgId: msgId,
           ));
@@ -324,13 +358,14 @@ class RlinkApp extends StatefulWidget {
   State<RlinkApp> createState() => _RlinkAppState();
 }
 
-class _RlinkAppState extends State<RlinkApp> {
+class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
   bool _ready = false;
   bool _hasProfile = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await initServices();
       if (mounted) {
@@ -340,6 +375,48 @@ class _RlinkAppState extends State<RlinkApp> {
         });
       }
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      // Отправляем статус "я вышел из сети"
+      _notifyPeersOffline();
+    } else if (state == AppLifecycleState.resumed) {
+      // Восстанавливаем соединение
+      _notifyPeersOnline();
+    }
+  }
+
+  Future<void> _notifyPeersOffline() async {
+    try {
+      debugPrint('[App] Notifying peers - going offline');
+      // Отправляем сигнал отключения через BLE (останавливаем рекламу)
+      await BleService.instance.stop();
+      debugPrint('[App] BLE stopped');
+    } catch (e) {
+      debugPrint('[App] Error stopping: $e');
+    }
+  }
+
+  Future<void> _notifyPeersOnline() async {
+    try {
+      debugPrint('[App] Notifying peers - back online');
+      // Возобновляем BLE соединение
+      await BleService.instance.start();
+      debugPrint('[App] BLE restarted');
+    } catch (e) {
+      debugPrint('[App] Error restarting: $e');
+    }
   }
 
   @override

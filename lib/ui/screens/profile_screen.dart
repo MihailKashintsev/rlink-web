@@ -54,12 +54,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() => _saving = true);
     try {
       await ProfileService.instance.updateProfile(
-        nickname:        _controller.text.trim(),
-        avatarColor:     _selectedColor,
-        avatarEmoji:     _selectedEmoji,
+        nickname: _controller.text.trim(),
+        avatarColor: _selectedColor,
+        avatarEmoji: _selectedEmoji,
         avatarImagePath: _selectedImagePath,
       );
-      setState(() { _editing = false; _showEmojiPicker = false; });
+      setState(() {
+        _editing = false;
+        _showEmojiPicker = false;
+      });
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -77,7 +80,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             TextButton(
               onPressed: _saving ? null : _save,
               child: _saving
-                  ? const SizedBox(width: 20, height: 20,
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
                       child: CircularProgressIndicator(strokeWidth: 2))
                   : const Text('Сохранить'),
             )
@@ -104,40 +109,50 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       : profile.initials,
                   color: _editing ? _selectedColor : profile.avatarColor,
                   emoji: _editing ? _selectedEmoji : profile.avatarEmoji,
-                  imagePath: _editing ? _selectedImagePath : profile.avatarImagePath,
+                  imagePath:
+                      _editing ? _selectedImagePath : profile.avatarImagePath,
                   size: 88,
                 ),
               ),
               if (_editing) ...[
                 // Кнопка смены эмодзи
                 Positioned(
-                  right: 0, bottom: 0,
+                  right: 0,
+                  bottom: 0,
                   child: GestureDetector(
-                    onTap: () => setState(() => _showEmojiPicker = !_showEmojiPicker),
+                    onTap: () =>
+                        setState(() => _showEmojiPicker = !_showEmojiPicker),
                     child: Container(
-                      width: 28, height: 28,
+                      width: 28,
+                      height: 28,
                       decoration: BoxDecoration(
                         color: const Color(0xFF1DB954),
                         shape: BoxShape.circle,
-                        border: Border.all(color: const Color(0xFF0A0A0A), width: 2),
+                        border: Border.all(
+                            color: const Color(0xFF0A0A0A), width: 2),
                       ),
-                      child: const Icon(Icons.edit, size: 14, color: Colors.white),
+                      child:
+                          const Icon(Icons.edit, size: 14, color: Colors.white),
                     ),
                   ),
                 ),
                 // Кнопка выбора фото
                 Positioned(
-                  left: 0, bottom: 0,
+                  left: 0,
+                  bottom: 0,
                   child: GestureDetector(
                     onTap: _pickImage,
                     child: Container(
-                      width: 28, height: 28,
+                      width: 28,
+                      height: 28,
                       decoration: BoxDecoration(
                         color: Colors.grey.shade800,
                         shape: BoxShape.circle,
-                        border: Border.all(color: const Color(0xFF0A0A0A), width: 2),
+                        border: Border.all(
+                            color: const Color(0xFF0A0A0A), width: 2),
                       ),
-                      child: const Icon(Icons.photo_camera, size: 14, color: Colors.white),
+                      child: const Icon(Icons.photo_camera,
+                          size: 14, color: Colors.white),
                     ),
                   ),
                 ),
@@ -169,7 +184,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     )
                   : const SizedBox.shrink(),
             ),
-
             AvatarColorPicker(
               selected: _selectedColor,
               onSelected: (c) => setState(() => _selectedColor = c),
@@ -185,7 +199,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   decoration: InputDecoration(
                     labelText: 'Имя',
                     border: const OutlineInputBorder(),
-                    counterStyle: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+                    counterStyle:
+                        TextStyle(color: Colors.grey.shade600, fontSize: 11),
                   ),
                   textCapitalization: TextCapitalization.words,
                   onChanged: (_) => setState(() {}),
@@ -215,7 +230,11 @@ class _InfoTile extends StatelessWidget {
   final String label, value;
   final bool monospace;
   final VoidCallback? onCopy;
-  const _InfoTile({required this.label, required this.value, this.monospace = false, this.onCopy});
+  const _InfoTile(
+      {required this.label,
+      required this.value,
+      this.monospace = false,
+      this.onCopy});
 
   @override
   Widget build(BuildContext context) {
@@ -227,11 +246,14 @@ class _InfoTile extends StatelessWidget {
       ),
       child: Row(children: [
         Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(label, style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(label,
+                style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
             const SizedBox(height: 4),
             Text(value,
-                style: TextStyle(fontSize: 14, fontFamily: monospace ? 'monospace' : null),
+                style: TextStyle(
+                    fontSize: 14, fontFamily: monospace ? 'monospace' : null),
                 overflow: TextOverflow.ellipsis),
           ]),
         ),

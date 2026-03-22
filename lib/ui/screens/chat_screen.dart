@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../main.dart';
@@ -14,6 +15,7 @@ import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/voice_service.dart';
 import '../widgets/avatar_widget.dart';
+import 'square_video_recorder_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final String peerId; // Ed25519 public key получателя
@@ -55,10 +57,10 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _kMaxMessageLength = 280;
   static final _publicKeyRegExp = RegExp(r'^[0-9a-fA-F]{64}$');
 
-  bool _looksLikePublicKey(String id) =>
-      _publicKeyRegExp.hasMatch(id.trim());
+  bool _looksLikePublicKey(String id) => _publicKeyRegExp.hasMatch(id.trim());
 
-  Future<bool> _waitForPeerPublicKey({Duration timeout = const Duration(seconds: 6)}) async {
+  Future<bool> _waitForPeerPublicKey(
+      {Duration timeout = const Duration(seconds: 6)}) async {
     final deadline = DateTime.now().add(timeout);
     while (mounted && DateTime.now().isBefore(deadline)) {
       final resolved = BleService.instance.resolvePublicKey(widget.peerId);
@@ -123,6 +125,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _startVoiceRecording() async {
     if (_isSending || _isRecording) return;
+    final hasPerm = await VoiceService.instance.hasPermission();
+    if (!hasPerm) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Нет доступа к микрофону — проверьте разрешения'),
+          ),
+        );
+      }
+      return;
+    }
     final path = await VoiceService.instance.startRecording();
     if (path == null) return;
     setState(() {
@@ -194,7 +207,9 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка голосового: $e'), backgroundColor: Colors.red),
+        SnackBar(
+            content: Text('Ошибка голосового: $e'),
+            backgroundColor: Colors.red),
       );
     }
   }
@@ -213,6 +228,18 @@ class _ChatScreenState extends State<ChatScreen> {
         const SnackBar(
             content: Text(
                 'Сообщение слишком длинное (макс. $_kMaxMessageLength симв.)')),
+      );
+      return;
+    }
+
+    // Проверяем что сервисы инициализированы
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Ошибка: приложение еще не готово'),
+          backgroundColor: Colors.red,
+        ),
       );
       return;
     }
@@ -242,7 +269,7 @@ class _ChatScreenState extends State<ChatScreen> {
         await GossipRouter.instance.sendEditMessage(
           messageId: targetId,
           newText: text,
-          senderId: CryptoService.instance.publicKeyHex,
+          senderId: myId,
           recipientId: _resolvedPeerId,
         );
         await ChatStorageService.instance.editMessage(targetId, text);
@@ -255,9 +282,12 @@ class _ChatScreenState extends State<ChatScreen> {
       // 2) Normal mode: send raw message (optionally as a reply).
       _controller.clear();
       msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
       final msg = ChatMessage(
         id: msgId,
-        peerId: _resolvedPeerId,
+        peerId: targetPeerId,
         text: text,
         replyToMessageId: _replyToMessageId,
         isOutgoing: true,
@@ -269,8 +299,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
       await GossipRouter.instance.sendRawMessage(
         text: text,
-        senderId: CryptoService.instance.publicKeyHex,
-        recipientId: _resolvedPeerId,
+        senderId: myId,
+        recipientId: targetPeerId,
         messageId: msgId,
         replyToMessageId: _replyToMessageId,
       );
@@ -318,6 +348,17 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Ошибка: приложение еще не готово'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     final picked = await _picker.pickImage(source: ImageSource.gallery);
     if (picked == null || !mounted) return;
 
@@ -327,13 +368,15 @@ class _ChatScreenState extends State<ChatScreen> {
       final bytes = await File(path).readAsBytes();
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final msgId = _uuid.v4();
-      final myId = CryptoService.instance.publicKeyHex;
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
 
       await GossipRouter.instance.sendImgMeta(
         msgId: msgId,
         totalChunks: chunks.length,
         fromId: myId,
-        recipientId: _resolvedPeerId,
+        recipientId: targetPeerId,
         isAvatar: false,
       );
       for (var i = 0; i < chunks.length; i++) {
@@ -342,13 +385,12 @@ class _ChatScreenState extends State<ChatScreen> {
           index: i,
           base64Data: chunks[i],
           fromId: myId,
-          recipientId: _resolvedPeerId,
+          recipientId: targetPeerId,
         );
       }
-
       final msg = ChatMessage(
         id: msgId,
-        peerId: _resolvedPeerId,
+        peerId: targetPeerId,
         text: '',
         isOutgoing: true,
         timestamp: DateTime.now(),
@@ -361,6 +403,90 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _sendVideo() async {
+    if (_isSending) return;
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
+          );
+        }
+        return;
+      }
+    }
+
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Ошибка: приложение еще не готово'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    // Open square video recorder — returns path or null if cancelled
+    if (!mounted) return;
+    final videoPath = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const SquareVideoRecorderScreen()),
+    );
+    if (videoPath == null || !mounted) return;
+
+    setState(() => _isSending = true);
+    try {
+      final path = await ImageService.instance.saveVideo(videoPath);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        recipientId: targetPeerId,
+        isAvatar: false,
+        isVideo: true,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+          recipientId: targetPeerId,
+        );
+      }
+
+      final msg = ChatMessage(
+        id: msgId,
+        peerId: targetPeerId,
+        text: '📹 Видео',
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: MessageStatus.sent,
+        videoPath: path,
+      );
+      await ChatStorageService.instance.saveMessage(msg);
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -462,7 +588,8 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка удаления: $e'), backgroundColor: Colors.red),
+        SnackBar(
+            content: Text('Ошибка удаления: $e'), backgroundColor: Colors.red),
       );
       // Возвращаем UI в согласованное состояние.
       await ChatStorageService.instance.loadMessages(_resolvedPeerId);
@@ -475,6 +602,14 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (ctx) => SafeArea(
         child: Wrap(
           children: [
+            ListTile(
+              leading: const Icon(Icons.emoji_emotions),
+              title: const Text('Реакция'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showReactionPicker(msg);
+              },
+            ),
             ListTile(
               leading: const Icon(Icons.reply),
               title: const Text('Ответить'),
@@ -504,6 +639,79 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  Future<void> _showReactionPicker(ChatMessage msg) async {
+    const emojis = [
+      '👍',
+      '❤️',
+      '😂',
+      '😮',
+      '😢',
+      '😡',
+      '🎉',
+      '🔥',
+      '👎',
+      '🤔',
+      '😴',
+      '🤗'
+    ];
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Выберите реакцию',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500)),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: emojis
+                    .map((emoji) => GestureDetector(
+                          onTap: () async {
+                            Navigator.pop(ctx);
+                            await _toggleReaction(msg, emoji);
+                          },
+                          child: Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              border: Border.all(color: Colors.grey.shade600),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Center(
+                                child: Text(emoji,
+                                    style: const TextStyle(fontSize: 24))),
+                          ),
+                        ))
+                    .toList(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _toggleReaction(ChatMessage msg, String emoji) async {
+    await ChatStorageService.instance
+        .toggleReaction(msg.id, emoji, CryptoService.instance.publicKeyHex);
+    await GossipRouter.instance.sendReaction(
+      messageId: msg.id,
+      emoji: emoji,
+      fromId: CryptoService.instance.publicKeyHex,
+    );
+  }
+
+  Future<void> _saveImageToGallery(String path) async {
+    // TODO: Implement saving to gallery
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Сохранение в галерею не реализовано')),
     );
   }
 
@@ -593,6 +801,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         replyPreviewText: msg.replyToMessageId == null
                             ? null
                             : messageTextById[msg.replyToMessageId],
+                        onDownloadImage: _saveImageToGallery,
                       ),
                     ),
                   ]);
@@ -603,8 +812,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         if (_editingMessageId != null || _replyToMessageId != null)
           Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               decoration: BoxDecoration(
@@ -618,9 +826,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        _editingMessageId != null
-                            ? 'Редактирование'
-                            : 'Ответ',
+                        _editingMessageId != null ? 'Редактирование' : 'Ответ',
                         style: TextStyle(
                           fontSize: 12,
                           color: Colors.grey.shade400,
@@ -663,6 +869,7 @@ class _ChatScreenState extends State<ChatScreen> {
           maxLength: _kMaxMessageLength,
           onSend: _send,
           onPickImage: _sendImage,
+          onPickVideo: _sendVideo,
           onMicDown: _startVoiceRecording,
           onMicUp: _stopAndSendVoice,
         ),
@@ -711,10 +918,12 @@ class _DateDivider extends StatelessWidget {
 class _MessageBubble extends StatelessWidget {
   final ChatMessage msg;
   final String? replyPreviewText;
+  final Function(String)? onDownloadImage;
 
   const _MessageBubble({
     required this.msg,
     this.replyPreviewText,
+    this.onDownloadImage,
   });
 
   @override
@@ -741,21 +950,42 @@ class _MessageBubble extends StatelessWidget {
           crossAxisAlignment:
               isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
-            if (msg.imagePath != null && File(msg.imagePath!).existsSync())
             if (msg.voicePath != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
-                child: _VoiceMessageBubble(voicePath: msg.voicePath!, isOut: isOut),
+                child: _VoiceMessageBubble(
+                    voicePath: msg.voicePath!, isOut: isOut),
               ),
+            if (msg.videoPath != null && File(msg.videoPath!).existsSync())
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.file(
-                    File(msg.imagePath!),
-                    width: 220,
-                    fit: BoxFit.cover,
-                  ),
+                child: _VideoMessageBubble(
+                    videoPath: msg.videoPath!, isOut: isOut),
+              ),
+            if (msg.imagePath != null && File(msg.imagePath!).existsSync())
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Stack(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.file(
+                        File(msg.imagePath!),
+                        width: 220,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: IconButton(
+                        icon: const Icon(Icons.download, color: Colors.white),
+                        onPressed: () => onDownloadImage?.call(msg.imagePath!),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             if (msg.replyToMessageId != null)
@@ -766,8 +996,8 @@ class _MessageBubble extends StatelessWidget {
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
                   color: isOut
-                      ? Colors.black.withOpacity(0.18)
-                      : Colors.white.withOpacity(0.06),
+                      ? Colors.black.withValues(alpha: 0.18)
+                      : Colors.white.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Column(
@@ -787,7 +1017,9 @@ class _MessageBubble extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 12,
-                        color: isOut ? Colors.white : cs.onSurface.withOpacity(0.9),
+                        color: isOut
+                            ? Colors.white
+                            : cs.onSurface.withValues(alpha: 0.9),
                       ),
                     ),
                   ],
@@ -801,6 +1033,8 @@ class _MessageBubble extends StatelessWidget {
                   fontSize: 15,
                 ),
               ),
+            if (msg.reactions.isNotEmpty)
+              _ReactionsWidget(reactions: msg.reactions, isOut: isOut),
             const SizedBox(height: 2),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -845,6 +1079,44 @@ class _MessageBubble extends StatelessWidget {
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 }
 
+// ── Виджет реакций ───────────────────────────────────────────────
+
+class _ReactionsWidget extends StatelessWidget {
+  final Map<String, List<String>> reactions;
+  final bool isOut;
+
+  const _ReactionsWidget({required this.reactions, required this.isOut});
+
+  @override
+  Widget build(BuildContext context) {
+    final sorted = reactions.entries.toList()
+      ..sort((a, b) => b.value.length.compareTo(a.value.length));
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Wrap(
+        spacing: 4,
+        runSpacing: 2,
+        children: sorted
+            .map((e) => Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: isOut
+                        ? Colors.white.withValues(alpha: 0.1)
+                        : Colors.grey.shade800,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text('${e.key} ${e.value.length}',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: isOut ? Colors.white : Colors.grey.shade300)),
+                ))
+            .toList(),
+      ),
+    );
+  }
+}
+
 // ── Поле ввода ───────────────────────────────────────────────────
 
 class _InputBar extends StatefulWidget {
@@ -855,6 +1127,7 @@ class _InputBar extends StatefulWidget {
   final int maxLength;
   final VoidCallback onSend;
   final VoidCallback onPickImage;
+  final VoidCallback onPickVideo;
   final VoidCallback onMicDown;
   final VoidCallback onMicUp;
 
@@ -866,6 +1139,7 @@ class _InputBar extends StatefulWidget {
     required this.maxLength,
     required this.onSend,
     required this.onPickImage,
+    required this.onPickVideo,
     required this.onMicDown,
     required this.onMicUp,
   });
@@ -946,7 +1220,9 @@ class _InputBarState extends State<_InputBar> {
           const SizedBox(width: 8),
           if (hasText || widget.isSending)
             GestureDetector(
-              onTap: widget.isSending || over || widget.isRecording ? null : widget.onSend,
+              onTap: widget.isSending || over || widget.isRecording
+                  ? null
+                  : widget.onSend,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 width: 44,
@@ -962,26 +1238,48 @@ class _InputBarState extends State<_InputBar> {
                         padding: EdgeInsets.all(12),
                         child: CircularProgressIndicator(
                             strokeWidth: 2, color: Colors.white))
-                    : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
+                    : const Icon(Icons.send_rounded,
+                        color: Colors.white, size: 20),
               ),
             )
           else
-            GestureDetector(
-              onLongPressStart: (_) => widget.onMicDown(),
-              onLongPressEnd: (_) => widget.onMicUp(),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: widget.isRecording
-                      ? Colors.redAccent
-                      : const Color(0xFF1DB954),
-                  shape: BoxShape.circle,
+            Row(children: [
+              // Square video recorder button
+              GestureDetector(
+                onTap: widget.isSending ? null : widget.onPickVideo,
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: widget.isSending
+                        ? Colors.grey.shade700
+                        : const Color(0xFF1DB954),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.videocam_rounded,
+                      color: Colors.white, size: 22),
                 ),
-                child: const Icon(Icons.mic_rounded, color: Colors.white, size: 20),
               ),
-            ),
+              const SizedBox(width: 8),
+              // Voice record button (hold)
+              GestureDetector(
+                onLongPressStart: (_) => widget.onMicDown(),
+                onLongPressEnd: (_) => widget.onMicUp(),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: widget.isRecording
+                        ? Colors.redAccent
+                        : const Color(0xFF1DB954),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.mic_rounded,
+                      color: Colors.white, size: 20),
+                ),
+              ),
+            ]),
         ]),
       ),
     );
@@ -1006,14 +1304,20 @@ class _VoiceMessageBubble extends StatelessWidget {
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
               onPressed: () async {
-                if (isPlaying) {
-                  await VoiceService.instance.stop();
-                } else {
-                  await VoiceService.instance.play(voicePath);
+                try {
+                  if (isPlaying) {
+                    await VoiceService.instance.stop();
+                  } else {
+                    await VoiceService.instance.play(voicePath);
+                  }
+                } catch (e) {
+                  debugPrint('[Voice] Playback error: $e');
                 }
               },
               icon: Icon(
-                isPlaying ? Icons.stop_circle_outlined : Icons.play_circle_outline,
+                isPlaying
+                    ? Icons.stop_circle_outlined
+                    : Icons.play_circle_outline,
                 color: isOut ? Colors.white : Colors.white70,
                 size: 22,
               ),
@@ -1028,6 +1332,50 @@ class _VoiceMessageBubble extends StatelessWidget {
           ],
         );
       },
+    );
+  }
+}
+
+class _VideoMessageBubble extends StatelessWidget {
+  final String videoPath;
+  final bool isOut;
+
+  const _VideoMessageBubble({required this.videoPath, required this.isOut});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          onPressed: () async {
+            try {
+              await OpenFilex.open(videoPath);
+            } catch (e) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Не удалось открыть видео: $e'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+          },
+          icon: Icon(
+            Icons.play_circle_outline,
+            color: isOut ? Colors.white : Colors.white70,
+            size: 22,
+          ),
+        ),
+        Text(
+          'Видео',
+          style: TextStyle(
+            color: isOut ? Colors.white : Colors.white70,
+            fontSize: 13,
+          ),
+        ),
+      ],
     );
   }
 }

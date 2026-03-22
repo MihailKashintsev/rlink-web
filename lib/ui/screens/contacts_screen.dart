@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../models/contact.dart';
+import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../widgets/avatar_widget.dart';
 import 'chat_screen.dart';
@@ -21,7 +22,8 @@ class ContactsScreen extends StatelessWidget {
               Text('Нет контактов',
                   style: TextStyle(color: Colors.grey.shade500, fontSize: 16)),
               const SizedBox(height: 8),
-              Text('Найди устройства на вкладке "Рядом"\nи добавь их в контакты',
+              Text(
+                  'Найди устройства на вкладке "Рядом"\nи добавь их в контакты',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
             ]),
@@ -61,7 +63,7 @@ class _ContactTile extends StatelessWidget {
       title: Text(contact.nickname,
           style: const TextStyle(fontWeight: FontWeight.w500)),
       subtitle: Text(
-        '${contact.publicKeyHex.substring(0, 16)}...',
+        '${contact.publicKeyHex.substring(0, contact.publicKeyHex.length.clamp(0, 16))}...',
         style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
       ),
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -119,6 +121,7 @@ class _ContactTile extends StatelessWidget {
               Navigator.pop(context);
               await ChatStorageService.instance
                   .deleteContact(contact.publicKeyHex);
+              BleService.instance.resetPeerMapping(contact.publicKeyHex);
             },
             child: const Text('Удалить'),
           ),

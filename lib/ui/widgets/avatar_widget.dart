@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 class AvatarWidget extends StatelessWidget {
   final String initials;
   final int color;
-  final String emoji;      // если не пустой — показываем эмодзи вместо инициалов
+  final String emoji; // если не пустой — показываем эмодзи вместо инициалов
   final String? imagePath; // если задан — показываем фото поверх всего
   final double size;
   final bool isOnline;

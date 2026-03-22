@@ -36,10 +36,10 @@ class ImageService {
     final result = await FlutterImageCompress.compressAndGetFile(
       sourcePath,
       targetPath,
-      minWidth:  isAvatar ? 192 : 320,
+      minWidth: isAvatar ? 192 : 320,
       minHeight: isAvatar ? 192 : 320,
-      quality:   isAvatar ? 60  : 55,
-      format:    CompressFormat.jpeg,
+      quality: isAvatar ? 60 : 55,
+      format: CompressFormat.jpeg,
     );
 
     if (result == null) {
@@ -110,15 +110,26 @@ class ImageService {
   }
 
   /// Инициализирует сборку до прихода первого чанка (вызывается из onImgMeta).
-  void initAssembly(String msgId, int totalChunks, {bool isAvatar = false, bool isVoice = false, String fromId = ''}) {
+  void initAssembly(String msgId, int totalChunks,
+      {bool isAvatar = false,
+      bool isVoice = false,
+      bool isVideo = false,
+      String fromId = ''}) {
     _assemblies.putIfAbsent(
       msgId,
-      () => _ImageAssembly(totalChunks: totalChunks, isAvatar: isAvatar, isVoice: isVoice, fromId: fromId),
+      () => _ImageAssembly(
+        totalChunks: totalChunks,
+        isAvatar: isAvatar,
+        isVoice: isVoice,
+        isVideo: isVideo,
+        fromId: fromId,
+      ),
     );
   }
 
   bool isAvatarAssembly(String msgId) => _assemblies[msgId]?.isAvatar ?? false;
-  bool isVoiceAssembly(String msgId)  => _assemblies[msgId]?.isVoice  ?? false;
+  bool isVoiceAssembly(String msgId) => _assemblies[msgId]?.isVoice ?? false;
+  bool isVideoAssembly(String msgId) => _assemblies[msgId]?.isVideo ?? false;
   String assemblyFromId(String msgId) => _assemblies[msgId]?.fromId ?? '';
 
   void cancelAssembly(String msgId) => _assemblies.remove(msgId);
@@ -149,16 +160,48 @@ class ImageService {
     if (!dir.existsSync()) dir.createSync(recursive: true);
     return dir;
   }
+
+  Future<Directory> _videosDir() async {
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory(p.join(base.path, 'videos'));
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    return dir;
+  }
+
+  Future<String> saveVideo(String sourcePath) async {
+    final dir = await _videosDir();
+    final name = '${_uuid.v4()}.mp4';
+    final targetPath = p.join(dir.path, name);
+    await File(sourcePath).copy(targetPath);
+    return targetPath;
+  }
+
+  Future<String?> assembleAndSaveVideo(String msgId) async {
+    final assembly = _assemblies.remove(msgId);
+    if (assembly == null || !assembly.isComplete) return null;
+    final data = assembly.assemble();
+    final dir = await _videosDir();
+    final path = p.join(dir.path, '$msgId.mp4');
+    await File(path).writeAsBytes(data);
+    return path;
+  }
 }
 
 class _ImageAssembly {
   final int totalChunks;
   final bool isAvatar;
   final bool isVoice;
+  final bool isVideo;
   final String fromId;
   final Map<int, Uint8List> _chunks = {};
 
-  _ImageAssembly({required this.totalChunks, this.isAvatar = false, this.isVoice = false, this.fromId = ''});
+  _ImageAssembly({
+    required this.totalChunks,
+    this.isAvatar = false,
+    this.isVoice = false,
+    this.isVideo = false,
+    this.fromId = '',
+  });
 
   void add(int index, Uint8List data) => _chunks[index] = data;
 

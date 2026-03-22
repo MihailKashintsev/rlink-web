@@ -66,8 +66,10 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Rlink использует камеру для записи видеосообщений</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Rlink использует микрофон для записи голосовых сообщений</string>
+	<string>Rlink использует микрофон для записи голосовых и видеосообщений</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Rlink использует галерею для выбора фото аватара и изображений в чате</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>

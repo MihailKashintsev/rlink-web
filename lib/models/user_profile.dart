@@ -21,23 +21,22 @@ class UserProfile {
     return nickname.isNotEmpty ? nickname[0].toUpperCase() : '?';
   }
 
-  String get shortId => publicKeyHex.length > 8
-      ? publicKeyHex.substring(0, 8)
-      : publicKeyHex;
+  String get shortId =>
+      publicKeyHex.length > 8 ? publicKeyHex.substring(0, 8) : publicKeyHex;
 
   Map<String, dynamic> toJson() => {
-        'id':    publicKeyHex,
-        'nick':  nickname,
+        'id': publicKeyHex,
+        'nick': nickname,
         'color': avatarColor,
         'emoji': avatarEmoji,
         if (avatarImagePath != null) 'imgPath': avatarImagePath,
       };
 
   factory UserProfile.fromJson(Map<String, dynamic> j) => UserProfile(
-        publicKeyHex:    j['id']      as String,
-        nickname:        j['nick']    as String,
-        avatarColor:     j['color']   as int,
-        avatarEmoji:     j['emoji']   as String,
+        publicKeyHex: j['id'] as String,
+        nickname: j['nick'] as String,
+        avatarColor: j['color'] as int,
+        avatarEmoji: j['emoji'] as String,
         avatarImagePath: j['imgPath'] as String?,
       );
 
@@ -63,9 +62,37 @@ class UserProfile {
   ];
 
   static const avatarEmojis = [
-    '😎', '🥷', '🧙', '🧛', '🦊', '🐺', '🦁', '🐯',
-    '🐻', '🐼', '🦄', '🐲', '👾', '🤖', '👻', '💀',
-    '🔥', '⚡', '🌊', '💎', '🚀', '🎮', '🎸', '🏆',
-    '🌙', '⭐', '🌈', '✨', '🔮', '🎯', '💥', '🌟',
+    '😎',
+    '🥷',
+    '🧙',
+    '🧛',
+    '🦊',
+    '🐺',
+    '🦁',
+    '🐯',
+    '🐻',
+    '🐼',
+    '🦄',
+    '🐲',
+    '👾',
+    '🤖',
+    '👻',
+    '💀',
+    '🔥',
+    '⚡',
+    '🌊',
+    '💎',
+    '🚀',
+    '🎮',
+    '🎸',
+    '🏆',
+    '🌙',
+    '⭐',
+    '🌈',
+    '✨',
+    '🔮',
+    '🎯',
+    '💥',
+    '🌟',
   ];
 }

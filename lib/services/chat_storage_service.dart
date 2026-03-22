@@ -36,7 +36,7 @@ class ChatStorageService {
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE contacts (
@@ -56,6 +56,7 @@ class ChatStorageService {
             text                 TEXT NOT NULL,
             reply_to_message_id  TEXT,
             image_path           TEXT,
+            video_path           TEXT,
             voice_path           TEXT,
             is_outgoing          INTEGER NOT NULL,
             timestamp            INTEGER NOT NULL,
@@ -97,6 +98,13 @@ class ChatStorageService {
           try {
             await db.execute(
               'ALTER TABLE messages ADD COLUMN voice_path TEXT',
+            );
+          } catch (_) {}
+        }
+        if (oldVersion < 6) {
+          try {
+            await db.execute(
+              'ALTER TABLE messages ADD COLUMN video_path TEXT',
             );
           } catch (_) {}
         }
@@ -143,11 +151,11 @@ class ChatStorageService {
     await _db?.update(
       'contacts',
       {
-        'nick':             contact.nickname,
-        'color':            contact.avatarColor,
-        'emoji':            contact.avatarEmoji,
-        'avatar_img_path':  contact.avatarImagePath,
-        'last_seen':        DateTime.now().millisecondsSinceEpoch,
+        'nick': contact.nickname,
+        'color': contact.avatarColor,
+        'emoji': contact.avatarEmoji,
+        'avatar_img_path': contact.avatarImagePath,
+        'last_seen': DateTime.now().millisecondsSinceEpoch,
       },
       where: 'id = ?',
       whereArgs: [contact.publicKeyHex],
@@ -330,13 +338,17 @@ class ChatStorageService {
   }
 
   void _notifyMessages(String peerId) async {
+    final notifier = _messagesNotifiers[peerId];
+    if (notifier == null) return;
+    final msgs = await getMessages(peerId);
+    // Re-check after await — the notifier could have been removed (e.g., deleteChat)
     if (_messagesNotifiers.containsKey(peerId)) {
-      final msgs = await getMessages(peerId);
-      _messagesNotifiers[peerId]!.value = msgs;
+      notifier.value = msgs;
     }
   }
 
-  Future<void> addReaction(String messageId, String emoji, String fromId) async {
+  Future<void> toggleReaction(
+      String messageId, String emoji, String fromId) async {
     final rows = await _db?.query(
       'messages',
       where: 'id = ?',
@@ -346,9 +358,15 @@ class ChatStorageService {
     if (rows == null || rows.isEmpty) return;
     final msg = ChatMessage.fromMap(rows.first);
 
-    final reactions = msg.reactions.map((k, v) => MapEntry(k, List<String>.from(v)));
+    final reactions =
+        msg.reactions.map((k, v) => MapEntry(k, List<String>.from(v)));
     final senders = reactions.putIfAbsent(emoji, () => []);
-    if (!senders.contains(fromId)) senders.add(fromId);
+    if (senders.contains(fromId)) {
+      senders.remove(fromId);
+      if (senders.isEmpty) reactions.remove(emoji);
+    } else {
+      senders.add(fromId);
+    }
 
     await _db?.update(
       'messages',

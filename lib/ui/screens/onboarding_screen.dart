@@ -55,7 +55,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     }
     if (nick.length > _maxNickLength) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Имя не должно превышать $_maxNickLength символов')),
+        const SnackBar(
+            content: Text('Имя не должно превышать $_maxNickLength символов')),
       );
       return;
     }
@@ -68,9 +69,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       );
       // Обновляем эмодзи, цвет и фото
       await ProfileService.instance.updateProfile(
-        nickname:        nick,
-        avatarColor:     _selectedColor,
-        avatarEmoji:     _selectedEmoji,
+        nickname: nick,
+        avatarColor: _selectedColor,
+        avatarEmoji: _selectedEmoji,
         avatarImagePath: _selectedImagePath,
       );
       if (mounted) {
@@ -240,7 +241,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     fillColor: const Color(0xFF1A1A1A),
                     contentPadding: const EdgeInsets.symmetric(
                         horizontal: 20, vertical: 16),
-                    counterStyle: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+                    counterStyle:
+                        TextStyle(color: Colors.grey.shade600, fontSize: 11),
                   ),
                   onSubmitted: (_) => _create(),
                   onChanged: (_) => setState(() {}),
