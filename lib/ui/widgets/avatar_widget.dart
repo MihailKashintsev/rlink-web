@@ -1,7 +1,10 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as epf;
 import 'package:flutter/material.dart';
+
+import '../../services/image_service.dart';
 
 class AvatarWidget extends StatelessWidget {
   final String initials;
@@ -10,6 +13,8 @@ class AvatarWidget extends StatelessWidget {
   final String? imagePath; // если задан — показываем фото поверх всего
   final double size;
   final bool isOnline;
+  final bool hasStory;         // показывать ли кольцо сторис
+  final bool hasUnviewedStory; // непросмотренная сторис — яркий градиент
 
   const AvatarWidget({
     super.key,
@@ -19,58 +24,101 @@ class AvatarWidget extends StatelessWidget {
     this.imagePath,
     this.size = 48,
     this.isOnline = false,
+    this.hasStory = false,
+    this.hasUnviewedStory = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final file = imagePath != null ? File(imagePath!) : null;
+    // Resolve potentially stale iOS sandbox path
+    final resolvedPath = ImageService.instance.resolveStoredPath(imagePath);
+    final file = resolvedPath != null ? File(resolvedPath) : null;
     final hasImage = file != null && file.existsSync();
 
-    return Stack(
-      children: [
-        Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            color: Color(color),
-            shape: BoxShape.circle,
-          ),
-          child: ClipOval(
-            child: hasImage
-                ? Image.file(file, width: size, height: size, fit: BoxFit.cover)
-                : Center(
-                    child: emoji.isNotEmpty
-                        ? Text(emoji, style: TextStyle(fontSize: size * 0.46))
-                        : Text(
-                            initials.isNotEmpty ? initials : '?',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: size * 0.38,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                  ),
-          ),
-        ),
-        if (isOnline)
-          Positioned(
-            right: 0,
-            bottom: 0,
-            child: Container(
-              width: size * 0.28,
-              height: size * 0.28,
+    // If story ring is shown, shrink the avatar by 6px so the ring fits within size
+    final ringWidth = hasStory ? 3.0 : 0.0;
+    final gap = hasStory ? 2.0 : 0.0;
+    // Guard against negative/zero size to prevent NaN in CoreGraphics
+    final innerSize = math.max(size - (ringWidth + gap) * 2, 1.0);
+
+    Widget avatar = Container(
+      width: innerSize,
+      height: innerSize,
+      decoration: BoxDecoration(
+        color: Color(color),
+        shape: BoxShape.circle,
+      ),
+      child: ClipOval(
+        child: hasImage
+            ? Image.file(file, width: innerSize, height: innerSize, fit: BoxFit.cover)
+            : Center(
+                child: emoji.isNotEmpty
+                    ? Text(emoji, style: TextStyle(fontSize: innerSize * 0.46))
+                    : Text(
+                        initials.isNotEmpty ? initials : '?',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: innerSize * 0.38,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+              ),
+      ),
+    );
+
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          if (hasStory)
+            Container(
+              width: size,
+              height: size,
               decoration: BoxDecoration(
-                color: const Color(0xFF4CAF50),
                 shape: BoxShape.circle,
-                border: Border.all(
-                  color: Theme.of(context).scaffoldBackgroundColor,
-                  width: 2,
+                gradient: hasUnviewedStory
+                    ? const LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [Color(0xFFE91E63), Color(0xFFFF9800), Color(0xFFFFEB3B)],
+                      )
+                    : LinearGradient(
+                        colors: [Colors.grey.shade500, Colors.grey.shade700],
+                      ),
+              ),
+            ),
+          if (hasStory)
+            Container(
+              width: innerSize + gap * 2,
+              height: innerSize + gap * 2,
+              decoration: BoxDecoration(
+                color: Theme.of(context).scaffoldBackgroundColor,
+                shape: BoxShape.circle,
+              ),
+            ),
+          avatar,
+          if (isOnline)
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                width: size * 0.28,
+                height: size * 0.28,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4CAF50),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: Theme.of(context).scaffoldBackgroundColor,
+                    width: 2,
+                  ),
                 ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 }

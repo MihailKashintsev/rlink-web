@@ -7,11 +7,21 @@ class AppSettings extends ChangeNotifier {
   AppSettings._();
   static final AppSettings instance = AppSettings._();
 
-  static const _keyThemeMode = 'theme_mode';       // 0=system, 1=light, 2=dark
-  static const _keyAccentColor = 'accent_color';   // 0–5
-  static const _keyNotifications = 'notifications';
-  static const _keyNotifSound = 'notif_sound';
-  static const _keyNotifVibration = 'notif_vibration';
+  static const _keyThemeMode       = 'theme_mode';
+  static const _keyAccentColor     = 'accent_color';
+  static const _keyNotifications   = 'notifications';
+  static const _keyNotifSound      = 'notif_sound';
+  static const _keyNotifVibration  = 'notif_vibration';
+  static const _keyChatBgPrefix    = 'chat_bg_';
+  static const _keyLocale          = 'locale';           // 'system','ru','en','es','de','fr'
+  static const _keyFontSize        = 'font_size';        // 0=small,1=medium,2=large
+  static const _keySendOnEnter     = 'send_on_enter';
+  static const _keyShowReadReceipts = 'show_read_receipts';
+  static const _keyShowOnlineStatus = 'show_online_status';
+  static const _keyAutoDownloadMedia = 'auto_download_media';
+  static const _keyCompactMode     = 'compact_mode';
+  static const _keyEtherRulesAccepted = 'ether_rules_accepted';
+  static const _keyOnlineStatusMode  = 'online_status_mode'; // 0=online,1=dnd,2=busy
 
   late SharedPreferences _prefs;
 
@@ -20,12 +30,47 @@ class AppSettings extends ChangeNotifier {
   bool _notificationsEnabled = true;
   bool _notifSound = true;
   bool _notifVibration = true;
+  final Map<String, String> _chatBgMap = {};
+  String _locale = 'system';
+  int _fontSize = 1;            // 0=small, 1=medium, 2=large
+  bool _sendOnEnter = false;    // false = send button, true = Enter sends
+  bool _showReadReceipts = true;
+  bool _showOnlineStatus = true;
+  bool _autoDownloadMedia = true;
+  bool _compactMode = false;
+  bool _etherRulesAccepted = false;
+  int _onlineStatusMode = 0; // 0=online(green), 1=dnd(yellow), 2=busy(red)
 
   ThemeMode get themeMode => _themeMode;
   int get accentColorIndex => _accentColorIndex;
   bool get notificationsEnabled => _notificationsEnabled;
   bool get notifSound => _notifSound;
   bool get notifVibration => _notifVibration;
+  String? chatBgForPeer(String peerId) => _chatBgMap[peerId];
+  String get locale => _locale;
+  int get fontSize => _fontSize;
+  bool get sendOnEnter => _sendOnEnter;
+  bool get showReadReceipts => _showReadReceipts;
+  bool get showOnlineStatus => _showOnlineStatus;
+  bool get autoDownloadMedia => _autoDownloadMedia;
+  bool get compactMode => _compactMode;
+  bool get etherRulesAccepted => _etherRulesAccepted;
+  int get onlineStatusMode => _onlineStatusMode;
+
+  /// Цвет статуса: 0=зелёный(онлайн), 1=жёлтый(DND), 2=красный(занят), 3=серый(офлайн — авто)
+  Color get onlineStatusColor => const [
+    Color(0xFF4CAF50), // green
+    Color(0xFFFFC107), // yellow/amber
+    Color(0xFFF44336), // red
+    Color(0xFF9E9E9E), // gray
+  ][_onlineStatusMode.clamp(0, 3)];
+
+  String get onlineStatusLabel => const [
+    'В сети',
+    'Не беспокоить',
+    'Занят — не писать',
+    'Не в сети',
+  ][_onlineStatusMode.clamp(0, 3)];
 
   /// Шесть акцентных цветов на выбор пользователя.
   static const List<Color> accentColors = [
@@ -35,9 +80,17 @@ class AppSettings extends ChangeNotifier {
     Color(0xFFFF5722), // Оранжевый
     Color(0xFFF44336), // Красный
     Color(0xFF00BCD4), // Голубой
+    Color(0xFFE91E63), // Розовый
+    Color(0xFF4CAF50), // Светло-зелёный
   ];
 
   Color get accentColor => accentColors[_accentColorIndex];
+
+  /// Возвращает Locale для MaterialApp на основе настройки
+  Locale? get resolvedLocale {
+    if (_locale == 'system') return null;
+    return Locale(_locale);
+  }
 
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
@@ -47,6 +100,22 @@ class AppSettings extends ChangeNotifier {
     _notificationsEnabled = _prefs.getBool(_keyNotifications) ?? true;
     _notifSound = _prefs.getBool(_keyNotifSound) ?? true;
     _notifVibration = _prefs.getBool(_keyNotifVibration) ?? true;
+    for (final key in _prefs.getKeys()) {
+      if (key.startsWith(_keyChatBgPrefix)) {
+        final peerId = key.substring(_keyChatBgPrefix.length);
+        final path = _prefs.getString(key);
+        if (path != null) _chatBgMap[peerId] = path;
+      }
+    }
+    _locale = _prefs.getString(_keyLocale) ?? 'system';
+    _fontSize = (_prefs.getInt(_keyFontSize) ?? 1).clamp(0, 2);
+    _sendOnEnter = _prefs.getBool(_keySendOnEnter) ?? false;
+    _showReadReceipts = _prefs.getBool(_keyShowReadReceipts) ?? true;
+    _showOnlineStatus = _prefs.getBool(_keyShowOnlineStatus) ?? true;
+    _autoDownloadMedia = _prefs.getBool(_keyAutoDownloadMedia) ?? true;
+    _compactMode = _prefs.getBool(_keyCompactMode) ?? false;
+    _etherRulesAccepted = _prefs.getBool(_keyEtherRulesAccepted) ?? false;
+    _onlineStatusMode = (_prefs.getInt(_keyOnlineStatusMode) ?? 0).clamp(0, 2);
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {
@@ -76,6 +145,71 @@ class AppSettings extends ChangeNotifier {
   Future<void> setNotifVibration(bool value) async {
     _notifVibration = value;
     await _prefs.setBool(_keyNotifVibration, value);
+    notifyListeners();
+  }
+
+  Future<void> setChatBgForPeer(String peerId, String? path) async {
+    if (path == null) {
+      _chatBgMap.remove(peerId);
+      await _prefs.remove('$_keyChatBgPrefix$peerId');
+    } else {
+      _chatBgMap[peerId] = path;
+      await _prefs.setString('$_keyChatBgPrefix$peerId', path);
+    }
+    notifyListeners();
+  }
+
+  Future<void> setLocale(String locale) async {
+    _locale = locale;
+    await _prefs.setString(_keyLocale, locale);
+    notifyListeners();
+  }
+
+  Future<void> setFontSize(int size) async {
+    _fontSize = size.clamp(0, 2);
+    await _prefs.setInt(_keyFontSize, _fontSize);
+    notifyListeners();
+  }
+
+  Future<void> setSendOnEnter(bool value) async {
+    _sendOnEnter = value;
+    await _prefs.setBool(_keySendOnEnter, value);
+    notifyListeners();
+  }
+
+  Future<void> setShowReadReceipts(bool value) async {
+    _showReadReceipts = value;
+    await _prefs.setBool(_keyShowReadReceipts, value);
+    notifyListeners();
+  }
+
+  Future<void> setShowOnlineStatus(bool value) async {
+    _showOnlineStatus = value;
+    await _prefs.setBool(_keyShowOnlineStatus, value);
+    notifyListeners();
+  }
+
+  Future<void> setAutoDownloadMedia(bool value) async {
+    _autoDownloadMedia = value;
+    await _prefs.setBool(_keyAutoDownloadMedia, value);
+    notifyListeners();
+  }
+
+  Future<void> setCompactMode(bool value) async {
+    _compactMode = value;
+    await _prefs.setBool(_keyCompactMode, value);
+    notifyListeners();
+  }
+
+  Future<void> setEtherRulesAccepted(bool value) async {
+    _etherRulesAccepted = value;
+    await _prefs.setBool(_keyEtherRulesAccepted, value);
+    notifyListeners();
+  }
+
+  Future<void> setOnlineStatusMode(int mode) async {
+    _onlineStatusMode = mode.clamp(0, 2);
+    await _prefs.setInt(_keyOnlineStatusMode, _onlineStatusMode);
     notifyListeners();
   }
 }

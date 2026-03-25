@@ -19,6 +19,64 @@ class ImageService {
   final _uuid = const Uuid();
   final Map<String, _ImageAssembly> _assemblies = {};
 
+  /// Cached documents directory path — set during init().
+  /// Used by resolveStoredPath() to fix stale iOS sandbox paths after rebuild.
+  String? _docsPath;
+
+  /// Must be called once at startup (before any path resolution).
+  Future<void> init() async {
+    final dir = await getApplicationDocumentsDirectory();
+    _docsPath = dir.path;
+  }
+
+  /// Resolves a stored file path that may have become stale after a rebuild or
+  /// app reinstall.
+  ///
+  /// - iOS changes the sandbox UUID on each Xcode install, so absolute paths
+  ///   saved in the DB are remapped via the '/Documents/' marker.
+  /// - Android changes the app data directory on reinstall; paths are remapped
+  ///   by trying the current documents directory with the same filename/subpath.
+  ///
+  /// Handles both old absolute paths and relative paths.
+  String? resolveStoredPath(String? path) {
+    if (path == null || path.isEmpty) return null;
+    final docsPath = _docsPath;
+    if (docsPath == null) return path; // init not called yet — return as-is
+
+    // Already a relative path (e.g. "images/uuid.jpg")
+    if (!path.startsWith('/')) return p.join(docsPath, path);
+
+    // Absolute path that already matches current sandbox
+    if (path.startsWith(docsPath)) return path;
+
+    // Stale absolute path — try to extract relative portion after /Documents/
+    // (covers iOS sandbox UUID rotation)
+    const marker = '/Documents/';
+    final idx = path.indexOf(marker);
+    if (idx >= 0) {
+      final relative = path.substring(idx + marker.length);
+      final candidate = p.join(docsPath, relative);
+      if (File(candidate).existsSync()) return candidate;
+      // Fall through to basename check if the resolved path doesn't exist
+    }
+
+    // Android / unknown format: try to find the file by its basename under the
+    // current documents directory (covers app_flutter path changes on reinstall).
+    // Walk up to one subdirectory level (e.g. images/, voices/, videos/).
+    final basename = p.basename(path);
+    // Try <docsPath>/<basename>
+    final flat = p.join(docsPath, basename);
+    if (File(flat).existsSync()) return flat;
+    // Try common subdirectories
+    for (final sub in const ['images', 'voices', 'videos', 'files']) {
+      final inSub = p.join(docsPath, sub, basename);
+      if (File(inSub).existsSync()) return inSub;
+    }
+
+    // Could not resolve — return original path and let the UI handle missing file
+    return path;
+  }
+
   // ── Сохранение и сжатие ──────────────────────────────────────
 
   /// Сжимает изображение и сохраняет в <documents>/images/.
@@ -115,6 +173,8 @@ class ImageService {
       bool isVoice = false,
       bool isVideo = false,
       bool isSquare = false,
+      bool isFile = false,
+      String? fileName,
       String fromId = ''}) {
     _assemblies.putIfAbsent(
       msgId,
@@ -124,6 +184,8 @@ class ImageService {
         isVoice: isVoice,
         isVideo: isVideo,
         isSquare: isSquare,
+        isFile: isFile,
+        fileName: fileName,
         fromId: fromId,
       ),
     );
@@ -133,6 +195,8 @@ class ImageService {
   bool isVoiceAssembly(String msgId) => _assemblies[msgId]?.isVoice ?? false;
   bool isVideoAssembly(String msgId) => _assemblies[msgId]?.isVideo ?? false;
   bool isSquareAssembly(String msgId) => _assemblies[msgId]?.isSquare ?? false;
+  bool isFileAssembly(String msgId) => _assemblies[msgId]?.isFile ?? false;
+  String? assemblyFileName(String msgId) => _assemblies[msgId]?.fileName;
   String assemblyFromId(String msgId) => _assemblies[msgId]?.fromId ?? '';
 
   void cancelAssembly(String msgId) => _assemblies.remove(msgId);
@@ -190,6 +254,31 @@ class ImageService {
     await File(path).writeAsBytes(data);
     return path;
   }
+
+  /// Assembles a received file transfer and saves it to the files directory.
+  /// Returns the local path, or null on failure.
+  Future<String?> assembleAndSaveFile(String msgId) async {
+    final assembly = _assemblies.remove(msgId);
+    if (assembly == null || !assembly.isComplete) return null;
+    final data = assembly.assemble();
+    final dir = await _filesDir();
+    // Preserve original extension from fileName, else use .bin
+    final originalName = assembly.fileName;
+    final ext = (originalName != null && originalName.contains('.'))
+        ? originalName.split('.').last
+        : 'bin';
+    final safeName = originalName ?? '$msgId.$ext';
+    final path = p.join(dir.path, safeName);
+    await File(path).writeAsBytes(data);
+    return path;
+  }
+
+  Future<Directory> _filesDir() async {
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory(p.join(base.path, 'files'));
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    return dir;
+  }
 }
 
 class _ImageAssembly {
@@ -198,6 +287,8 @@ class _ImageAssembly {
   final bool isVoice;
   final bool isVideo;
   final bool isSquare;
+  final bool isFile;
+  final String? fileName;
   final String fromId;
   final Map<int, Uint8List> _chunks = {};
 
@@ -207,6 +298,8 @@ class _ImageAssembly {
     this.isVoice = false,
     this.isVideo = false,
     this.isSquare = false,
+    this.isFile = false,
+    this.fileName,
     this.fromId = '',
   });
 

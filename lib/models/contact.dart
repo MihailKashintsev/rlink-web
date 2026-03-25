@@ -1,3 +1,5 @@
+import '../services/image_service.dart';
+
 class Contact {
   final String publicKeyHex;
   final String nickname;
@@ -53,7 +55,9 @@ class Contact {
         nickname: m['nick'] as String,
         avatarColor: m['color'] as int,
         avatarEmoji: m['emoji'] as String,
-        avatarImagePath: m['avatar_img_path'] as String?,
+        // Resolve potentially stale iOS sandbox path
+        avatarImagePath: ImageService.instance.resolveStoredPath(
+            m['avatar_img_path'] as String?),
         addedAt: DateTime.fromMillisecondsSinceEpoch(m['added_at'] as int),
         lastSeen: m['last_seen'] != null
             ? DateTime.fromMillisecondsSinceEpoch(m['last_seen'] as int)

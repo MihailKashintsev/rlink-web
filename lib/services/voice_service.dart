@@ -27,8 +27,8 @@ class VoiceService {
     await _recorder.start(
       const RecordConfig(
         encoder: AudioEncoder.aacLc,
-        bitRate: 8000,
-        sampleRate: 8000,
+        bitRate: 64000,
+        sampleRate: 44100,
         numChannels: 1,
       ),
       path: path,

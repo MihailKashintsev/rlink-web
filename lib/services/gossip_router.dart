@@ -11,11 +11,11 @@ const _kProfileTtl =
     4; // Профили распространяются на 4 хопа для лучшего discovery
 const _kSeenCacheTtl = Duration(minutes: 30);
 const _kMaxPayloadBytes =
-    288; // hard limit: iOS ATT MTU ≈ 290, leave 2 bytes margin
+    700; // лимит для raw/ether/profile/ack: worst-case 90-char unicode ≈ 367 б, не-анонимный ether ≈ 400 б
 const _kMaxImgPayloadBytes =
-    285; // img_meta ≈ 233 б, img_chunk ≈ 274 б < BLE MTU 290
+    500; // img_meta ≈ 233–350 б (с именем файла), img_chunk ≈ 274 б; BLE framing снимает ограничение MTU
 const _kMaxEncPayloadBytes =
-    490; // зашифрованные 'msg' пакеты ≈ 380-420 б < согласованный MTU 512
+    700; // зашифрованные 'msg' пакеты: фикс. оверхед 294 б + base64(180 байт) = 534 б (90 символов unicode)
 
 class GossipPacket {
   final String id;
@@ -112,15 +112,36 @@ typedef OnDeleteReceived = Future<void> Function(
 typedef OnReactReceived = Future<void> Function(
     String fromId, String messageId, String emoji);
 
+/// Вызывается при получении сообщения в «Эфир».
+/// [senderId] / [senderNick] — null если анонимно.
+typedef OnEtherReceived = void Function(
+    String id, String text, int color, String? senderId, String? senderNick);
+
+/// Вызывается при получении сторис от пира.
+typedef OnStoryReceived = void Function(
+    String storyId, String authorId, String text, int bgColor);
+
+/// Pair request: device wants to exchange profiles.
+typedef OnPairRequest = void Function(
+    String bleId, String publicKey, String nick, int color, String emoji,
+    String x25519Key);
+
+/// Pair accepted: device accepted our pair request.
+typedef OnPairAccepted = void Function(
+    String bleId, String publicKey, String nick, int color, String emoji,
+    String x25519Key);
+
 /// Вызывается при получении img_meta (начало передачи изображения/голоса).
 typedef OnImgMeta = void Function(
   String fromId,
   String msgId,
   int totalChunks,
-  bool isAvatar, // true — аватар
-  bool isVoice, // true — голосовое сообщение
-  bool isVideo, // true — видеосообщение
-  bool isSquare, // true — квадратное видео (аналог видеокружков)
+  bool isAvatar,  // true — аватар
+  bool isVoice,   // true — голосовое сообщение
+  bool isVideo,   // true — видеосообщение
+  bool isSquare,  // true — квадратное видео
+  bool isFile,    // true — произвольный файл/документ
+  String? fileName, // оригинальное имя файла (только для isFile)
 );
 
 /// Вызывается при получении очередного img_chunk.
@@ -151,6 +172,10 @@ class GossipRouter {
   OnReactReceived? onReactReceived;
   OnImgMeta? onImgMeta;
   OnImgChunk? onImgChunk;
+  OnEtherReceived? onEtherReceived;
+  OnStoryReceived? onStoryReceived;
+  OnPairRequest? onPairRequest;
+  OnPairAccepted? onPairAccepted;
 
   void init({
     String? myKey,
@@ -163,6 +188,10 @@ class GossipRouter {
     OnReactReceived? onReact,
     OnImgMeta? onImgMetaReceived,
     OnImgChunk? onImgChunkReceived,
+    OnEtherReceived? onEther,
+    OnStoryReceived? onStory,
+    OnPairRequest? onPairReq,
+    OnPairAccepted? onPairAcc,
   }) {
     myPublicKey = myKey;
     onMessageReceived = onMessage;
@@ -174,6 +203,10 @@ class GossipRouter {
     onReactReceived = onReact;
     onImgMeta = onImgMetaReceived;
     onImgChunk = onImgChunkReceived;
+    onEtherReceived = onEther;
+    onStoryReceived = onStory;
+    onPairRequest = onPairReq;
+    onPairAccepted = onPairAcc;
     _cleanupTimer =
         Timer.periodic(const Duration(minutes: 10), (_) => _cleanup());
   }
@@ -230,7 +263,10 @@ class GossipRouter {
       payload: payload,
     );
     _markSeen(packet.id);
-    await _forward(packet);
+    for (var i = 0; i < 3; i++) {
+      await _forward(packet);
+      if (i < 2) await Future.delayed(const Duration(milliseconds: 400));
+    }
     return packet;
   }
 
@@ -257,7 +293,10 @@ class GossipRouter {
       payload: payload,
     );
     _markSeen(packet.id);
-    await _forwardEncrypted(packet);
+    for (var i = 0; i < 3; i++) {
+      await _forwardEncrypted(packet);
+      if (i < 2) await Future.delayed(const Duration(milliseconds: 400));
+    }
   }
 
   Future<void> sendAck({
@@ -274,7 +313,10 @@ class GossipRouter {
       payload: {'messageId': messageId, 'from': senderId},
     );
     _markSeen(packet.id);
-    await _forward(packet);
+    for (var i = 0; i < 2; i++) {
+      await _forward(packet);
+      if (i < 1) await Future.delayed(const Duration(milliseconds: 300));
+    }
   }
 
   Future<void> sendEditMessage({
@@ -296,7 +338,10 @@ class GossipRouter {
       },
     );
     _markSeen(packet.id);
-    await _forward(packet);
+    for (var i = 0; i < 2; i++) {
+      await _forward(packet);
+      if (i < 1) await Future.delayed(const Duration(milliseconds: 300));
+    }
   }
 
   Future<void> sendDeleteMessage({
@@ -314,7 +359,10 @@ class GossipRouter {
       payload: {'messageId': messageId},
     );
     _markSeen(packet.id);
-    await _forward(packet);
+    for (var i = 0; i < 2; i++) {
+      await _forward(packet);
+      if (i < 1) await Future.delayed(const Duration(milliseconds: 300));
+    }
   }
 
   /// Отправляет метаданные изображения получателю (или broadcast для аватара).
@@ -329,6 +377,8 @@ class GossipRouter {
     bool isVoice = false,
     bool isVideo = false,
     bool isSquare = false,
+    bool isFile = false,
+    String? fileName,
   }) async {
     // rid8 для не-аватаров: фильтрует на промежуточных узлах, +14 байт ≤ MTU 285
     final rid8 = (!isAvatar && (recipientId?.length ?? 0) >= 8)
@@ -347,11 +397,18 @@ class GossipRouter {
         if (isVoice) 'voice': true,
         if (isVideo) 'video': true,
         if (isSquare) 'sq': true,
+        if (isFile) 'file': true,
+        if (fileName != null) 'fname': fileName,
         if (rid8 != null) 'r': rid8,
       },
     );
     _markSeen(packet.id);
-    await _forwardImg(packet);
+    // Retry img_meta 2 times for better avatar/image reliability.
+    // Receivers dedup via _hasSeen so this is safe.
+    for (var i = 0; i < 2; i++) {
+      await _forwardImg(packet);
+      if (i < 1) await Future.delayed(const Duration(milliseconds: 300));
+    }
   }
 
   /// img_chunk ≈ 154 + base64(90 байт) = 274 байт < BLE MTU 290 байт.
@@ -380,6 +437,63 @@ class GossipRouter {
     await _forwardImg(packet);
   }
 
+  /// Отправляет сообщение в «Эфир» всем узлам сети.
+  /// [senderId] / [senderNick] — null если анонимно.
+  Future<void> sendEtherMessage({
+    required String text,
+    required int color,
+    required String messageId,
+    String? senderId,
+    String? senderNick,
+  }) async {
+    final payload = <String, dynamic>{'text': text, 'col': color};
+    if (senderId != null && senderNick != null) {
+      payload['from'] = senderId;
+      payload['nick'] = senderNick;
+    }
+    final packet = GossipPacket(
+      id: messageId,
+      type: 'ether',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: payload,
+    );
+    _markSeen(packet.id);
+    // Ether is broadcast — retry 3 times for reliability over flaky BLE.
+    // Receivers dedup via _hasSeen so this is safe.
+    for (var i = 0; i < 3; i++) {
+      await _forward(packet);
+      if (i < 2) await Future.delayed(const Duration(milliseconds: 500));
+    }
+  }
+
+  /// Отправляет сторис в mesh-сеть (broadcast, TTL=5).
+  Future<void> sendStory({
+    required String storyId,
+    required String authorId,
+    required String text,
+    required int bgColor,
+  }) async {
+    final packet = GossipPacket(
+      id: storyId,
+      type: 'story',
+      ttl: 5,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'from': authorId,
+        'text': text,
+        'col': bgColor,
+      },
+    );
+    _markSeen(packet.id);
+    // Story is broadcast — retry 3 times for reliability over flaky BLE.
+    // Receivers dedup via _hasSeen so this is safe.
+    for (var i = 0; i < 3; i++) {
+      await _forward(packet);
+      if (i < 2) await Future.delayed(const Duration(milliseconds: 400));
+    }
+  }
+
   Future<void> sendReaction({
     required String messageId,
     required String emoji,
@@ -394,6 +508,64 @@ class GossipRouter {
     );
     _markSeen(packet.id);
     await _forward(packet);
+  }
+
+  /// Sends a pair request to nearby devices. TTL=1 (direct only).
+  Future<void> sendPairRequest({
+    required String publicKey,
+    required String nick,
+    required int color,
+    required String emoji,
+    String x25519Key = '',
+  }) async {
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'pair_req',
+      ttl: 1,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'id': publicKey,
+        'nick': nick,
+        'color': color,
+        'emoji': emoji,
+        if (x25519Key.isNotEmpty) 'x': x25519Key,
+      },
+    );
+    _markSeen(packet.id);
+    // Retry for reliability over BLE
+    for (var i = 0; i < 3; i++) {
+      await _forward(packet);
+      if (i < 2) await Future.delayed(const Duration(milliseconds: 400));
+    }
+  }
+
+  /// Accepts a pair request — sends profile with x25519 key.
+  Future<void> sendPairAccept({
+    required String publicKey,
+    required String nick,
+    required int color,
+    required String emoji,
+    required String x25519Key,
+  }) async {
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'pair_acc',
+      ttl: 1,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'id': publicKey,
+        'nick': nick,
+        'color': color,
+        'emoji': emoji,
+        if (x25519Key.isNotEmpty) 'x': x25519Key,
+      },
+    );
+    _markSeen(packet.id);
+    // Retry for reliability
+    for (var i = 0; i < 3; i++) {
+      await _forward(packet);
+      if (i < 2) await Future.delayed(const Duration(milliseconds: 400));
+    }
   }
 
   Future<void> broadcastProfile({
@@ -418,16 +590,23 @@ class GossipRouter {
       payload: payload,
     );
     _markSeen(packet.id);
-    await _forward(packet);
+    for (var i = 0; i < 3; i++) {
+      await _forward(packet);
+      if (i < 2) await Future.delayed(const Duration(milliseconds: 400));
+    }
   }
 
   // sourceId — BLE device ID пира, который прислал эти байты напрямую
   Future<void> onPacketReceived(Uint8List rawBytes, {String? sourceId}) async {
     final packet = GossipPacket.decode(rawBytes);
-    if (packet == null) return;
+    if (packet == null) {
+      debugPrint('[Gossip] Failed to decode packet (${rawBytes.length} bytes)');
+      return;
+    }
 
     if (_hasSeen(packet.id)) return;
     _markSeen(packet.id);
+    debugPrint('[Gossip] Received type=${packet.type} ttl=${packet.ttl} id=${packet.id.substring(0, 8)}');
 
     if (packet.isExpired) return;
     if (packet.ttl <= 0) return;
@@ -606,6 +785,8 @@ class GossipRouter {
         final isVoice = (packet.payload['voice'] as bool?) ?? false;
         final isVideo = (packet.payload['video'] as bool?) ?? false;
         final isSquare = (packet.payload['sq'] as bool?) ?? false;
+        final isFile = (packet.payload['file'] as bool?) ?? false;
+        final fileName = packet.payload['fname'] as String?;
         // Фильтрация по rid8: не-аватарные пакеты, адресованные другому получателю, игнорируем
         final rid8 = packet.payload['r'] as String?;
         if (!isAvatar && rid8 != null && myPublicKey != null &&
@@ -614,7 +795,58 @@ class GossipRouter {
           return;
         }
         if (msgId != null && totalChunks != null) {
-          onImgMeta?.call(from, msgId, totalChunks, isAvatar, isVoice, isVideo, isSquare);
+          onImgMeta?.call(from, msgId, totalChunks, isAvatar, isVoice, isVideo, isSquare, isFile, fileName);
+        }
+        return;
+      }
+
+      if (packet.type == 'ether') {
+        final text = packet.payload['text'] as String?;
+        final color = packet.payload['col'] as int?;
+        debugPrint('[Gossip] Ether packet: text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} col=$color handler=${onEtherReceived != null}');
+        if (text != null && text.isNotEmpty && color != null) {
+          final senderId = packet.payload['from'] as String?;
+          final senderNick = packet.payload['nick'] as String?;
+          onEtherReceived?.call(packet.id, text, color, senderId, senderNick);
+        }
+        return;
+      }
+
+      if (packet.type == 'story') {
+        final authorId = packet.payload['from'] as String?;
+        final text = packet.payload['text'] as String?;
+        final bgColor = packet.payload['col'] as int?;
+        debugPrint('[Gossip] Story packet: author=${authorId == null ? 'null' : authorId.substring(0, authorId.length.clamp(0, 16))} text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} handler=${onStoryReceived != null}');
+        if (authorId != null && text != null && bgColor != null) {
+          onStoryReceived?.call(packet.id, authorId, text, bgColor);
+        }
+        return;
+      }
+
+      if (packet.type == 'pair_req') {
+        final publicKey = packet.payload['id'] as String?;
+        final nick = packet.payload['nick'] as String?;
+        final color = packet.payload['color'] as int?;
+        final emoji = packet.payload['emoji'] as String? ?? '';
+        final x25519Key = packet.payload['x'] as String? ?? '';
+        final bleId = sourceId ?? publicKey ?? '';
+        if (publicKey != null && nick != null && color != null) {
+          debugPrint('[Gossip] Pair request from $nick (${publicKey.substring(0, 8)})');
+          onPairRequest?.call(bleId, publicKey, nick, color, emoji, x25519Key);
+        }
+        return;
+      }
+
+      if (packet.type == 'pair_acc') {
+        final publicKey = packet.payload['id'] as String?;
+        final nick = packet.payload['nick'] as String?;
+        final color = packet.payload['color'] as int?;
+        final emoji = packet.payload['emoji'] as String? ?? '';
+        final x25519Key = packet.payload['x'] as String? ?? '';
+        final bleId = sourceId ?? publicKey ?? '';
+        if (publicKey != null && nick != null && color != null) {
+          debugPrint('[Gossip] Pair accepted by $nick (${publicKey.substring(0, 8)})');
+          onPairAccepted?.call(bleId, publicKey, nick, color, emoji, x25519Key);
         }
         return;
       }

@@ -28,5 +28,13 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Rlink использует Bluetooth для общения с устройствами поблизости без интернета</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Rlink использует геолокацию для меток сообщений</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Rlink использует камеру для записи видеосообщений</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Rlink использует микрофон для голосовых сообщений</string>
 </dict>
 </plist>

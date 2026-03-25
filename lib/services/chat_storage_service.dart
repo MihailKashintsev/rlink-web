@@ -5,9 +5,11 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../models/chat_message.dart';
 import '../models/contact.dart';
+import 'image_service.dart';
 
 class ChatStorageService {
   ChatStorageService._();
@@ -32,11 +34,16 @@ class ChatStorageService {
   }
 
   Future<void> init() async {
+    // Windows/Linux: использует FFI-реализацию SQLite вместо нативной
+    if (Platform.isWindows || Platform.isLinux) {
+      sqfliteFfiInit();
+      databaseFactory = databaseFactoryFfi;
+    }
     final dir = await getApplicationDocumentsDirectory();
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE contacts (
@@ -60,6 +67,9 @@ class ChatStorageService {
             voice_path           TEXT,
             latitude             REAL,
             longitude            REAL,
+            file_path            TEXT,
+            file_name            TEXT,
+            file_size            INTEGER,
             is_outgoing          INTEGER NOT NULL,
             timestamp            INTEGER NOT NULL,
             status               INTEGER NOT NULL DEFAULT 1,
@@ -116,6 +126,17 @@ class ChatStorageService {
           } catch (_) {}
           try {
             await db.execute('ALTER TABLE messages ADD COLUMN longitude REAL');
+          } catch (_) {}
+        }
+        if (oldVersion < 8) {
+          try {
+            await db.execute('ALTER TABLE messages ADD COLUMN file_path TEXT');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE messages ADD COLUMN file_name TEXT');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE messages ADD COLUMN file_size INTEGER');
           } catch (_) {}
         }
       },
@@ -375,17 +396,18 @@ class ChatStorageService {
       GROUP BY m.peer_id
       ORDER BY m.timestamp DESC
     ''') ?? [];
+    final resolve = ImageService.instance.resolveStoredPath;
     return rows.map((r) => ChatSummary(
       peerId: r['peer_id'] as String,
       lastText: (r['text'] as String?) ?? '',
-      lastImagePath: r['image_path'] as String?,
-      lastVoicePath: r['voice_path'] as String?,
-      lastVideoPath: r['video_path'] as String?,
+      lastImagePath: resolve(r['image_path'] as String?),
+      lastVoicePath: resolve(r['voice_path'] as String?),
+      lastVideoPath: resolve(r['video_path'] as String?),
       timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
       nickname: r['nick'] as String?,
       avatarColor: r['color'] as int?,
       avatarEmoji: r['emoji'] as String?,
-      avatarImagePath: r['avatar_img_path'] as String?,
+      avatarImagePath: resolve(r['avatar_img_path'] as String?),
     )).toList();
   }
 

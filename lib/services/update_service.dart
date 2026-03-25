@@ -4,26 +4,32 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 const _kPat = String.fromEnvironment('GITHUB_PAT');
 const _kOwner = String.fromEnvironment('GITHUB_OWNER');
 const _kRepo = String.fromEnvironment('GITHUB_REPO');
 
-/// Автообновление только для десктопа.
-/// Android обновляется через RuStore автоматически.
+/// RuStore page for the Android app.
+const _kRuStoreUrl = 'https://apps.rustore.ru/app/com.rendergames.rlink';
+
+/// Обновление поддерживается для десктопа (APK) и Android (RuStore).
 bool get isUpdateSupported =>
-    Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+    Platform.isWindows || Platform.isMacOS || Platform.isLinux || Platform.isAndroid;
 
 class UpdateInfo {
   final String version;
   final String body;
   final String downloadUrl;
   final String assetName;
+  /// true = RuStore redirect (Android), false = direct download (desktop).
+  final bool isRuStore;
   const UpdateInfo(
       {required this.version,
       required this.body,
       required this.downloadUrl,
-      required this.assetName});
+      required this.assetName,
+      this.isRuStore = false});
 }
 
 class UpdateService {
@@ -52,6 +58,18 @@ class UpdateService {
       final data = response.data as Map<String, dynamic>;
       final latestVersion = data['tag_name'] as String;
       if (!_isNewer(latestVersion, 'v${info.version}')) return null;
+
+      // Android → redirect to RuStore
+      if (Platform.isAndroid) {
+        return UpdateInfo(
+          version: latestVersion,
+          body: data['body'] as String? ?? '',
+          downloadUrl: _kRuStoreUrl,
+          assetName: 'rustore',
+          isRuStore: true,
+        );
+      }
+
       final asset = _findAssetForPlatform(data['assets'] as List<dynamic>);
       if (asset == null) return null;
       return UpdateInfo(
@@ -66,8 +84,20 @@ class UpdateService {
     }
   }
 
+  /// Открывает RuStore для обновления (Android) или скачивает APK (десктоп).
   Future<void> downloadAndInstall(UpdateInfo info) async {
     if (!isUpdateSupported) return;
+
+    // Android: open RuStore page
+    if (info.isRuStore) {
+      final uri = Uri.parse(info.downloadUrl);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+      return;
+    }
+
+    // Desktop: direct download
     final dir = await getTemporaryDirectory();
     final filePath = '${dir.path}/${info.assetName}';
     downloadProgress.value = 0.0;

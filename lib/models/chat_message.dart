@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../services/image_service.dart';
+
 class ChatMessage {
   final String id;
   final String peerId;
@@ -8,6 +10,9 @@ class ChatMessage {
   final String? imagePath;
   final String? videoPath; // локальный путь к видеосообщению (.mp4)
   final String? voicePath; // локальный путь к голосовому сообщению (.m4a)
+  final String? filePath;  // локальный путь к файлу/документу
+  final String? fileName;  // оригинальное имя файла
+  final int? fileSize;     // размер файла в байтах
   final double? latitude;  // геотег — широта (локально, не передаётся по BLE)
   final double? longitude; // геотег — долгота
   final bool isOutgoing;
@@ -23,6 +28,9 @@ class ChatMessage {
     this.imagePath,
     this.videoPath,
     this.voicePath,
+    this.filePath,
+    this.fileName,
+    this.fileSize,
     this.latitude,
     this.longitude,
     required this.isOutgoing,
@@ -36,6 +44,9 @@ class ChatMessage {
     String? imagePath,
     String? videoPath,
     String? voicePath,
+    String? filePath,
+    String? fileName,
+    int? fileSize,
     double? latitude,
     double? longitude,
     Map<String, List<String>>? reactions,
@@ -48,6 +59,9 @@ class ChatMessage {
         imagePath: imagePath ?? this.imagePath,
         videoPath: videoPath ?? this.videoPath,
         voicePath: voicePath ?? this.voicePath,
+        filePath: filePath ?? this.filePath,
+        fileName: fileName ?? this.fileName,
+        fileSize: fileSize ?? this.fileSize,
         latitude: latitude ?? this.latitude,
         longitude: longitude ?? this.longitude,
         isOutgoing: isOutgoing,
@@ -64,6 +78,9 @@ class ChatMessage {
         'image_path': imagePath,
         'video_path': videoPath,
         'voice_path': voicePath,
+        'file_path': filePath,
+        'file_name': fileName,
+        'file_size': fileSize,
         'latitude': latitude,
         'longitude': longitude,
         'is_outgoing': isOutgoing ? 1 : 0,
@@ -82,14 +99,19 @@ class ChatMessage {
             decoded.map((k, v) => MapEntry(k, (v as List).cast<String>()));
       } catch (_) {}
     }
+    // Resolve potentially stale iOS sandbox paths for media files
+    final resolve = ImageService.instance.resolveStoredPath;
     return ChatMessage(
       id: m['id'] as String,
       peerId: m['peer_id'] as String,
       text: m['text'] as String,
       replyToMessageId: m['reply_to_message_id'] as String?,
-      imagePath: m['image_path'] as String?,
-      videoPath: m['video_path'] as String?,
-      voicePath: m['voice_path'] as String?,
+      imagePath: resolve(m['image_path'] as String?),
+      videoPath: resolve(m['video_path'] as String?),
+      voicePath: resolve(m['voice_path'] as String?),
+      filePath: resolve(m['file_path'] as String?),
+      fileName: m['file_name'] as String?,
+      fileSize: m['file_size'] as int?,
       latitude: (m['latitude'] as num?)?.toDouble(),
       longitude: (m['longitude'] as num?)?.toDouble(),
       isOutgoing: (m['is_outgoing'] as int) == 1,

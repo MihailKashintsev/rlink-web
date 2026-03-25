@@ -31,6 +31,10 @@ class MainActivity : FlutterActivity() {
     private var eventSink: EventChannel.EventSink? = null
     private val subscribedDevices = mutableSetOf<BluetoothDevice>()
 
+    // Per-device write buffers for reassembling framed BLE packets
+    // (same protocol as iOS: 2-byte big-endian length header + payload)
+    private val writeBuffers = mutableMapOf<String, ByteArray>()
+
     // Флаг — предотвращаем дублирование
     private var isAdvertising = false
     private var isGattServerRunning = false
@@ -165,6 +169,10 @@ class MainActivity : FlutterActivity() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 subscribedDevices.remove(device)
+                writeBuffers.remove(device.address)
+                runOnUiThread {
+                    eventSink?.success(mapOf("type" to "central_unsubscribed", "device" to device.address))
+                }
             }
         }
 
@@ -175,10 +183,31 @@ class MainActivity : FlutterActivity() {
             offset: Int, value: ByteArray
         ) {
             if (characteristic.uuid == TX_CHAR_UUID) {
-                runOnUiThread {
-                    eventSink?.success(value)
-                    showMessageNotification()
+                val deviceId = device.address
+                var buf = writeBuffers[deviceId] ?: ByteArray(0)
+                buf = buf + value
+
+                // Extract all complete length-prefixed packets from the buffer
+                while (buf.size >= 2) {
+                    val length = ((buf[0].toInt() and 0xFF) shl 8) or (buf[1].toInt() and 0xFF)
+                    if (length == 0 || length > 2000) {
+                        // Corrupt frame — clear buffer
+                        buf = ByteArray(0)
+                        break
+                    }
+                    if (buf.size < length + 2) break // incomplete packet, wait for more data
+                    val packet = buf.copyOfRange(2, length + 2)
+                    buf = if (buf.size > length + 2) buf.copyOfRange(length + 2, buf.size) else ByteArray(0)
+
+                    // Send complete reassembled packet to Flutter with device ID.
+                    // Notification is handled on the Dart side after gossip dedup —
+                    // do NOT call showMessageNotification() here (it would fire
+                    // once per BLE packet, causing duplicate notifications).
+                    runOnUiThread {
+                        eventSink?.success(mapOf("type" to "data", "device" to deviceId, "data" to packet))
+                    }
                 }
+                writeBuffers[deviceId] = buf
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
@@ -192,10 +221,18 @@ class MainActivity : FlutterActivity() {
             offset: Int, value: ByteArray
         ) {
             if (descriptor.uuid == CCCD_UUID) {
-                if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE))
+                if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
                     subscribedDevices.add(device)
-                else
+                    runOnUiThread {
+                        eventSink?.success(mapOf("type" to "central_subscribed", "device" to device.address))
+                    }
+                } else {
                     subscribedDevices.remove(device)
+                    writeBuffers.remove(device.address)
+                    runOnUiThread {
+                        eventSink?.success(mapOf("type" to "central_unsubscribed", "device" to device.address))
+                    }
+                }
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
@@ -206,7 +243,21 @@ class MainActivity : FlutterActivity() {
     private fun notifySubscribers(data: ByteArray) {
         val service = gattServer?.getService(SERVICE_UUID) ?: return
         val char    = service.getCharacteristic(TX_CHAR_UUID) ?: return
-        char.value  = data
+
+        // Prepend 2-byte big-endian length header (same protocol as iOS)
+        val length = data.size
+        val framed = ByteArray(2 + length)
+        framed[0] = ((length shr 8) and 0xFF).toByte()
+        framed[1] = (length and 0xFF).toByte()
+        System.arraycopy(data, 0, framed, 2, length)
+
+        // Send full framed packet in one notification per device.
+        // flutter_blue_plus negotiates MTU 512, so packets up to 509 bytes fit.
+        // The flutter_blue_plus _writeChar (GATT client) path provides reliable
+        // chunked delivery as backup for any packets that exceed the MTU.
+        // NOTE: Do NOT chunk in a loop here — setting char.value multiple times
+        // before the BLE stack sends previous notifications causes data corruption.
+        char.value = framed
         subscribedDevices.toList().forEach { device ->
             try {
                 gattServer?.notifyCharacteristicChanged(device, char, false)

@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../services/image_service.dart';
+
 class UserProfile {
   final String publicKeyHex;
   final String nickname;
@@ -37,7 +39,9 @@ class UserProfile {
         nickname: j['nick'] as String,
         avatarColor: j['color'] as int,
         avatarEmoji: j['emoji'] as String,
-        avatarImagePath: j['imgPath'] as String?,
+        // Resolve potentially stale iOS sandbox path
+        avatarImagePath: ImageService.instance.resolveStoredPath(
+            j['imgPath'] as String?),
       );
 
   String encode() => jsonEncode(toJson());

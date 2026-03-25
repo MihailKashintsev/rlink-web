@@ -79,6 +79,15 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           MaterialPageRoute(builder: (_) => const ChatListScreen()),
         );
       }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ошибка регистрации: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }

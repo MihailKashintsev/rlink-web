@@ -2,22 +2,28 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'models/chat_message.dart';
 import 'models/contact.dart';
 import 'services/app_settings.dart';
+import 'services/ether_service.dart';
 import 'services/ble_service.dart';
 import 'services/chat_storage_service.dart';
 import 'services/crypto_service.dart';
 import 'services/gossip_router.dart';
 import 'services/image_service.dart';
+import 'services/name_filter.dart';
 import 'services/profile_service.dart';
+import 'services/story_service.dart';
 import 'services/update_service.dart';
+import 'services/wifi_direct_service.dart';
 import 'ui/screens/chat_list_screen.dart';
 import 'ui/screens/onboarding_screen.dart';
 
@@ -25,6 +31,84 @@ const _kBleChannel = MethodChannel('com.rendergames.rlink/ble');
 
 final incomingMessageController = StreamController<IncomingMessage>.broadcast();
 final pendingUpdateNotifier = ValueNotifier<UpdateInfo?>(null);
+final navigatorKey = GlobalKey<NavigatorState>();
+
+/// Broadcast my avatar to all peers (callable from anywhere).
+Future<void> broadcastMyAvatar() async {
+  final myProfile = ProfileService.instance.profile;
+  if (myProfile == null) return;
+  final imagePath = ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
+  if (imagePath != null) {
+    await _broadcastAvatar(myProfile.publicKeyHex, imagePath);
+  }
+}
+
+/// "Бумшшшш" — vibration pattern for incoming pair request.
+Future<void> boomVibration() async {
+  HapticFeedback.heavyImpact();
+  await Future.delayed(const Duration(milliseconds: 100));
+  HapticFeedback.heavyImpact();
+  await Future.delayed(const Duration(milliseconds: 60));
+  HapticFeedback.heavyImpact();
+  await Future.delayed(const Duration(milliseconds: 150));
+  HapticFeedback.mediumImpact();
+  await Future.delayed(const Duration(milliseconds: 100));
+  HapticFeedback.mediumImpact();
+  await Future.delayed(const Duration(milliseconds: 80));
+  HapticFeedback.lightImpact();
+}
+
+/// Deterministic celebration vibration from a seed — same on both devices.
+Future<void> celebrationVibration(int seed) async {
+  final rng = seed.abs();
+  // 8-beat pattern determined by seed bits
+  for (var i = 0; i < 8; i++) {
+    final bit = (rng >> i) & 3;
+    switch (bit) {
+      case 0: HapticFeedback.lightImpact();
+      case 1: HapticFeedback.mediumImpact();
+      case 2: HapticFeedback.heavyImpact();
+      default: HapticFeedback.selectionClick();
+    }
+    await Future.delayed(Duration(milliseconds: 80 + (bit * 30)));
+  }
+}
+
+/// Generate deterministic emoji list from two public keys — identical on both devices.
+List<String> generatePairEmojis(String keyA, String keyB) {
+  // Sort keys so both sides get same result regardless of order
+  final sorted = [keyA, keyB]..sort();
+  final combined = '${sorted[0]}${sorted[1]}';
+  // Use hash bytes to pick emojis
+  final allEmojis = [
+    '🎉', '🎊', '🥳', '🎈', '🎁', '✨', '💫', '🌟', '⭐', '🔥',
+    '💥', '🎆', '🎇', '🌈', '🦄', '🐉', '🚀', '🛸', '👾', '🤖',
+    '💜', '💙', '💚', '💛', '🧡', '❤️', '🤍', '🖤', '💎', '👑',
+    '🎵', '🎶', '🎸', '🥁', '🎺', '🎻', '🎹', '🎤', '🎧', '🪩',
+    '🦋', '🌸', '🌺', '🌻', '🍀', '🌴', '🌙', '☀️', '🪐', '🌍',
+    '🐱', '🐶', '🦊', '🐼', '🐨', '🦁', '🐯', '🦈', '🐙', '🦑',
+    '🍕', '🍩', '🍪', '🧁', '🎂', '🍰', '🍫', '🍬', '🍭', '🧃',
+  ];
+  final emojis = <String>[];
+  for (var i = 0; i < 20; i++) {
+    // Use characters from combined key hash as index
+    final charCode = combined.codeUnitAt(i % combined.length) +
+        combined.codeUnitAt((i * 7 + 3) % combined.length);
+    emojis.add(allEmojis[charCode % allEmojis.length]);
+  }
+  return emojis;
+}
+
+/// Seed for deterministic vibration from two keys.
+int pairVibrationSeed(String keyA, String keyB) {
+  final sorted = [keyA, keyB]..sort();
+  var hash = 0;
+  for (var i = 0; i < 16; i++) {
+    hash = (hash * 31 + sorted[0].codeUnitAt(i % sorted[0].length) +
+        sorted[1].codeUnitAt(i % sorted[1].length)) & 0x7FFFFFFF;
+  }
+  return hash;
+}
 
 class IncomingMessage {
   final String fromId; // Ed25519 public key отправителя
@@ -46,10 +130,42 @@ Future<void> main() async {
 
 Future<void> initServices() async {
   try {
+    // Запрашиваем все необходимые разрешения при первом запуске
+    if (Platform.isAndroid) {
+      await [
+        Permission.camera,
+        Permission.microphone,
+        Permission.location,
+        Permission.locationWhenInUse,
+        Permission.photos,
+        Permission.storage,
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.bluetoothAdvertise,
+        Permission.notification,
+      ].request();
+    } else if (Platform.isIOS) {
+      await [
+        Permission.camera,
+        Permission.microphone,
+        Permission.location,
+        Permission.locationWhenInUse,
+        Permission.photos,
+        Permission.bluetooth,
+        Permission.notification,
+      ].request();
+    }
+
     await AppSettings.instance.init();
+    EtherService.instance.init();
+    await ImageService.instance.init(); // Must be before ProfileService (path resolution)
     await CryptoService.instance.init();
     await ProfileService.instance.init();
     await ChatStorageService.instance.init();
+    await StoryService.instance.init();
+
+    // Populate ether name filter with known contacts + own name
+    _updateEtherNameFilter();
 
     GossipRouter.instance.init(
       myKey: CryptoService.instance.publicKeyHex,
@@ -72,7 +188,11 @@ Future<void> initServices() async {
           }
           final plaintext =
               await CryptoService.instance.decryptMessage(encrypted);
-          if (plaintext == null) return;
+          if (plaintext == null) {
+            debugPrint('[Main] Decryption failed! from=${fromId.substring(0, 16)} msgId=$messageId');
+            debugPrint('[Main] Trying fallback: x25519 key present=${BleService.instance.getPeerX25519Key(fromId) != null}');
+            return;
+          }
           text = plaintext;
         }
 
@@ -116,8 +236,8 @@ Future<void> initServices() async {
           recipientId: fromId,
         );
 
-        // Android foreground notification bridge
-        if (Platform.isAndroid && AppSettings.instance.notificationsEnabled) {
+        // Local notification for incoming messages (Android + iOS)
+        if (AppSettings.instance.notificationsEnabled) {
           try {
             final contact = await ChatStorageService.instance.getContact(fromId);
             final senderName = contact?.nickname ?? '${fromId.substring(0, 8)}…';
@@ -125,6 +245,7 @@ Future<void> initServices() async {
             await _kBleChannel.invokeMethod('showNotification', {
               'title': senderName,
               'body': preview,
+              'threadId': fromId, // group by sender
               'sound': AppSettings.instance.notifSound,
               'vibration': AppSettings.instance.notifVibration,
             });
@@ -139,6 +260,20 @@ Future<void> initServices() async {
           timestamp: now,
           msgId: msgId,
         ));
+
+        // Update Dynamic Island with latest message
+        if (Platform.isIOS) {
+          final contact = await ChatStorageService.instance.getContact(fromId);
+          final senderName = contact?.nickname ?? '${fromId.substring(0, 8)}…';
+          try {
+            _kBleChannel.invokeMethod('updateLiveActivity', {
+              'peers': BleService.instance.peersCount.value,
+              'sender': senderName,
+              'message': text.length > 40 ? '${text.substring(0, 40)}…' : text,
+              'signal': _bestSignalLevel(),
+            });
+          } catch (_) {}
+        }
       },
       onAck: (fromId, messageId) async {
         // fromId reserved for protocol symmetry; keep referenced to satisfy lints.
@@ -150,6 +285,10 @@ Future<void> initServices() async {
       },
       onForward: (packet) async {
         await BleService.instance.broadcastPacket(packet);
+        // Also forward through WiFi Direct (if running)
+        if (WifiDirectService.instance.isRunning) {
+          unawaited(WifiDirectService.instance.sendToAll(packet.encode()));
+        }
       },
       onEdit: (fromId, messageId, newText) async {
         await ChatStorageService.instance.editMessage(messageId, newText);
@@ -162,7 +301,8 @@ Future<void> initServices() async {
             .toggleReaction(messageId, emoji, fromId);
       },
       onImgMetaReceived: (String fromId, String msgId, int totalChunks,
-          bool isAvatar, bool isVoice, bool isVideo, bool isSquare) {
+          bool isAvatar, bool isVoice, bool isVideo, bool isSquare,
+          bool isFile, String? fileName) {
         ImageService.instance.initAssembly(
           msgId,
           totalChunks,
@@ -171,7 +311,105 @@ Future<void> initServices() async {
           fromId: fromId,
           isVideo: isVideo,
           isSquare: isSquare,
+          isFile: isFile,
+          fileName: fileName,
         );
+      },
+      onEther: (id, text, color, senderId, senderNick) {
+        debugPrint('[Main] onEther: text=${text.substring(0, text.length.clamp(0, 20))} sender=$senderNick');
+        EtherService.instance.addMessage(EtherMessage(
+          id: id,
+          text: text,
+          color: color,
+          receivedAt: DateTime.now(),
+          senderId: senderId,
+          senderNick: senderNick,
+        ));
+      },
+      onStory: (storyId, authorId, text, bgColor) {
+        debugPrint('[Main] onStory: author=${authorId.substring(0, 16)} text=${text.substring(0, text.length.clamp(0, 20))}');
+        StoryService.instance.addStory(StoryItem(
+          id: storyId,
+          authorId: authorId,
+          text: text,
+          bgColor: bgColor,
+          createdAt: DateTime.now(),
+        ));
+      },
+      onPairReq: (bleId, publicKey, nick, color, emoji, x25519Key) {
+        debugPrint('[Main] Pair request from $nick ($bleId)');
+        // Store x25519 key if provided
+        if (x25519Key.isNotEmpty) {
+          BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
+        }
+        final info = <String, dynamic>{
+          'publicKey': publicKey,
+          'nick': nick,
+          'color': color,
+          'emoji': emoji,
+          'x25519Key': x25519Key,
+        };
+        BleService.instance.addPairRequest(bleId, info);
+        // Бумшшшш! + открываем полноэкранный баннер
+        boomVibration();
+        // Use WidgetsBinding to ensure we're on next frame
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          final nav = navigatorKey.currentState;
+          final ctx = nav?.context;
+          if (ctx != null) {
+            showPairRequestScreen(ctx, bleId, info);
+          }
+        });
+      },
+      onPairAcc: (bleId, publicKey, nick, color, emoji, x25519Key) async {
+        debugPrint('[Main] Pair accepted by $nick ($bleId)');
+        BleService.instance.removePairRequest(bleId);
+        // Register peer key — always register, even if bleId isn't recognized as direct.
+        // pair_acc only comes from directly connected devices (TTL=1).
+        BleService.instance.registerPeerKey(bleId, publicKey);
+        // Map ALL unmapped BLE IDs (both central & peripheral roles) to this peer.
+        // After pair exchange there's only one physical device, so any unmapped ID is it.
+        BleService.instance.registerPeerKeyForAllRoles(publicKey);
+        if (x25519Key.isNotEmpty) {
+          BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
+        }
+        BleService.instance.setExchangeState(publicKey, 3); // complete
+        // Force-clear all pending entries for this device
+        BleService.instance.clearPendingForPublicKey(publicKey);
+        try {
+          await ChatStorageService.instance.saveContact(Contact(
+            publicKeyHex: publicKey,
+            nickname: nick,
+            avatarColor: color,
+            avatarEmoji: emoji,
+            addedAt: DateTime.now(),
+          ));
+          unawaited(_updateEtherNameFilter());
+        } catch (_) {}
+        // Send our profile back
+        final myProfile = ProfileService.instance.profile;
+        if (myProfile != null) {
+          await GossipRouter.instance.broadcastProfile(
+            id: myProfile.publicKeyHex,
+            nick: myProfile.nickname,
+            color: myProfile.avatarColor,
+            emoji: myProfile.avatarEmoji,
+            x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+          );
+          // Also send avatar
+          final imagePath = ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
+          if (imagePath != null) {
+            unawaited(_broadcastAvatar(myProfile.publicKeyHex, imagePath));
+          }
+          // Show celebration screen on sender side
+          final myKey = CryptoService.instance.publicKeyHex;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            final ctx = navigatorKey.currentContext;
+            if (ctx != null) {
+              showBoomCelebration(ctx, nick, myKey, publicKey);
+            }
+          });
+        }
       },
       onImgChunkReceived:
           (fromId, msgId, totalChunks, index, base64Data) async {
@@ -186,6 +424,7 @@ Future<void> initServices() async {
         final isAvatar = ImageService.instance.isAvatarAssembly(msgId);
         final isVoice = ImageService.instance.isVoiceAssembly(msgId);
         final isVideo = ImageService.instance.isVideoAssembly(msgId);
+        final isFile = ImageService.instance.isFileAssembly(msgId);
         final senderKey = ImageService.instance.assemblyFromId(msgId).isNotEmpty
             ? ImageService.instance.assemblyFromId(msgId)
             : fromId;
@@ -231,6 +470,31 @@ Future<void> initServices() async {
           incomingMessageController.add(IncomingMessage(
             fromId: senderKey,
             text: '🎤 Голосовое',
+            timestamp: msg.timestamp,
+            msgId: msgId,
+          ));
+        } else if (isFile) {
+          final origName = ImageService.instance.assemblyFileName(msgId);
+          final path = await ImageService.instance.assembleAndSaveFile(msgId);
+          if (path == null) return;
+          await ensureContact();
+          final fileLabel = '📎 ${origName ?? 'Файл'}';
+          final fileBytes = await File(path).length();
+          final msg = ChatMessage(
+            id: msgId,
+            peerId: senderKey,
+            text: fileLabel,
+            isOutgoing: false,
+            timestamp: DateTime.now(),
+            status: MessageStatus.delivered,
+            filePath: path,
+            fileName: origName,
+            fileSize: fileBytes,
+          );
+          await ChatStorageService.instance.saveMessage(msg);
+          incomingMessageController.add(IncomingMessage(
+            fromId: senderKey,
+            text: fileLabel,
             timestamp: msg.timestamp,
             msgId: msgId,
           ));
@@ -300,28 +564,46 @@ Future<void> initServices() async {
         try {
           final existing =
               await ChatStorageService.instance.getContact(publicKey);
-          if (existing == null) {
-            // Смена ключа (переустановка приложения): ищем контакт с тем же ником
-            // но другим ключом ТОЛЬКО для прямых пиров (защита от спуфинга).
-            Contact? oldContact;
-            if (isDirect) {
-              final allContacts =
-                  await ChatStorageService.instance.getContacts();
-              try {
-                oldContact = allContacts.firstWhere(
-                  (c) =>
-                      c.nickname == nick &&
-                      c.publicKeyHex != publicKey,
-                );
-              } catch (_) {
-                oldContact = null;
-              }
-            }
 
+          // Ищем ник-дубликат или стаб-контакт:
+          // Кейс 1: сообщение пришло раньше профиля → стаб (key=X, nick="X1234...").
+          // Кейс 2: смена ключа (переустановка) — профиль может прийти через gossip.
+          // Кейс 3: контакт создан под BLE UUID до обмена профилями.
+          Contact? oldContact;
+          final allContactsForDedup =
+              await ChatStorageService.instance.getContacts();
+
+          // Сначала ищем стаб-контакт (ник выглядит как hex-префикс ключа)
+          final hexStubRe = RegExp(r'^[0-9a-fA-F]{6,}');
+          try {
+            oldContact = allContactsForDedup.firstWhere(
+              (c) => c.publicKeyHex != publicKey && (
+                c.nickname == nick || // ник совпадает — ротация ключа
+                (hexStubRe.hasMatch(c.nickname.replaceAll('...', '')) &&
+                 publicKey.startsWith(c.nickname.replaceAll('...', ''))) // стаб с hex-префиксом нашего ключа
+              ),
+            );
+          } catch (_) {
+            oldContact = null;
+          }
+
+          // Дополнительно: если для прямого пира есть BLE UUID-контакт — удалить/перенести
+          if (isDirect && oldContact == null) {
+            try {
+              oldContact = allContactsForDedup.firstWhere(
+                (c) => c.publicKeyHex != publicKey &&
+                  c.publicKeyHex == bleId, // контакт создан под BLE UUID
+              );
+            } catch (_) {
+              oldContact = null;
+            }
+          }
+
+          if (existing == null) {
             if (oldContact != null) {
-              // Миграция: переносим историю со старого ключа на новый
+              // Стаб или смена ключа: переносим историю и удаляем старый
               debugPrint(
-                  '[Profile] Key rotation detected for $nick: '
+                  '[Profile] Merging stub/rotated contact for $nick: '
                   '${oldContact.publicKeyHex.substring(0, 8)} → ${publicKey.substring(0, 8)}');
               await ChatStorageService.instance
                   .migrateMessages(oldContact.publicKeyHex, publicKey);
@@ -347,6 +629,7 @@ Future<void> initServices() async {
                   '[Profile] Auto-saved contact: $nick (key: ${publicKey.substring(0, 8)}...) direct=$isDirect');
             }
           } else {
+            // Обновляем существующий контакт
             await ChatStorageService.instance.updateContact(Contact(
               publicKeyHex: publicKey,
               nickname: nick,
@@ -355,56 +638,135 @@ Future<void> initServices() async {
               avatarImagePath: existing.avatarImagePath,
               addedAt: existing.addedAt,
             ));
-            debugPrint(
-                '[Profile] Updated contact: $nick (key: ${publicKey.substring(0, 8)}...) direct=$isDirect');
+            // Если нашли ник-дубликат или стаб с другим ключом — переносим историю и удаляем
+            if (oldContact != null) {
+              debugPrint(
+                  '[Profile] Removing duplicate/stub for $nick: '
+                  '${oldContact.publicKeyHex.substring(0, 8)} (kept ${publicKey.substring(0, 8)})');
+              await ChatStorageService.instance
+                  .migrateMessages(oldContact.publicKeyHex, publicKey);
+              await ChatStorageService.instance
+                  .deleteContact(oldContact.publicKeyHex);
+            } else {
+              debugPrint(
+                  '[Profile] Updated contact: $nick (key: ${publicKey.substring(0, 8)}...) direct=$isDirect');
+            }
+          }
+
+          // Post-merge cleanup (Android fix): scan message threads for stub peer IDs
+          // that look like a hex prefix of this public key but have no contact entry.
+          // This handles the case where messages arrived before the profile and were
+          // stored under a short hex stub ID that the contact dedup above missed.
+          final stubRe = RegExp(r'^[0-9a-fA-F]+$');
+          final allPeerIds =
+              await ChatStorageService.instance.getChatPeerIds();
+          for (final pid in allPeerIds) {
+            if (pid == publicKey) continue;
+            // Normalise: strip trailing "..." if present
+            final cleanPid =
+                pid.endsWith('...') ? pid.replaceAll('...', '') : pid;
+            // Only migrate if pid looks like a short hex stub (6–16 chars)
+            // that is a prefix of the incoming public key.
+            if (cleanPid.length >= 6 &&
+                cleanPid.length <= 16 &&
+                stubRe.hasMatch(cleanPid) &&
+                publicKey.toLowerCase().startsWith(cleanPid.toLowerCase())) {
+              debugPrint(
+                  '[Profile] Migrating stub message thread $pid → ${publicKey.substring(0, 8)}');
+              await ChatStorageService.instance
+                  .migrateMessages(pid, publicKey);
+              final stubContact =
+                  await ChatStorageService.instance.getContact(pid);
+              if (stubContact != null) {
+                await ChatStorageService.instance.deleteContact(pid);
+              }
+            }
           }
         } catch (e) {
           debugPrint('[Profile] DB error saving contact: $e');
         } finally {
-          // Убираем лоадер только для прямого пира — только у него есть pending запись
+          // Убираем лоадер для прямого пира
           if (isDirect) {
             BleService.instance.markProfileReceived(bleId);
+          }
+          // Очищаем все pending-записи для этого публичного ключа (обе стороны BLE)
+          BleService.instance.clearPendingForPublicKey(publicKey);
+          // Update ether anti-bullying filter with new contact
+          unawaited(_updateEtherNameFilter());
+        }
+
+        // Если мы получили профиль от контакта (прямое соединение) —
+        // отправляем наш аватар в ответ (на случай если первая отправка потерялась).
+        if (isDirect) {
+          final myProfile = ProfileService.instance.profile;
+          if (myProfile != null) {
+            final avatarPath = ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
+            if (avatarPath != null) {
+              unawaited(_broadcastAvatar(myProfile.publicKeyHex, avatarPath));
+            }
           }
         }
       },
     );
 
-    // При подключении нового пира — отправляем свой профиль + аватар
+    // При подключении нового пира — НЕ отправляем профиль автоматически.
+    // Обмен профилями происходит только по приглашению (pair_req → pair_acc).
     BleService.instance.onPeerConnected = (peerId) async {
-      final profile = ProfileService.instance.profile;
-      if (profile == null) return;
-      await Future.delayed(const Duration(milliseconds: 500));
-      await GossipRouter.instance.broadcastProfile(
-        id: profile.publicKeyHex,
-        nick: profile.nickname,
-        color: profile.avatarColor,
-        emoji: profile.avatarEmoji,
-        x25519Key: CryptoService.instance.x25519PublicKeyBase64,
-      );
-      debugPrint('[Profile] Sent my profile to $peerId');
-      // Отправляем аватар в фоне после текстового профиля
-      final imagePath = profile.avatarImagePath;
-      if (imagePath != null) {
-        unawaited(_broadcastAvatar(profile.publicKeyHex, imagePath));
-      }
+      debugPrint('[BLE] Peer connected: $peerId (no auto-profile, waiting for invite)');
     };
 
     await BleService.instance.start();
 
-    if (!Platform.isAndroid) {
-      unawaited(_checkUpdate());
+    // Start WiFi Direct transport (Android only — longer range, higher bandwidth)
+    if (Platform.isAndroid) {
+      final myProfile = ProfileService.instance.profile;
+      unawaited(WifiDirectService.instance.start(
+        userName: myProfile?.nickname ?? 'Rlink',
+      ));
     }
+
+    // Start Dynamic Island Live Activity on iOS
+    if (Platform.isIOS) {
+      unawaited(_startLiveActivity());
+      // Update Live Activity when peers count changes
+      BleService.instance.peersCount.addListener(_updateLiveActivity);
+    }
+
+    // Проверка обновлений (Android → RuStore, десктоп → GitHub releases)
+    unawaited(_checkUpdate());
   } catch (e) {
     debugPrint('[main] Init error: $e');
   }
 }
 
+/// Updates the ether anti-bullying name filter with current contacts + own name.
+Future<void> _updateEtherNameFilter() async {
+  try {
+    final names = <String>{};
+    final contacts = await ChatStorageService.instance.getContacts();
+    for (final c in contacts) {
+      if (c.nickname.isNotEmpty) names.add(c.nickname);
+    }
+    final myProfile = ProfileService.instance.profile;
+    if (myProfile != null) names.add(myProfile.nickname);
+    NameFilter.instance.updateDynamicNames(names);
+  } catch (_) {}
+}
+
 /// Отправляет аватар-изображение по BLE (fire-and-forget, вызывается из onPeerConnected).
-/// Аватар ~ 8–15 KB → ~120 чанков → ~4 секунды передачи.
+/// Аватар ~ 8–15 KB → ~120 чанков → ~6 секунд передачи (с задержками для BLE стека).
 Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
   try {
-    await Future.delayed(const Duration(milliseconds: 300));
-    final bytes = await File(imagePath).readAsBytes();
+    // Wait for profile packets and BLE stack to settle after pair exchange.
+    // Both sides send profiles simultaneously — give BLE time to drain queues.
+    await Future.delayed(const Duration(milliseconds: 1500));
+    // Resolve potentially stale iOS sandbox path
+    final resolvedPath = ImageService.instance.resolveStoredPath(imagePath);
+    if (resolvedPath == null || !File(resolvedPath).existsSync()) {
+      debugPrint('[Avatar] File not found: $imagePath → $resolvedPath');
+      return;
+    }
+    final bytes = await File(resolvedPath).readAsBytes();
     final chunks = ImageService.instance.splitToBase64Chunks(bytes);
     final msgId = const Uuid().v4();
     await GossipRouter.instance.sendImgMeta(
@@ -413,6 +775,8 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
       fromId: myPublicKey,
       isAvatar: true,
     );
+    // Small delay after meta to let receiver initialize assembly
+    await Future.delayed(const Duration(milliseconds: 100));
     for (var i = 0; i < chunks.length; i++) {
       await GossipRouter.instance.sendImgChunk(
         msgId: msgId,
@@ -420,11 +784,62 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
         base64Data: chunks[i],
         fromId: myPublicKey,
       );
+      // Throttle: give BLE stack time between chunks to avoid queue overflow.
+      // 20ms × 120 chunks = ~2.4 sec extra, but prevents dropped notifications.
+      if (i % 5 == 4) {
+        await Future.delayed(const Duration(milliseconds: 30));
+      }
     }
     debugPrint('[Avatar] Sent ${chunks.length} chunks');
   } catch (e) {
     debugPrint('[Avatar] Send failed: $e');
   }
+}
+
+// ── Dynamic Island / Live Activity ───────────────────────────────
+
+/// Converts best RSSI across all peers to signal level 0-3.
+int _bestSignalLevel() {
+  int bestRssi = -100;
+  for (final peerId in BleService.instance.connectedPeerIds) {
+    final rssi = BleService.instance.getRssi(peerId);
+    if (rssi != null && rssi > bestRssi) bestRssi = rssi;
+  }
+  if (bestRssi >= -55) return 3; // strong
+  if (bestRssi >= -75) return 2; // medium
+  if (bestRssi >= -90) return 1; // weak
+  return 0; // none
+}
+
+Future<void> _startLiveActivity() async {
+  try {
+    await _kBleChannel.invokeMethod('startLiveActivity', {
+      'peers': BleService.instance.peersCount.value,
+      'sender': '',
+      'message': '',
+      'signal': _bestSignalLevel(),
+    });
+    debugPrint('[LiveActivity] Started');
+  } catch (e) {
+    debugPrint('[LiveActivity] Start failed: $e');
+  }
+}
+
+void _updateLiveActivity() {
+  try {
+    _kBleChannel.invokeMethod('updateLiveActivity', {
+      'peers': BleService.instance.peersCount.value,
+      'sender': '',
+      'message': '',
+      'signal': _bestSignalLevel(),
+    });
+  } catch (_) {}
+}
+
+Future<void> _stopLiveActivity() async {
+  try {
+    await _kBleChannel.invokeMethod('stopLiveActivity');
+  } catch (_) {}
 }
 
 Future<void> _checkUpdate() async {
@@ -501,6 +916,10 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
       debugPrint('[App] Notifying peers - back online');
       // Возобновляем BLE соединение
       await BleService.instance.start();
+      // Clear notification badge when app resumes
+      if (Platform.isIOS) {
+        unawaited(_startLiveActivity());
+      }
       debugPrint('[App] BLE restarted');
     } catch (e) {
       debugPrint('[App] Error restarting: $e');
@@ -511,11 +930,27 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final settings = AppSettings.instance;
     return MaterialApp(
+      navigatorKey: navigatorKey,
       title: 'Rlink',
       debugShowCheckedModeBanner: false,
       themeMode: settings.themeMode,
       theme: _buildTheme(settings.accentColor, Brightness.light),
       darkTheme: _buildTheme(settings.accentColor, Brightness.dark),
+      locale: settings.resolvedLocale,
+      supportedLocales: const [
+        Locale('ru'),
+        Locale('en'),
+        Locale('es'),
+        Locale('de'),
+        Locale('fr'),
+        Locale('uk'),
+        Locale('zh'),
+      ],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       home: !_ready
           ? const _SplashScreen()
           : _hasProfile
@@ -527,6 +962,67 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
   ThemeData _buildTheme(Color accent, Brightness brightness) {
     final isDark = brightness == Brightness.dark;
     final base = isDark ? ThemeData.dark() : ThemeData.light();
+
+    // Font size scaling: 0=small(0.85), 1=medium(1.0), 2=large(1.2)
+    final fontScale = const [0.85, 1.0, 1.2][AppSettings.instance.fontSize];
+    TextTheme scaled = GoogleFonts.interTextTheme(base.textTheme);
+
+    // On Android, add Noto Color Emoji as font fallback so emojis render
+    // consistently (colorful, similar to iOS Apple Color Emoji style).
+    final emojiFallback = Platform.isAndroid
+        ? [GoogleFonts.notoColorEmoji().fontFamily!]
+        : <String>[];
+
+    TextStyle? addEmoji(TextStyle? st) {
+      if (st == null) return st;
+      if (emojiFallback.isEmpty) return st;
+      final existing = st.fontFamilyFallback ?? <String>[];
+      return st.copyWith(fontFamilyFallback: [...existing, ...emojiFallback]);
+    }
+
+    scaled = scaled.copyWith(
+      displayLarge: addEmoji(scaled.displayLarge),
+      displayMedium: addEmoji(scaled.displayMedium),
+      displaySmall: addEmoji(scaled.displaySmall),
+      headlineLarge: addEmoji(scaled.headlineLarge),
+      headlineMedium: addEmoji(scaled.headlineMedium),
+      headlineSmall: addEmoji(scaled.headlineSmall),
+      titleLarge: addEmoji(scaled.titleLarge),
+      titleMedium: addEmoji(scaled.titleMedium),
+      titleSmall: addEmoji(scaled.titleSmall),
+      bodyLarge: addEmoji(scaled.bodyLarge),
+      bodyMedium: addEmoji(scaled.bodyMedium),
+      bodySmall: addEmoji(scaled.bodySmall),
+      labelLarge: addEmoji(scaled.labelLarge),
+      labelMedium: addEmoji(scaled.labelMedium),
+      labelSmall: addEmoji(scaled.labelSmall),
+    );
+
+    if (fontScale != 1.0) {
+      // Don't use apply(fontSizeFactor:) — it asserts fontSize != null on
+      // every style, but GoogleFonts may leave some null. Scale manually.
+      TextStyle? s(TextStyle? st) => st == null || st.fontSize == null
+          ? st
+          : st.copyWith(fontSize: st.fontSize! * fontScale);
+      scaled = scaled.copyWith(
+        displayLarge: s(scaled.displayLarge),
+        displayMedium: s(scaled.displayMedium),
+        displaySmall: s(scaled.displaySmall),
+        headlineLarge: s(scaled.headlineLarge),
+        headlineMedium: s(scaled.headlineMedium),
+        headlineSmall: s(scaled.headlineSmall),
+        titleLarge: s(scaled.titleLarge),
+        titleMedium: s(scaled.titleMedium),
+        titleSmall: s(scaled.titleSmall),
+        bodyLarge: s(scaled.bodyLarge),
+        bodyMedium: s(scaled.bodyMedium),
+        bodySmall: s(scaled.bodySmall),
+        labelLarge: s(scaled.labelLarge),
+        labelMedium: s(scaled.labelMedium),
+        labelSmall: s(scaled.labelSmall),
+      );
+    }
+
     return ThemeData(
       brightness: brightness,
       scaffoldBackgroundColor: isDark ? const Color(0xFF0A0A0A) : const Color(0xFFF5F5F5),
@@ -549,7 +1045,7 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
         labelColor: accent,
         unselectedLabelColor: Colors.grey,
       ),
-      textTheme: GoogleFonts.interTextTheme(base.textTheme),
+      textTheme: scaled,
       useMaterial3: true,
     );
   }

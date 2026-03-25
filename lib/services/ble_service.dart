@@ -22,6 +22,9 @@ class BleService {
   final Map<DeviceIdentifier, BluetoothDevice> _connectedPeers = {};
   final Map<DeviceIdentifier, BluetoothCharacteristic> _txChars = {};
   final Set<DeviceIdentifier> _connecting = {};
+  // BLE centrals that connected TO us (subscribed to our peripheral characteristic).
+  // Tracked so isDirectBleId() works for both directions of GATT connection.
+  final Set<String> _connectedCentralIds = {};
 
   // BLE device ID → Ed25519 public key (заполняется при получении профиля)
   final Map<String, String> _bleIdToPublicKey = {};
@@ -29,19 +32,50 @@ class BleService {
   final Map<String, String> _publicKeyToBleId = {};
   // Ed25519 public key → X25519 public key base64 (для E2E шифрования)
   final Map<String, String> _x25519Keys = {};
+  // BLE device ID → last known RSSI (for radar distance estimation)
+  final Map<String, int> _rssiValues = {};
 
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<dynamic>? _eventSub;
   StreamSubscription<BluetoothAdapterState>? _adapterSub;
 
+  // FrameBuffer for legacy raw bytes path in _onNativeEvent (fallback)
+  final _nativeFrameBuf = _FrameBuffer();
+
   bool _isRunning = false;
   bool _advertisingStarted = false;
+
+  // Keep-alive: периодически ре-броадкастим свой профиль всем пирам
+  Timer? _keepAliveTimer;
 
   final ValueNotifier<int> peersCount = ValueNotifier(0);
   // Устройства подключены но профиль ещё не получен — показываем лоадер
   final ValueNotifier<Set<String>> pendingProfiles = ValueNotifier({});
   // Инкрементируется при каждом registerPeerKey — для надёжного уведомления UI
   final ValueNotifier<int> peerMappingsVersion = ValueNotifier(0);
+
+  // Exchange state per peer: 0=connected, 1=profile_sent, 2=profile_received, 3=complete
+  final ValueNotifier<Map<String, int>> exchangeStates = ValueNotifier({});
+  // Incoming pair requests: bleId → {nick, color, emoji}
+  final ValueNotifier<Map<String, Map<String, dynamic>>> incomingPairRequests = ValueNotifier({});
+
+  void setExchangeState(String peerId, int state) {
+    final upd = Map<String, int>.from(exchangeStates.value);
+    upd[peerId] = state;
+    exchangeStates.value = upd;
+  }
+
+  void addPairRequest(String bleId, Map<String, dynamic> info) {
+    final upd = Map<String, Map<String, dynamic>>.from(incomingPairRequests.value);
+    upd[bleId] = info;
+    incomingPairRequests.value = upd;
+  }
+
+  void removePairRequest(String bleId) {
+    final upd = Map<String, Map<String, dynamic>>.from(incomingPairRequests.value);
+    upd.remove(bleId);
+    incomingPairRequests.value = upd;
+  }
 
   void Function(String peerId)? onPeerConnected;
 
@@ -77,6 +111,14 @@ class BleService {
   /// Возвращает X25519 публичный ключ пира (base64) или null если неизвестен.
   String? getPeerX25519Key(String publicKey) => _x25519Keys[publicKey];
 
+  /// Возвращает последний известный RSSI для пира (по publicKey или BLE ID).
+  int? getRssi(String peerId) {
+    final direct = _rssiValues[peerId];
+    if (direct != null) return direct;
+    final bleId = _publicKeyToBleId[peerId];
+    return bleId != null ? _rssiValues[bleId] : null;
+  }
+
   /// Повторно запрашивает профили для всех уже подключённых устройств.
   /// Вызывается после clearMappings() чтобы загрузить профили заново.
   Future<void> refreshProfiles() async {
@@ -108,6 +150,12 @@ class BleService {
     }
   }
 
+  final Map<String, Timer> _retryTimers = {};
+
+  void _updatePeersCount() {
+    peersCount.value = connectedPeerIds.length;
+  }
+
   /// Регистрирует маппинг BLE ID → публичный ключ
   void registerPeerKey(String bleId, String publicKey) {
     final oldPublicKey = _bleIdToPublicKey[bleId];
@@ -117,9 +165,107 @@ class BleService {
     _bleIdToPublicKey[bleId] = publicKey;
     _publicKeyToBleId[publicKey] = bleId;
     markProfileReceived(bleId);
+    _retryTimers[bleId]?.cancel();
+    _retryTimers.remove(bleId);
+    setExchangeState(bleId, 2); // profile_received
+    setExchangeState(publicKey, 3); // complete
     debugPrint('[BLE] Mapped $bleId → ${publicKey.substring(0, 16)}...');
-    peersCount.value = _connectedPeers.length;
+
+    // Кросс-регистрация: одно физическое устройство появляется в двух ролях —
+    // как peripheral (в _connectedPeers, BLE-сканирование) и как central
+    // (_connectedCentralIds, входящее подключение к нашему peripheral).
+    // Gossip-дедупликация блокирует повторную обработку того же профиля,
+    // поэтому только одна сторона регистрирует ключ. Если в другом наборе
+    // ровно одна запись без маппинга — это тот же девайс, регистрируем тоже.
+    _crossRegister(bleId, publicKey);
+
+    _updatePeersCount();
     peerMappingsVersion.value++;
+  }
+
+  void _crossRegister(String bleId, String publicKey) {
+    if (_connectedCentralIds.contains(bleId)) {
+      // Profile came from central side → register ALL unmapped peripherals
+      // that appeared around the same time (most likely the same physical device).
+      final unmapped = _connectedPeers.keys
+          .where((id) => !_bleIdToPublicKey.containsKey(id.str))
+          .toList();
+      // If there's only one unmapped peripheral, it's almost certainly this device.
+      // If there are multiple, register the most recently added one (last in map order).
+      if (unmapped.length == 1) {
+        final pid = unmapped.first.str;
+        _bleIdToPublicKey[pid] = publicKey;
+        markProfileReceived(pid);
+        debugPrint('[BLE] Cross-registered peripheral $pid → ${publicKey.substring(0, 16)}');
+      } else if (unmapped.length > 1) {
+        // Multiple unmapped — register the last one (most recently connected)
+        final pid = unmapped.last.str;
+        _bleIdToPublicKey[pid] = publicKey;
+        markProfileReceived(pid);
+        debugPrint('[BLE] Cross-registered peripheral (last of ${unmapped.length}) $pid → ${publicKey.substring(0, 16)}');
+      }
+    } else if (_connectedPeers.containsKey(DeviceIdentifier(bleId))) {
+      // Profile came from peripheral side → register ALL unmapped centrals
+      final unmapped = _connectedCentralIds
+          .where((id) => !_bleIdToPublicKey.containsKey(id))
+          .toList();
+      if (unmapped.length == 1) {
+        final cid = unmapped.first;
+        _bleIdToPublicKey[cid] = publicKey;
+        markProfileReceived(cid);
+        debugPrint('[BLE] Cross-registered central $cid → ${publicKey.substring(0, 16)}');
+      } else if (unmapped.length > 1) {
+        // Multiple unmapped — register the last one (most recently connected)
+        final cid = unmapped.last;
+        _bleIdToPublicKey[cid] = publicKey;
+        markProfileReceived(cid);
+        debugPrint('[BLE] Cross-registered central (last of ${unmapped.length}) $cid → ${publicKey.substring(0, 16)}');
+      }
+    }
+  }
+
+  /// Registers ALL currently unmapped BLE IDs (both peripheral and central) to the
+  /// given public key. Call this after pair exchange when we know there's only one
+  /// other physical device, so any unmapped ID must belong to it.
+  void registerPeerKeyForAllRoles(String publicKey) {
+    // Register all unmapped peripherals
+    for (final id in _connectedPeers.keys) {
+      if (!_bleIdToPublicKey.containsKey(id.str)) {
+        _bleIdToPublicKey[id.str] = publicKey;
+        markProfileReceived(id.str);
+        debugPrint('[BLE] registerPeerKeyForAllRoles: peripheral ${id.str} → ${publicKey.substring(0, 16)}');
+      }
+    }
+    // Register all unmapped centrals
+    for (final id in _connectedCentralIds.toList()) {
+      if (!_bleIdToPublicKey.containsKey(id)) {
+        _bleIdToPublicKey[id] = publicKey;
+        markProfileReceived(id);
+        debugPrint('[BLE] registerPeerKeyForAllRoles: central $id → ${publicKey.substring(0, 16)}');
+      }
+    }
+    _updatePeersCount();
+    peerMappingsVersion.value++;
+  }
+
+  /// Force-clears all pending entries for a public key (and its BLE IDs).
+  /// Called after successful pair exchange to ensure UI doesn't show stale pending state.
+  void clearPendingForPublicKey(String publicKey) {
+    final bleId = _publicKeyToBleId[publicKey];
+    final upd = Set<String>.from(pendingProfiles.value);
+    upd.remove(publicKey);
+    if (bleId != null) upd.remove(bleId);
+    // Also check all connected peers for this key
+    for (final id in _connectedPeers.keys) {
+      if (_bleIdToPublicKey[id.str] == publicKey) upd.remove(id.str);
+    }
+    for (final id in _connectedCentralIds) {
+      if (_bleIdToPublicKey[id] == publicKey) upd.remove(id);
+    }
+    if (upd.length != pendingProfiles.value.length) {
+      pendingProfiles.value = upd;
+      debugPrint('[BLE] Cleared pending for $publicKey (${pendingProfiles.value.length} remaining)');
+    }
   }
 
   /// Возвращает true если профиль пира ещё не получен (загружается)
@@ -141,28 +287,40 @@ class BleService {
         : bleId.substring(0, bleId.length.clamp(0, 8));
   }
 
-  /// Список пиров — возвращает публичные ключи если известны, иначе BLE ID
+  /// Список пиров — возвращает публичные ключи если известны, иначе BLE ID.
+  /// Включает как устройства, к которым подключились мы (central), так и те что подключились к нам (peripheral).
   List<String> get connectedPeerIds {
-    return _connectedPeers.keys
-        .map((id) => _bleIdToPublicKey[id.str] ?? id.str)
-        .toSet()
-        .toList();
+    final ids = <String>{};
+    for (final id in _connectedPeers.keys) {
+      ids.add(_bleIdToPublicKey[id.str] ?? id.str);
+    }
+    for (final id in _connectedCentralIds) {
+      ids.add(_bleIdToPublicKey[id] ?? id);
+    }
+    return ids.toList();
   }
 
   /// Проверяет, является ли bleId прямым (физически подключённым) устройством.
-  /// Используется чтобы отличить прямые профили от пересланных через промежуточные узлы.
+  /// Учитывает оба направления: мы подключились к ним (central) или они к нам (peripheral).
   bool isDirectBleId(String bleId) =>
-      _connectedPeers.containsKey(DeviceIdentifier(bleId));
+      _connectedPeers.containsKey(DeviceIdentifier(bleId)) ||
+      _connectedCentralIds.contains(bleId);
 
-  /// Проверяет подключён ли пир (по публичному ключу или BLE ID)
+  /// Проверяет подключён ли пир (по публичному ключу или BLE ID).
+  /// Учитывает оба направления подключения.
   bool isPeerConnected(String peerId) {
     if (_connectedPeers.containsKey(DeviceIdentifier(peerId))) return true;
+    if (_connectedCentralIds.contains(peerId)) return true;
     if (_publicKeyToBleId.containsKey(peerId)) {
-      return _connectedPeers
-          .containsKey(DeviceIdentifier(_publicKeyToBleId[peerId]!));
+      final bleId = _publicKeyToBleId[peerId]!;
+      return _connectedPeers.containsKey(DeviceIdentifier(bleId)) ||
+          _connectedCentralIds.contains(bleId);
     }
     for (final id in _connectedPeers.keys) {
       if (_bleIdToPublicKey[id.str] == peerId) return true;
+    }
+    for (final id in _connectedCentralIds) {
+      if (_bleIdToPublicKey[id] == peerId) return true;
     }
     return false;
   }
@@ -186,11 +344,17 @@ class BleService {
     if (_isRunning) return;
     _isRunning = true;
 
+    // BLE не поддерживается на Windows/Linux — работаем только на мобильных и macOS
+    if (Platform.isWindows || Platform.isLinux) {
+      debugPrint('[BLE] BLE not supported on ${Platform.operatingSystem}, skipping');
+      return;
+    }
+
     await _requestPermissions();
     await _waitForAdapter();
 
     _eventSub = _events.receiveBroadcastStream().listen(_onNativeEvent);
-    // iOS push channel — native → Flutter via invokeMethod
+    // iOS/macOS push channel — native → Flutter via invokeMethod
     _dataChannel.setMethodCallHandler(_onDataChannelCall);
     // Просим AppDelegate сбросить буферизованные события
     Future.delayed(const Duration(milliseconds: 500), () async {
@@ -201,6 +365,7 @@ class BleService {
     await _startAdvertising();
     _startScan();
     _scheduleScanRestart();
+    _scheduleKeepAlive();
 
     _adapterSub = FlutterBluePlus.adapterState.listen((state) async {
       if (state == BluetoothAdapterState.on && _isRunning) {
@@ -215,6 +380,7 @@ class BleService {
         _connectedPeers.clear();
         _txChars.clear();
         _connecting.clear();
+        _connectedCentralIds.clear();
         peersCount.value = 0;
       }
     });
@@ -229,12 +395,22 @@ class BleService {
   Timer? _scanRestartTimer;
   void _scheduleScanRestart() {
     _scanRestartTimer?.cancel();
-    _scanRestartTimer = Timer(const Duration(seconds: 90), () {
+    _scanRestartTimer = Timer(const Duration(seconds: 60), () {
       if (_isRunning) {
         debugPrint('[BLE] Auto-restarting scan');
         _startScan();
         _scheduleScanRestart();
       }
+    });
+  }
+
+  // Периодический keep-alive: обновляем peers count
+  void _scheduleKeepAlive() {
+    _keepAliveTimer?.cancel();
+    _keepAliveTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      if (!_isRunning) return;
+      _updatePeersCount();
+      debugPrint('[BLE] Keep-alive: ${connectedPeerIds.length} peer(s)');
     });
   }
 
@@ -252,10 +428,13 @@ class BleService {
   Future<void> stop() async {
     _isRunning = false;
     _advertisingStarted = false;
-    try {
-      await _method.invokeMethod('stopAdvertising');
-    } catch (_) {}
+    if (!Platform.isWindows && !Platform.isLinux) {
+      try {
+        await _method.invokeMethod('stopAdvertising');
+      } catch (_) {}
+    }
     _scanRestartTimer?.cancel();
+    _keepAliveTimer?.cancel();
     await FlutterBluePlus.stopScan();
     await _scanSub?.cancel();
     await _eventSub?.cancel();
@@ -266,12 +445,14 @@ class BleService {
     _connectedPeers.clear();
     _txChars.clear();
     _connecting.clear();
+    _connectedCentralIds.clear();
     peersCount.value = 0;
   }
 
   Future<void> broadcastPacket(GossipPacket packet) async {
     final bytes = packet.encode();
-    if (Platform.isAndroid) {
+    if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+      // Notify subscribed Centrals via native peripheral manager
       try {
         await _method.invokeMethod('sendPacket', {'data': bytes});
       } catch (_) {}
@@ -283,7 +464,6 @@ class BleService {
   }
 
   Future<void> _onDataChannelCall(MethodCall call) async {
-    debugPrint('[BLE] dataChannel call: ${call.method}');
     if (call.method == 'onBleData') {
       final args = call.arguments as Map<dynamic, dynamic>;
       final device = args['device'] as String? ?? 'native';
@@ -299,25 +479,35 @@ class BleService {
               '[BLE] dataChannel unknown data type: ${rawData.runtimeType}');
           return;
         }
-        debugPrint('[BLE] dataChannel bytes=${bytes.length} from=$device');
         GossipRouter.instance.onPacketReceived(bytes, sourceId: device);
       }
     } else if (call.method == 'onAdvertisingStarted') {
       debugPrint('[BLE] Native advertising confirmed (via dataChannel)');
+    } else if (call.method == 'onCentralSubscribed') {
+      final centralId = call.arguments as String? ?? '';
+      if (centralId.isNotEmpty) {
+        _connectedCentralIds.add(centralId);
+        final newPending = Set<String>.from(pendingProfiles.value)..add(centralId);
+        pendingProfiles.value = newPending;
+        _updatePeersCount();
+        onPeerConnected?.call(centralId);
+        debugPrint('[BLE] Central subscribed (dataChannel): $centralId');
+      }
+    } else if (call.method == 'onCentralUnsubscribed') {
+      final centralId = call.arguments as String? ?? '';
+      if (centralId.isNotEmpty) {
+        _connectedCentralIds.remove(centralId);
+        _updatePeersCount();
+      }
     }
   }
 
   void _onNativeEvent(dynamic event) {
-    debugPrint(
-        '[BLE] nativeEvent type=${event.runtimeType} val=${event.toString().substring(0, event.toString().length.clamp(0, 80))}');
     if (event is Map) {
       final type = event['type'] as String?;
-      debugPrint('[BLE] nativeEvent map type=$type');
       if (type == 'data') {
         final device = event['device'] as String? ?? 'native';
         final rawData = event['data'];
-        debugPrint(
-            '[BLE] nativeEvent data from=$device rawType=${rawData.runtimeType}');
         if (rawData != null) {
           Uint8List bytes;
           if (rawData is Uint8List) {
@@ -336,13 +526,34 @@ class BleService {
               return;
             }
           }
-          debugPrint('[BLE] nativeEvent bytes=${bytes.length} from=$device');
           GossipRouter.instance.onPacketReceived(bytes, sourceId: device);
         }
       } else if (type == 'advertising_started') {
         debugPrint('[BLE] Native advertising confirmed');
+      } else if (type == 'central_subscribed') {
+        final centralId = event['device'] as String? ?? '';
+        if (centralId.isNotEmpty) {
+          _connectedCentralIds.add(centralId);
+          final newPending = Set<String>.from(pendingProfiles.value)..add(centralId);
+          pendingProfiles.value = newPending;
+          _updatePeersCount();
+          onPeerConnected?.call(centralId);
+          debugPrint('[BLE] Central subscribed: $centralId');
+        }
+      } else if (type == 'central_unsubscribed') {
+        final centralId = event['device'] as String? ?? '';
+        if (centralId.isNotEmpty) {
+          _connectedCentralIds.remove(centralId);
+          final newPending = Set<String>.from(pendingProfiles.value)..remove(centralId);
+          pendingProfiles.value = newPending;
+          _updatePeersCount();
+          debugPrint('[BLE] Central unsubscribed: $centralId');
+        }
       }
     } else if (event is Uint8List || event is List) {
+      // Legacy raw bytes path (Android used to send raw chunks here).
+      // Now Android sends Map events with type/device/data, but keep this
+      // as fallback with _FrameBuffer reassembly for safety.
       final bytes = event is Uint8List
           ? event
           : Uint8List.fromList(List<int>.from(event as List));
@@ -353,9 +564,9 @@ class BleService {
           break;
         }
       }
-      debugPrint(
-          '[BLE] nativeEvent legacy bytes=${bytes.length} from=$sourceId');
-      GossipRouter.instance.onPacketReceived(bytes, sourceId: sourceId);
+      for (final packet in _nativeFrameBuf.feed(bytes)) {
+        GossipRouter.instance.onPacketReceived(packet, sourceId: sourceId);
+      }
     } else {
       debugPrint('[BLE] nativeEvent UNKNOWN type=${event.runtimeType}');
     }
@@ -368,13 +579,15 @@ class BleService {
         withServices: [Guid(_kServiceUuid)],
         continuousUpdates: true,
         removeIfGone: const Duration(seconds: 15),
-        androidScanMode: AndroidScanMode.lowLatency,
+        androidScanMode:
+            Platform.isAndroid ? AndroidScanMode.lowLatency : AndroidScanMode.balanced,
       );
     } catch (e) {
       debugPrint('[BLE] Start scan error: $e');
     }
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
+        _rssiValues[r.device.remoteId.str] = r.rssi;
         _onDeviceFound(r.device);
       }
     });
@@ -396,35 +609,19 @@ class BleService {
       } catch (_) {}
       await Future.delayed(const Duration(milliseconds: 200));
       await _setupGattClient(device);
-      peersCount.value = _connectedPeers.length;
+      _updatePeersCount();
       // Помечаем как ожидающий профиль
       final newPending = Set<String>.from(pendingProfiles.value)
         ..add(device.remoteId.str);
       pendingProfiles.value = newPending;
       debugPrint('[BLE] Connected to ${device.remoteId}');
-      // Отправляем свой профиль
+      setExchangeState(device.remoteId.str, 0); // connected
+      // Уведомляем о новом подключении (без авто-обмена профилями)
       onPeerConnected?.call(device.remoteId.str);
-      // Таймаут: если профиль не пришёл за 5 сек — повторяем запрос профиля
-      Future.delayed(const Duration(seconds: 5), () {
-        if (pendingProfiles.value.contains(device.remoteId.str)) {
-          debugPrint('[BLE] Profile timeout for ${device.remoteId.str}, retrying');
-          // Повторно отправляем свой профиль — пир ответит своим
-          onPeerConnected?.call(device.remoteId.str);
-          // Финальный таймаут через ещё 6 сек — убираем лоадер если всё равно нет
-          Future.delayed(const Duration(seconds: 6), () {
-            if (pendingProfiles.value.contains(device.remoteId.str)) {
-              final upd = Set<String>.from(pendingProfiles.value)
-                ..remove(device.remoteId.str);
-              pendingProfiles.value = upd;
-              debugPrint('[BLE] Profile never received for ${device.remoteId.str}');
-            }
-          });
-        }
-      });
     } catch (e) {
       debugPrint('[BLE] Connect failed: $e');
       _connectedPeers.remove(device.remoteId);
-      peersCount.value = _connectedPeers.length;
+      _updatePeersCount();
     } finally {
       _connecting.remove(device.remoteId);
     }
@@ -440,11 +637,11 @@ class BleService {
         // Маппинг обновится при следующем обмене профилями
         _connectedPeers.remove(device.remoteId);
         _txChars.remove(device.remoteId);
-        peersCount.value = _connectedPeers.length;
+        _updatePeersCount();
         debugPrint('[BLE] Disconnected: $bleId');
-        // Пробуем переподключиться через 3 секунды
+        // Пробуем переподключиться через 1 секунду
         if (_isRunning) {
-          Future.delayed(const Duration(seconds: 3), () {
+          Future.delayed(const Duration(seconds: 1), () {
             if (_isRunning && !_connectedPeers.containsKey(device.remoteId)) {
               _onDeviceFound(device);
             }
@@ -462,13 +659,12 @@ class BleService {
       for (final char in service.characteristics) {
         if (char.uuid.toString().toLowerCase() != _kTxCharUuid) continue;
         await char.setNotifyValue(true);
+        final frameBuf = _FrameBuffer();
         char.lastValueStream.listen((bytes) {
           if (bytes.isNotEmpty) {
-            // Передаём BLE ID источника — нужен для маппинга профиля
-            GossipRouter.instance.onPacketReceived(
-              Uint8List.fromList(bytes),
-              sourceId: bleId,
-            );
+            for (final packet in frameBuf.feed(bytes)) {
+              GossipRouter.instance.onPacketReceived(packet, sourceId: bleId);
+            }
           }
         });
         _txChars[device.remoteId] = char;
@@ -478,18 +674,28 @@ class BleService {
   }
 
   Future<void> _writeChar(BluetoothCharacteristic char, Uint8List bytes) async {
-    // 490 bytes fits entire gossip packet (max ~440 bytes) in single write
-    const mtu = 490;
-    for (int offset = 0; offset < bytes.length; offset += mtu) {
-      final end = (offset + mtu).clamp(0, bytes.length);
-      final chunk = bytes.sublist(offset, end);
+    // Prepend 2-byte big-endian length header for framing, then send in 180-byte chunks.
+    // Use write-with-response so that the peripheral's didReceiveWrite callback fires.
+    const chunkSize = 180;
+    final framed = Uint8List(2 + bytes.length);
+    framed[0] = (bytes.length >> 8) & 0xFF;
+    framed[1] = bytes.length & 0xFF;
+    framed.setRange(2, framed.length, bytes);
+
+    for (int offset = 0; offset < framed.length; offset += chunkSize) {
+      final end = (offset + chunkSize).clamp(0, framed.length);
+      final chunk = framed.sublist(offset, end);
       try {
         await char
             .write(chunk, withoutResponse: false)
             .timeout(const Duration(seconds: 5));
+        // Small delay between chunks to let BLE stack breathe
+        if (end < framed.length) {
+          await Future.delayed(const Duration(milliseconds: 10));
+        }
       } catch (e) {
-        debugPrint('[BLE] Write failed: $e');
-        break;
+        debugPrint('[BLE] Write failed at offset=$offset/${framed.length}: $e');
+        return; // Abort this write — retry at gossip level will resend
       }
     }
   }
@@ -501,10 +707,27 @@ class BleService {
         Permission.bluetoothConnect,
         Permission.bluetoothAdvertise,
         Permission.location,
+        Permission.camera,
+        Permission.microphone,
+        Permission.photos,
       ].request();
     } else if (Platform.isIOS) {
-      await Permission.bluetooth.request();
+      await [
+        Permission.bluetooth,
+        Permission.camera,
+        Permission.microphone,
+        Permission.location,
+        Permission.photos,
+      ].request();
+    } else if (Platform.isMacOS) {
+      await [
+        Permission.bluetooth,
+        Permission.camera,
+        Permission.microphone,
+        Permission.location,
+      ].request();
     }
+    // Windows/Linux: no BLE permission API needed
   }
 
   Future<void> _waitForAdapter() async {
@@ -513,5 +736,47 @@ class BleService {
     await FlutterBluePlus.adapterState
         .firstWhere((s) => s == BluetoothAdapterState.on)
         .timeout(const Duration(seconds: 30));
+  }
+}
+
+/// Reassembles length-prefixed BLE frames split across multiple notifications/writes.
+/// Protocol: each message is prefixed with a 2-byte big-endian length, then payload bytes.
+class _FrameBuffer {
+  final List<int> _buf = [];
+  DateTime _lastActivity = DateTime.now();
+  static const _kMaxBufSize = 4000; // max sane buffer size
+  static const _kStaleTimeout = Duration(seconds: 5);
+
+  List<Uint8List> feed(List<int> bytes) {
+    final now = DateTime.now();
+    // If buffer has stale partial data, clear it before adding new bytes
+    if (_buf.isNotEmpty && now.difference(_lastActivity) > _kStaleTimeout) {
+      debugPrint('[FrameBuffer] Clearing stale buffer (${_buf.length} bytes, ${now.difference(_lastActivity).inSeconds}s old)');
+      _buf.clear();
+    }
+    _lastActivity = now;
+    _buf.addAll(bytes);
+
+    // Prevent unbounded buffer growth from corrupted streams
+    if (_buf.length > _kMaxBufSize) {
+      debugPrint('[FrameBuffer] Buffer overflow (${_buf.length} bytes), clearing');
+      _buf.clear();
+      return [];
+    }
+
+    final packets = <Uint8List>[];
+    while (_buf.length >= 2) {
+      final len = (_buf[0] << 8) | _buf[1];
+      if (len == 0 || len > 2000) {
+        // Corrupt or oversized header — discard buffer
+        debugPrint('[FrameBuffer] Invalid frame length=$len, clearing buffer');
+        _buf.clear();
+        break;
+      }
+      if (_buf.length < len + 2) break;
+      packets.add(Uint8List.fromList(_buf.sublist(2, len + 2)));
+      _buf.removeRange(0, len + 2);
+    }
+    return packets;
   }
 }

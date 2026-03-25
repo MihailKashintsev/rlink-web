@@ -72,12 +72,20 @@
 	<string>Rlink использует микрофон для записи голосовых и видеосообщений</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Rlink использует галерею для выбора фото аватара и изображений в чате</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Rlink сохраняет полученные фотографии в галерею</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Rlink использует Bluetooth для общения с устройствами поблизости без интернета</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Rlink использует Bluetooth для общения с устройствами поблизости без интернета</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Rlink использует локальную сеть для общения без интернета</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Rlink использует геолокацию для прикрепления местоположения к сообщениям</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Rlink использует геолокацию для прикрепления местоположения к сообщениям</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>

@@ -139,7 +139,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
               _doUpdate(update);
             },
-            child: const Text('Обновить'),
+            child: Text(update.isRuStore ? 'Открыть RuStore' : 'Обновить'),
           ),
         ],
       ),
@@ -147,6 +147,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _doUpdate(UpdateInfo update) async {
+    if (update.isRuStore) {
+      // Android: open RuStore directly
+      await UpdateService.instance.downloadAndInstall(update);
+      return;
+    }
     showDialog(
       context: context,
       barrierDismissible: false,

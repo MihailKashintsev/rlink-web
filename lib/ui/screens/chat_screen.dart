@@ -1,22 +1,33 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:geolocator/geolocator.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:gal/gal.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../main.dart';
 import '../../models/chat_message.dart';
+import '../../services/app_settings.dart';
 import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/voice_service.dart';
+import '../../services/story_service.dart';
 import '../widgets/avatar_widget.dart';
+import 'image_editor_screen.dart';
 import 'square_video_recorder_screen.dart';
+import 'story_viewer_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final String peerId; // Ed25519 public key получателя
@@ -52,7 +63,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _editingMessageId;
   String? _editingPreviewText;
   bool _isRecording = false;
-  double _recordingSeconds = 0;
+  final _recordingSecondsNotifier = ValueNotifier<double>(0);
   Timer? _recordingTimer;
   double? _pendingLat;
   double? _pendingLng;
@@ -87,23 +98,30 @@ class _ChatScreenState extends State<ChatScreen> {
     // Следим за изменением маппингов BLE UUID → public key
     BleService.instance.peersCount.addListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
-    _msgSub = incomingMessageController.stream.listen((msg) {
+    BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
+    _msgSub = incomingMessageController.stream.listen((msg) async {
       // fromId — Ed25519 public key. Сообщение уже сохранено в main.dart.
-      // Проверяем по обоим вариантам: resolvedPeerId и widget.peerId.
       final resolved = BleService.instance.resolvePublicKey(widget.peerId);
       debugPrint(
-          '[Chat] isOurPeer: fromId=${msg.fromId.substring(0, 16)} resolved=${resolved.substring(0, 16)}');
+          '[Chat] msg from ${msg.fromId.substring(0, 16)}, resolved=${resolved.substring(0, 16)}');
       final isOurPeer = msg.fromId == _resolvedPeerId ||
           msg.fromId == widget.peerId ||
           msg.fromId == resolved;
-      if (isOurPeer) {
-        // Если резолвился новый ключ — перезагружаем под правильным peerId
-        if (resolved != _resolvedPeerId && resolved != widget.peerId) {
-          _resolvedPeerId = resolved;
-          ChatStorageService.instance.loadMessages(_resolvedPeerId);
-        }
-        _scrollToBottom();
+      if (!isOurPeer) return;
+
+      // Use msg.fromId (the actual sender public key) as the canonical peer key.
+      // Messages are stored in DB with peerId = fromId, so we must load from that key.
+      final senderKey = _looksLikePublicKey(msg.fromId) ? msg.fromId
+          : _looksLikePublicKey(resolved) ? resolved
+          : _resolvedPeerId;
+
+      if (senderKey != _resolvedPeerId) {
+        _resolvedPeerId = senderKey;
+        if (mounted) setState(() {});
       }
+
+      await ChatStorageService.instance.loadMessages(_resolvedPeerId);
+      if (mounted) _scrollToBottom();
     });
   }
 
@@ -121,6 +139,7 @@ class _ChatScreenState extends State<ChatScreen> {
     BleService.instance.peersCount.removeListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.removeListener(_onPeersChanged);
     _recordingTimer?.cancel();
+    _recordingSecondsNotifier.dispose();
     _controller.dispose();
     _scrollController.dispose();
     _msgSub?.cancel();
@@ -144,15 +163,15 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final path = await VoiceService.instance.startRecording();
     if (path == null) return;
+    _recordingSecondsNotifier.value = 0;
     setState(() {
       _isRecording = true;
-      _recordingSeconds = 0;
     });
     _recordingTimer?.cancel();
-    _recordingTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+    _recordingTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
       if (!mounted || !_isRecording) return;
-      setState(() => _recordingSeconds += 0.1);
-      if (_recordingSeconds >= 60) {
+      _recordingSecondsNotifier.value += 0.25;
+      if (_recordingSecondsNotifier.value >= 60) {
         _stopAndSendVoice();
       }
     });
@@ -164,10 +183,10 @@ class _ChatScreenState extends State<ChatScreen> {
     _recordingTimer = null;
 
     final path = await VoiceService.instance.stopRecording();
-    final duration = _recordingSeconds;
+    final duration = _recordingSecondsNotifier.value;
+    _recordingSecondsNotifier.value = 0;
     setState(() {
       _isRecording = false;
-      _recordingSeconds = 0;
     });
 
     if (path == null || duration < 0.5) return;
@@ -245,8 +264,8 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.medium,
-          timeLimit: Duration(seconds: 8),
+          accuracy: LocationAccuracy.lowest, // WiFi/cell towers instead of GPS
+          timeLimit: Duration(seconds: 10),
         ),
       );
       setState(() {
@@ -439,9 +458,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final picked = await _picker.pickImage(source: ImageSource.gallery);
     if (picked == null || !mounted) return;
 
+    final editedBytes = await Navigator.push<Uint8List>(
+      context,
+      MaterialPageRoute(builder: (_) => ImageEditorScreen(imagePath: picked.path)),
+    );
+    if (editedBytes == null || !mounted) return;
+
     setState(() => _isSending = true);
     try {
-      final path = await ImageService.instance.compressAndSave(picked.path);
+      final tmpDir = await getTemporaryDirectory();
+      final tmpFile = File('${tmpDir.path}/edit_${DateTime.now().millisecondsSinceEpoch}.png');
+      await tmpFile.writeAsBytes(editedBytes);
+      final path = await ImageService.instance.compressAndSave(tmpFile.path);
       final bytes = await File(path).readAsBytes();
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final msgId = _uuid.v4();
@@ -512,12 +540,9 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    // Open square video recorder — returns path or null if cancelled
+    // Open square video recorder as overlay with blur
     if (!mounted) return;
-    final videoPath = await Navigator.push<String>(
-      context,
-      MaterialPageRoute(builder: (_) => const SquareVideoRecorderScreen()),
-    );
+    final videoPath = await showSquareVideoRecorder(context);
     if (videoPath == null || !mounted) return;
 
     setState(() => _isSending = true);
@@ -565,6 +590,118 @@ class _ChatScreenState extends State<ChatScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
               content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _sendFile() async {
+    if (_isSending) return;
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
+          );
+        }
+        return;
+      }
+    }
+
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      allowMultiple: false,
+      withData: false,
+    );
+    if (result == null || result.files.isEmpty || !mounted) return;
+
+    final picked = result.files.first;
+    final srcPath = picked.path;
+    if (srcPath == null) return;
+
+    final originalName = picked.name;
+    final fileBytes = await File(srcPath).readAsBytes();
+
+    // Warn if file is too large (> 500 KB — slow over BLE)
+    if (fileBytes.length > 500 * 1024) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Большой файл'),
+          content: Text(
+            'Файл ${(fileBytes.length / 1024).toStringAsFixed(0)} КБ — '
+            'передача по Bluetooth займёт несколько минут. Продолжить?',
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Отмена')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Отправить')),
+          ],
+        ),
+      );
+      if (proceed != true || !mounted) return;
+    }
+
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) return;
+
+    setState(() => _isSending = true);
+    try {
+      // Save a local copy to the files directory
+      final docsDir = await getApplicationDocumentsDirectory();
+      final filesDir = Directory('${docsDir.path}/files');
+      if (!filesDir.existsSync()) filesDir.createSync(recursive: true);
+      final destPath = '${filesDir.path}/$originalName';
+      await File(srcPath).copy(destPath);
+
+      final chunks = ImageService.instance.splitToBase64Chunks(fileBytes);
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        recipientId: targetPeerId,
+        isFile: true,
+        fileName: originalName,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+          recipientId: targetPeerId,
+        );
+      }
+
+      await ChatStorageService.instance.saveMessage(ChatMessage(
+        id: msgId,
+        peerId: targetPeerId,
+        text: '📎 $originalName',
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: MessageStatus.sent,
+        filePath: destPath,
+        fileName: originalName,
+        fileSize: fileBytes.length,
+      ));
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Ошибка отправки файла: $e'),
+              backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -786,11 +923,55 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Future<void> _saveImageToGallery(String path) async {
-    // TODO: Implement saving to gallery
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Сохранение в галерею не реализовано')),
+  Future<void> _pickChatBackground() async {
+    final picked = await _picker.pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
+    await AppSettings.instance.setChatBgForPeer(_resolvedPeerId, picked.path);
+  }
+
+  Future<void> _removeChatBackground() async {
+    await AppSettings.instance.setChatBgForPeer(_resolvedPeerId, null);
+  }
+
+  void _openPeerProfile() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PeerProfileScreen(
+          peerId: _resolvedPeerId,
+          nickname: widget.peerNickname,
+          avatarColor: widget.peerAvatarColor,
+          avatarEmoji: widget.peerAvatarEmoji,
+          avatarImagePath: widget.peerAvatarImagePath,
+        ),
+      ),
     );
+  }
+
+  Future<void> _saveImageToGallery(String imagePath) async {
+    try {
+      if (Platform.isAndroid || Platform.isIOS) {
+        await Gal.putImage(imagePath);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Фото сохранено в галерею')));
+        }
+      } else {
+        // Desktop: copy to Downloads folder
+        final downloads = Directory('${Platform.environment['HOME'] ?? '.'}/Downloads');
+        final dst = File('${downloads.path}/rlink_${DateTime.now().millisecondsSinceEpoch}.jpg');
+        await File(imagePath).copy(dst.path);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Сохранено: ${dst.path}')));
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red));
+      }
+    }
   }
 
   @override
@@ -834,14 +1015,64 @@ class _ChatScreenState extends State<ChatScreen> {
           ]),
         ]),
         actions: [
-          PopupMenuButton(
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'clear', child: Text('Очистить чат')),
-            ],
+          PopupMenuButton<String>(
+            itemBuilder: (_) {
+              final hasBg = (AppSettings.instance.chatBgForPeer(_resolvedPeerId) ?? AppSettings.instance.chatBgForPeer('__global__')) != null;
+              return [
+                const PopupMenuItem(value: 'profile', child: Text('Профиль')),
+                const PopupMenuItem(value: 'background', child: Text('Фон чата')),
+                if (hasBg)
+                  const PopupMenuItem(value: 'remove_bg', child: Text('Убрать фон')),
+                const PopupMenuItem(value: 'clear', child: Text('Очистить чат')),
+                const PopupMenuItem(value: 'delete', child: Text('Удалить чат')),
+              ];
+            },
             onSelected: (v) async {
-              if (v == 'clear') {
-                await ChatStorageService.instance.deleteChat(_resolvedPeerId);
-                if (mounted) Navigator.pop(context);
+              switch (v) {
+                case 'profile':
+                  _openPeerProfile();
+                case 'background':
+                  _pickChatBackground();
+                case 'remove_bg':
+                  _removeChatBackground();
+                case 'clear':
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Очистить чат?'),
+                      content: const Text('Все сообщения будут удалены.'),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                        TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Очистить')),
+                      ],
+                    ),
+                  );
+                  if (ok == true) {
+                    await ChatStorageService.instance.deleteChat(_resolvedPeerId);
+                    if (mounted) {
+                      await ChatStorageService.instance.loadMessages(_resolvedPeerId);
+                      setState(() {});
+                    }
+                  }
+                case 'delete':
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Удалить чат?'),
+                      content: const Text('Чат будет удалён окончательно.'),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx, true),
+                          child: const Text('Удалить', style: TextStyle(color: Colors.red)),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (ok == true) {
+                    await ChatStorageService.instance.deleteChat(_resolvedPeerId);
+                    if (mounted) Navigator.pop(context);
+                  }
               }
             },
           ),
@@ -849,43 +1080,62 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(children: [
         Expanded(
-          child: ValueListenableBuilder<List<ChatMessage>>(
-            valueListenable:
-                ChatStorageService.instance.messagesNotifier(_resolvedPeerId),
-            builder: (_, messages, __) {
-              if (messages.isEmpty) {
-                return Center(
-                  child: Text('Нет сообщений',
-                      style: TextStyle(color: Colors.grey.shade600)),
-                );
-              }
-              final messageTextById = <String, String>{
-                for (final m in messages) m.id: m.text,
-              };
-              return ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: messages.length,
-                itemBuilder: (_, i) {
-                  final msg = messages[i];
-                  final showDate = i == 0 ||
-                      !_sameDay(messages[i - 1].timestamp, msg.timestamp);
-                  return Column(children: [
-                    if (showDate) _DateDivider(date: msg.timestamp),
-                    GestureDetector(
-                      onLongPress: () => _onLongPressMessage(msg),
-                      child: _MessageBubble(
-                        msg: msg,
-                        replyPreviewText: msg.replyToMessageId == null
-                            ? null
-                            : messageTextById[msg.replyToMessageId],
-                        onDownloadImage: _saveImageToGallery,
-                      ),
-                    ),
-                  ]);
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              // Chat background image (if set)
+              ListenableBuilder(
+                listenable: AppSettings.instance,
+                builder: (_, __) {
+                  final path = AppSettings.instance.chatBgForPeer(_resolvedPeerId)
+                      ?? AppSettings.instance.chatBgForPeer('__global__');
+                  if (path == null) return const SizedBox.shrink();
+                  return Image.file(File(path), fit: BoxFit.cover);
                 },
-              );
-            },
+              ),
+              RepaintBoundary(
+               child: ValueListenableBuilder<List<ChatMessage>>(
+                valueListenable:
+                    ChatStorageService.instance.messagesNotifier(_resolvedPeerId),
+                builder: (_, messages, __) {
+                  if (messages.isEmpty) {
+                    return Center(
+                      child: Text('Нет сообщений',
+                          style: TextStyle(color: Colors.grey.shade600)),
+                    );
+                  }
+                  final messageTextById = <String, String>{
+                    for (final m in messages) m.id: m.text,
+                  };
+                  return ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    itemCount: messages.length,
+                    itemBuilder: (_, i) {
+                      final msg = messages[i];
+                      final showDate = i == 0 ||
+                          !_sameDay(messages[i - 1].timestamp, msg.timestamp);
+                      return Column(children: [
+                        if (showDate) _DateDivider(date: msg.timestamp),
+                        GestureDetector(
+                          onLongPress: () => _onLongPressMessage(msg),
+                          child: _MessageBubble(
+                            msg: msg,
+                            replyPreviewText: msg.replyToMessageId == null
+                                ? null
+                                : messageTextById[msg.replyToMessageId],
+                            onDownloadImage: _saveImageToGallery,
+                          ),
+                        ),
+                      ]);
+                    },
+                  );
+                },
+               ),
+              ),
+            ],
           ),
         ),
         if (_editingMessageId != null || _replyToMessageId != null)
@@ -894,8 +1144,8 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               decoration: BoxDecoration(
-                color: const Color(0xFF121212),
-                border: Border.all(color: Colors.grey.shade800),
+                color: Theme.of(context).colorScheme.surface,
+                border: Border.all(color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.3)),
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Row(children: [
@@ -943,12 +1193,13 @@ class _ChatScreenState extends State<ChatScreen> {
           controller: _controller,
           isSending: _isSending,
           isRecording: _isRecording,
-          recordingSeconds: _recordingSeconds,
+          recordingSecondsNotifier: _recordingSecondsNotifier,
           maxLength: _kMaxMessageLength,
           locationActive: _pendingLat != null,
           onSend: _send,
           onPickImage: _sendImage,
           onPickVideo: _sendVideo,
+          onPickFile: _sendFile,
           onMicDown: _startVoiceRecording,
           onMicUp: _stopAndSendVoice,
           onLocation: _toggleLocation,
@@ -981,13 +1232,13 @@ class _DateDivider extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(children: [
-        Expanded(child: Divider(color: Colors.grey.shade800)),
+        Expanded(child: Divider(color: Theme.of(context).dividerColor)),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Text(label,
-              style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+              style: TextStyle(color: Theme.of(context).hintColor, fontSize: 12)),
         ),
-        Expanded(child: Divider(color: Colors.grey.shade800)),
+        Expanded(child: Divider(color: Theme.of(context).dividerColor)),
       ]),
     );
   }
@@ -1011,22 +1262,35 @@ class _MessageBubble extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final isOut = msg.isOutgoing;
 
-    return Align(
-      alignment: isOut ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: EdgeInsets.only(
-            left: isOut ? 64 : 12, right: isOut ? 12 : 64, bottom: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: isOut ? cs.primary : cs.surfaceContainerHigh,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(18),
-            topRight: const Radius.circular(18),
-            bottomLeft: Radius.circular(isOut ? 18 : 4),
-            bottomRight: Radius.circular(isOut ? 4 : 18),
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0.0, end: 1.0),
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+      builder: (_, value, child) {
+        return Opacity(
+          opacity: value,
+          child: Transform.translate(
+            offset: Offset(isOut ? 30 * (1 - value) : -30 * (1 - value), 0),
+            child: child,
           ),
-        ),
-        child: Column(
+        );
+      },
+      child: Align(
+        alignment: isOut ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          margin: EdgeInsets.only(
+              left: isOut ? 64 : 12, right: isOut ? 12 : 64, bottom: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: isOut ? cs.primary : cs.surfaceContainerHigh,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(18),
+              topRight: const Radius.circular(18),
+              bottomLeft: Radius.circular(isOut ? 18 : 4),
+              bottomRight: Radius.circular(isOut ? 4 : 18),
+            ),
+          ),
+          child: Column(
           crossAxisAlignment:
               isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
@@ -1036,13 +1300,13 @@ class _MessageBubble extends StatelessWidget {
                 child: _VoiceMessageBubble(
                     voicePath: msg.voicePath!, isOut: isOut),
               ),
-            if (msg.videoPath != null && File(msg.videoPath!).existsSync())
+            if (msg.videoPath != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: _VideoMessageBubble(
                     videoPath: msg.videoPath!, isOut: isOut),
               ),
-            if (msg.imagePath != null && File(msg.imagePath!).existsSync())
+            if (msg.imagePath != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: Stack(
@@ -1066,6 +1330,16 @@ class _MessageBubble extends StatelessWidget {
                       ),
                     ),
                   ],
+                ),
+              ),
+            if (msg.filePath != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: _FileMessageBubble(
+                  filePath: msg.filePath!,
+                  fileName: msg.fileName ?? 'Файл',
+                  fileSize: msg.fileSize,
+                  isOut: isOut,
                 ),
               ),
             if (msg.replyToMessageId != null)
@@ -1108,13 +1382,7 @@ class _MessageBubble extends StatelessWidget {
                 ),
               ),
             if (msg.text.isNotEmpty && msg.voicePath == null)
-              Text(
-                msg.text,
-                style: TextStyle(
-                  color: isOut ? cs.onPrimary : cs.onSurface,
-                  fontSize: 15,
-                ),
-              ),
+              _RichMessageText(text: msg.text, isOut: isOut),
             if (msg.latitude != null && msg.longitude != null)
               _LocationChip(
                 lat: msg.latitude!,
@@ -1122,7 +1390,7 @@ class _MessageBubble extends StatelessWidget {
                 isOut: isOut,
               ),
             if (msg.reactions.isNotEmpty)
-              _ReactionsWidget(reactions: msg.reactions, isOut: isOut),
+              _ReactionsWidget(reactions: msg.reactions, isOut: isOut, cs: cs),
             const SizedBox(height: 2),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -1144,6 +1412,7 @@ class _MessageBubble extends StatelessWidget {
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -1175,34 +1444,53 @@ class _MessageBubble extends StatelessWidget {
 class _ReactionsWidget extends StatelessWidget {
   final Map<String, List<String>> reactions;
   final bool isOut;
+  final ColorScheme cs;
 
-  const _ReactionsWidget({required this.reactions, required this.isOut});
+  const _ReactionsWidget({
+    required this.reactions,
+    required this.isOut,
+    required this.cs,
+  });
 
   @override
   Widget build(BuildContext context) {
     final sorted = reactions.entries.toList()
       ..sort((a, b) => b.value.length.compareTo(a.value.length));
     return Padding(
-      padding: const EdgeInsets.only(top: 4),
+      padding: const EdgeInsets.only(top: 6),
       child: Wrap(
         spacing: 4,
-        runSpacing: 2,
-        children: sorted
-            .map((e) => Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: isOut
-                        ? Colors.white.withValues(alpha: 0.1)
-                        : Colors.grey.shade800,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text('${e.key} ${e.value.length}',
-                      style: TextStyle(
-                          fontSize: 12,
-                          color: isOut ? cs.onPrimary : cs.onSurface)),
-                ))
-            .toList(),
+        runSpacing: 4,
+        children: sorted.map((e) {
+          final multiple = e.value.length > 1;
+          return TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0.0, end: 1.0),
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.elasticOut,
+            builder: (_, scale, child) => Transform.scale(scale: scale, child: child),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: isOut
+                    ? Colors.white.withValues(alpha: multiple ? 0.2 : 0.1)
+                    : cs.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(12),
+                border: multiple
+                    ? Border.all(
+                        color: isOut
+                            ? Colors.white.withValues(alpha: 0.3)
+                            : cs.primary.withValues(alpha: 0.3),
+                        width: 1.5,
+                      )
+                    : null,
+              ),
+              child: Text(
+                e.key,
+                style: const TextStyle(fontSize: 18),
+              ),
+            ),
+          );
+        }).toList(),
       ),
     );
   }
@@ -1223,6 +1511,8 @@ class _LocationChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final incomingColor = cs.primary;
     return GestureDetector(
       onTap: () => _showLocationDialog(context),
       child: Container(
@@ -1238,14 +1528,14 @@ class _LocationChip extends StatelessWidget {
           Icon(
             Icons.location_on,
             size: 14,
-            color: isOut ? Colors.white70 : Colors.greenAccent,
+            color: isOut ? Colors.white70 : incomingColor,
           ),
           const SizedBox(width: 4),
           Text(
             'Геолокация',
             style: TextStyle(
               fontSize: 12,
-              color: isOut ? Colors.white70 : Colors.greenAccent,
+              color: isOut ? Colors.white70 : incomingColor,
             ),
           ),
         ]),
@@ -1256,37 +1546,75 @@ class _LocationChip extends StatelessWidget {
   void _showLocationDialog(BuildContext context) {
     final latStr = lat.toStringAsFixed(6);
     final lngStr = lng.toStringAsFixed(6);
-    showDialog(
+
+    Future<void> openMap(String url) async {
+      try {
+        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      } catch (_) {}
+    }
+
+    showModalBottomSheet<void>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Row(children: [
-          Icon(Icons.location_on, color: Colors.green, size: 20),
-          SizedBox(width: 8),
-          Text('Местоположение'),
-        ]),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+      builder: (ctx) => SafeArea(
+        child: Wrap(
           children: [
-            Text('Широта: $latStr',
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
-            const SizedBox(height: 4),
-            Text('Долгота: $lngStr',
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
-            const SizedBox(height: 12),
-            Text(
-              'Место где было отправлено сообщение',
-              style: TextStyle(
-                  fontSize: 12, color: Theme.of(context).hintColor),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Text(
+                '$latStr, $lngStr',
+                style: TextStyle(
+                    fontSize: 13,
+                    color: Theme.of(ctx).hintColor,
+                    fontFamily: 'monospace'),
+              ),
+            ),
+            if (Platform.isIOS)
+              ListTile(
+                leading: const Icon(Icons.map),
+                title: const Text('Apple Maps'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  openMap('maps://?q=$lat,$lng&ll=$lat,$lng');
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.map_outlined),
+              title: const Text('Google Maps'),
+              onTap: () {
+                Navigator.pop(ctx);
+                openMap(
+                    'https://www.google.com/maps/search/?api=1&query=$lat,$lng');
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.explore_outlined),
+              title: const Text('Яндекс Карты'),
+              onTap: () {
+                Navigator.pop(ctx);
+                final deep =
+                    'yandexmaps://maps.yandex.ru/?pt=$lng,$lat&z=14';
+                final web =
+                    'https://yandex.ru/maps/?pt=$lng,$lat&z=14&l=map';
+                launchUrl(Uri.parse(deep),
+                        mode: LaunchMode.externalApplication)
+                    .catchError((_) async {
+                  await launchUrl(Uri.parse(web),
+                      mode: LaunchMode.externalApplication);
+                  return false;
+                });
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy),
+              title: const Text('Скопировать координаты'),
+              onTap: () {
+                Navigator.pop(ctx);
+                Clipboard.setData(
+                    ClipboardData(text: '$latStr, $lngStr'));
+              },
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Закрыть'),
-          ),
-        ],
       ),
     );
   }
@@ -1298,12 +1626,13 @@ class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final bool isSending;
   final bool isRecording;
-  final double recordingSeconds;
+  final ValueNotifier<double> recordingSecondsNotifier;
   final int maxLength;
   final bool locationActive;
   final VoidCallback onSend;
   final VoidCallback onPickImage;
   final VoidCallback onPickVideo;
+  final VoidCallback onPickFile;
   final VoidCallback onMicDown;
   final VoidCallback onMicUp;
   final VoidCallback onLocation;
@@ -1312,12 +1641,13 @@ class _InputBar extends StatefulWidget {
     required this.controller,
     required this.isSending,
     required this.isRecording,
-    required this.recordingSeconds,
+    required this.recordingSecondsNotifier,
     required this.maxLength,
     required this.locationActive,
     required this.onSend,
     required this.onPickImage,
     required this.onPickVideo,
+    required this.onPickFile,
     required this.onMicDown,
     required this.onMicUp,
     required this.onLocation,
@@ -1329,6 +1659,7 @@ class _InputBar extends StatefulWidget {
 
 class _InputBarState extends State<_InputBar> {
   int _length = 0;
+  final _focusNode = FocusNode();
 
   @override
   void initState() {
@@ -1336,6 +1667,29 @@ class _InputBarState extends State<_InputBar> {
     widget.controller.addListener(() {
       if (mounted) setState(() => _length = widget.controller.text.length);
     });
+    _focusNode.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _wrapSelection(String prefix, String suffix) {
+    final sel = widget.controller.selection;
+    if (!sel.isValid || sel.isCollapsed) return;
+    final text = widget.controller.text;
+    final selected = text.substring(sel.start, sel.end);
+    final newText =
+        text.replaceRange(sel.start, sel.end, '$prefix$selected$suffix');
+    final newOffset = sel.end + prefix.length + suffix.length;
+    widget.controller.value = widget.controller.value.copyWith(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newOffset),
+    );
   }
 
   @override
@@ -1343,10 +1697,12 @@ class _InputBarState extends State<_InputBar> {
     final near = _length > widget.maxLength * 0.8;
     final over = _length > widget.maxLength;
     final hasText = widget.controller.text.trim().isNotEmpty;
-    final secs = widget.recordingSeconds.floor();
-    final tenths = ((widget.recordingSeconds % 1) * 10).floor();
 
     final cs = Theme.of(context).colorScheme;
+    final keyboardVisible = _focusNode.hasFocus;
+    final sel = widget.controller.selection;
+    final hasSelection =
+        sel.isValid && sel.baseOffset != sel.extentOffset;
     return SafeArea(
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -1354,13 +1710,46 @@ class _InputBarState extends State<_InputBar> {
           color: cs.surface,
           border: Border(top: BorderSide(color: cs.outline.withValues(alpha: 0.3))),
         ),
-        child: Row(children: [
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (hasSelection)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  children: [
+                    _FmtBtn(label: 'B', bold: true, onTap: () => _wrapSelection('**', '**')),
+                    _FmtBtn(label: 'I', italic: true, onTap: () => _wrapSelection('_', '_')),
+                    _FmtBtn(label: 'S', strikethrough: true, onTap: () => _wrapSelection('~~', '~~')),
+                    _FmtBtn(label: 'U', underline: true, onTap: () => _wrapSelection('__', '__')),
+                    _FmtBtn(label: '||', onTap: () => _wrapSelection('||', '||')),
+                  ],
+                ),
+              ),
+            Row(children: [
+          if (keyboardVisible)
+            IconButton(
+              onPressed: () => _focusNode.unfocus(),
+              icon: const Icon(Icons.keyboard_hide_outlined),
+              color: cs.onSurfaceVariant,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              tooltip: 'Скрыть клавиатуру',
+            ),
           IconButton(
             onPressed: widget.isSending ? null : widget.onPickImage,
             icon: const Icon(Icons.photo_outlined),
             color: cs.onSurfaceVariant,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+          ),
+          IconButton(
+            onPressed: widget.isSending ? null : widget.onPickFile,
+            icon: const Icon(Icons.attach_file_outlined),
+            color: cs.onSurfaceVariant,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            tooltip: 'Прикрепить файл',
           ),
           IconButton(
             onPressed: widget.isSending ? null : widget.onLocation,
@@ -1379,31 +1768,39 @@ class _InputBarState extends State<_InputBar> {
                 color: cs.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(24),
               ),
-              child: TextField(
-                controller: widget.controller,
-                enabled: !widget.isRecording,
-                maxLines: 4,
-                minLines: 1,
-                textInputAction: TextInputAction.newline,
-                style: const TextStyle(fontSize: 15),
-                decoration: InputDecoration(
-                  hintText: widget.isRecording
-                      ? 'Запись... ${secs}s.$tenths'
-                      : 'Сообщение...',
-                  hintStyle: TextStyle(color: cs.onSurfaceVariant.withValues(alpha: 0.6)),
-                  border: InputBorder.none,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  suffix: near
-                      ? Text(
-                          '${widget.maxLength - _length}',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: over ? Colors.red : cs.onSurfaceVariant,
-                          ),
-                        )
-                      : null,
-                ),
+              child: ValueListenableBuilder<double>(
+                valueListenable: widget.recordingSecondsNotifier,
+                builder: (_, secs, __) {
+                  final s = secs.floor();
+                  final t = ((secs % 1) * 10).floor();
+                  return TextField(
+                    controller: widget.controller,
+                    focusNode: _focusNode,
+                    enabled: !widget.isRecording,
+                    maxLines: 4,
+                    minLines: 1,
+                    textInputAction: TextInputAction.newline,
+                    style: const TextStyle(fontSize: 15),
+                    decoration: InputDecoration(
+                      hintText: widget.isRecording
+                          ? 'Запись... ${s}s.$t'
+                          : 'Сообщение...',
+                      hintStyle: TextStyle(color: cs.onSurfaceVariant.withValues(alpha: 0.6)),
+                      border: InputBorder.none,
+                      contentPadding:
+                          const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      suffix: near
+                          ? Text(
+                              '${widget.maxLength - _length}',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: over ? Colors.red : cs.onSurfaceVariant,
+                              ),
+                            )
+                          : null,
+                    ),
+                  );
+                },
               ),
             ),
           ),
@@ -1451,10 +1848,11 @@ class _InputBarState extends State<_InputBar> {
                 ),
               ),
               const SizedBox(width: 8),
-              // Voice record button (hold)
+              // Voice record button (tap to start/stop, or hold)
               GestureDetector(
-                onLongPressStart: (_) => widget.onMicDown(),
-                onLongPressEnd: (_) => widget.onMicUp(),
+                onTap: widget.isRecording ? widget.onMicUp : widget.onMicDown,
+                onLongPressStart: (_) { if (!widget.isRecording) widget.onMicDown(); },
+                onLongPressEnd: (_) { if (widget.isRecording) widget.onMicUp(); },
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
                   width: 44,
@@ -1465,12 +1863,99 @@ class _InputBarState extends State<_InputBar> {
                         : cs.primary,
                     shape: BoxShape.circle,
                   ),
-                  child: Icon(Icons.mic_rounded,
-                      color: cs.onPrimary, size: 20),
+                  child: Icon(
+                    widget.isRecording ? Icons.stop_rounded : Icons.mic_rounded,
+                    color: cs.onPrimary,
+                    size: 20,
+                  ),
                 ),
               ),
             ]),
-        ]),
+          ]),
+        ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Файл/документ ────────────────────────────────────────────────
+
+class _FileMessageBubble extends StatelessWidget {
+  final String filePath;
+  final String fileName;
+  final int? fileSize;
+  final bool isOut;
+
+  const _FileMessageBubble({
+    required this.filePath,
+    required this.fileName,
+    required this.fileSize,
+    required this.isOut,
+  });
+
+  String _fmtSize(int? bytes) {
+    if (bytes == null) return '';
+    if (bytes < 1024) return '${bytes} Б';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} КБ';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} МБ';
+  }
+
+  Future<void> _open() async {
+    try {
+      await launchUrl(Uri.file(filePath), mode: LaunchMode.externalApplication);
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final textColor = isOut ? cs.onPrimary : cs.onSurface;
+    final subColor = isOut
+        ? cs.onPrimary.withValues(alpha: 0.65)
+        : cs.onSurfaceVariant;
+    final bgColor = isOut
+        ? Colors.black.withValues(alpha: 0.15)
+        : cs.surfaceContainerHigh;
+
+    return GestureDetector(
+      onTap: _open,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 240),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.insert_drive_file_outlined, color: textColor, size: 32),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    fileName,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: textColor,
+                    ),
+                  ),
+                  if (fileSize != null)
+                    Text(
+                      _fmtSize(fileSize),
+                      style: TextStyle(fontSize: 11, color: subColor),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1483,6 +1968,12 @@ class _VoiceMessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final iconColor = isOut ? cs.onPrimary : cs.onSurface;
+    final activeColor = isOut ? cs.onPrimary : cs.primary;
+    final inactiveColor =
+        (isOut ? cs.onPrimary : cs.onSurface).withValues(alpha: 0.35);
+
     return ValueListenableBuilder<String?>(
       valueListenable: VoiceService.instance.currentlyPlaying,
       builder: (_, playing, __) {
@@ -1508,15 +1999,24 @@ class _VoiceMessageBubble extends StatelessWidget {
                 isPlaying
                     ? Icons.stop_circle_outlined
                     : Icons.play_circle_outline,
-                color: isOut ? Colors.white : Colors.white70,
-                size: 22,
+                color: iconColor,
+                size: 24,
               ),
             ),
-            Text(
-              'Голосовое',
-              style: TextStyle(
-                color: isOut ? Colors.white : Colors.white70,
-                fontSize: 13,
+            const SizedBox(width: 4),
+            ValueListenableBuilder<double>(
+              valueListenable: VoiceService.instance.playProgress,
+              builder: (_, progress, __) => SizedBox(
+                width: 110,
+                height: 28,
+                child: CustomPaint(
+                  painter: _WaveformPainter(
+                    seed: voicePath.hashCode,
+                    progress: isPlaying ? progress : 0,
+                    activeColor: activeColor,
+                    inactiveColor: inactiveColor,
+                  ),
+                ),
               ),
             ),
           ],
@@ -1526,33 +2026,188 @@ class _VoiceMessageBubble extends StatelessWidget {
   }
 }
 
-class _VideoMessageBubble extends StatelessWidget {
+class _WaveformPainter extends CustomPainter {
+  final int seed;
+  final double progress;
+  final Color activeColor;
+  final Color inactiveColor;
+
+  const _WaveformPainter({
+    required this.seed,
+    required this.progress,
+    required this.activeColor,
+    required this.inactiveColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const barCount = 28;
+    final spacing = size.width / barCount;
+    final barWidth = spacing * 0.55;
+    final rng = math.Random(seed);
+    final activeBar = (progress * barCount).floor();
+    final activePaint = Paint()..color = activeColor;
+    final inactivePaint = Paint()..color = inactiveColor;
+
+    for (int i = 0; i < barCount; i++) {
+      final heightFraction = 0.25 + rng.nextDouble() * 0.75;
+      final h = heightFraction * size.height;
+      final x = i * spacing + (spacing - barWidth) / 2;
+      final y = (size.height - h) / 2;
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(x, y, barWidth, h),
+          const Radius.circular(2),
+        ),
+        i < activeBar ? activePaint : inactivePaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WaveformPainter old) =>
+      old.progress != progress ||
+      old.activeColor != activeColor ||
+      old.seed != seed;
+}
+
+class _VideoMessageBubble extends StatefulWidget {
   final String videoPath;
   final bool isOut;
 
   const _VideoMessageBubble({required this.videoPath, required this.isOut});
 
   @override
+  State<_VideoMessageBubble> createState() => _VideoMessageBubbleState();
+}
+
+class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
+  VideoPlayerController? _ctrl;
+  bool _initialized = false;
+  bool _playing = false;
+
+  bool get _isSquare => widget.videoPath.endsWith('_sq.mp4');
+
+  @override
+  void initState() {
+    super.initState();
+    if (_isSquare && File(widget.videoPath).existsSync()) {
+      _initPlayer();
+    }
+  }
+
+  Future<void> _initPlayer() async {
+    final ctrl = VideoPlayerController.file(File(widget.videoPath));
+    try {
+      await ctrl.initialize();
+      ctrl.setLooping(true);
+      if (mounted) {
+        setState(() {
+          _ctrl = ctrl;
+          _initialized = true;
+        });
+      } else {
+        ctrl.dispose();
+      }
+    } catch (e) {
+      debugPrint('[VideoMessage] init error: $e');
+      ctrl.dispose();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl?.dispose();
+    super.dispose();
+  }
+
+  void _togglePlay() {
+    if (_ctrl == null || !_initialized) return;
+    setState(() {
+      if (_playing) {
+        _ctrl!.pause();
+        _playing = false;
+      } else {
+        _ctrl!.play();
+        _playing = true;
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final exists = File(videoPath).existsSync();
-    final isSquare = videoPath.endsWith('_sq.mp4');
+    return _isSquare ? _buildCircle() : _buildRegular(context);
+  }
+
+  Widget _buildCircle() {
+    final exists = File(widget.videoPath).existsSync();
+    return GestureDetector(
+      onTap: exists ? _togglePlay : null,
+      child: SizedBox(
+        width: 160,
+        height: 160,
+        child: ClipOval(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: _initialized && _ctrl != null
+                    ? VideoPlayer(_ctrl!)
+                    : Container(
+                        color: const Color(0xFF1A1A1A),
+                        child: exists
+                            ? const Center(
+                                child: SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white54),
+                                ),
+                              )
+                            : const Center(
+                                child: Text('Файл не найден',
+                                    style: TextStyle(
+                                        color: Colors.white54, fontSize: 11),
+                                    textAlign: TextAlign.center),
+                              ),
+                      ),
+              ),
+              if (exists && !_playing)
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.black.withValues(alpha: 0.25),
+                    child: const Center(
+                      child: Icon(Icons.play_circle_fill,
+                          color: Colors.white, size: 52),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRegular(BuildContext context) {
+    final exists = File(widget.videoPath).existsSync();
     return GestureDetector(
       onTap: exists
           ? () => Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => _VideoPlayerScreen(path: videoPath),
+                  builder: (_) => _VideoPlayerScreen(path: widget.videoPath),
                 ),
               )
           : null,
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(isSquare ? 16 : 12),
+        borderRadius: BorderRadius.circular(12),
         child: Stack(
           children: [
             Container(
               width: 180,
               height: 180,
-              color: isSquare ? const Color(0xFF1A1A1A) : Colors.black87,
+              color: Colors.black87,
               child: exists
                   ? null
                   : const Center(
@@ -1562,29 +2217,20 @@ class _VideoMessageBubble extends StatelessWidget {
                     ),
             ),
             if (exists)
-              Positioned.fill(
+              const Positioned.fill(
                 child: Center(
-                  child: Icon(
-                    isSquare ? Icons.play_circle_fill : Icons.play_circle_outline,
-                    color: Colors.white,
-                    size: isSquare ? 56 : 52,
-                  ),
+                  child: Icon(Icons.play_circle_outline,
+                      color: Colors.white, size: 52),
                 ),
               ),
-            Positioned(
+            const Positioned(
               bottom: 6,
               right: 8,
               child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(
-                  isSquare ? Icons.videocam_rounded : Icons.videocam,
-                  color: Colors.white70,
-                  size: 14,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  isSquare ? 'Видео-кружок' : 'Видео',
-                  style: const TextStyle(color: Colors.white70, fontSize: 11),
-                ),
+                Icon(Icons.videocam, color: Colors.white70, size: 14),
+                SizedBox(width: 4),
+                Text('Видео',
+                    style: TextStyle(color: Colors.white70, fontSize: 11)),
               ]),
             ),
           ],
@@ -1661,6 +2307,481 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
                     child: VideoPlayer(_ctrl),
                   )
                 : const CircularProgressIndicator(color: Color(0xFF1DB954)),
+      ),
+    );
+  }
+}
+
+// ── Профиль пира (из меню чата) ──────────────────────────────────
+
+class _PeerProfileScreen extends StatefulWidget {
+  final String peerId;
+  final String nickname;
+  final int avatarColor;
+  final String avatarEmoji;
+  final String? avatarImagePath;
+
+  const _PeerProfileScreen({
+    required this.peerId,
+    required this.nickname,
+    required this.avatarColor,
+    required this.avatarEmoji,
+    this.avatarImagePath,
+  });
+
+  @override
+  State<_PeerProfileScreen> createState() => _PeerProfileScreenState();
+}
+
+class _PeerProfileScreenState extends State<_PeerProfileScreen> {
+  List<ChatMessage> _images = [];
+  List<ChatMessage> _voices = [];
+  List<ChatMessage> _files = [];
+  List<ChatMessage> _links = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMedia();
+  }
+
+  Future<void> _loadMedia() async {
+    final msgs = await ChatStorageService.instance.getMessages(widget.peerId, limit: 1000);
+    setState(() {
+      _images = msgs.where((m) => m.imagePath != null).toList();
+      _voices = msgs.where((m) => m.voicePath != null).toList();
+      _files = msgs.where((m) => m.filePath != null).toList();
+      _links = msgs.where((m) => _hasLink(m.text)).toList();
+    });
+  }
+
+  bool _hasLink(String text) {
+    return RegExp(r'https?://\S+').hasMatch(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final stories = StoryService.instance.storiesFor(widget.peerId);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Профиль')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          // Avatar + name
+          Center(
+            child: AvatarWidget(
+              initials: widget.nickname.isNotEmpty ? widget.nickname[0].toUpperCase() : '?',
+              color: widget.avatarColor,
+              emoji: widget.avatarEmoji,
+              imagePath: widget.avatarImagePath,
+              size: 96,
+              hasStory: stories.isNotEmpty,
+              hasUnviewedStory: StoryService.instance.hasUnviewedStory(widget.peerId),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Center(
+            child: Text(
+              widget.nickname,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+            ),
+          ),
+          Center(
+            child: Text(
+              '${widget.peerId.substring(0, 16)}...',
+              style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.4), fontFamily: 'monospace'),
+            ),
+          ),
+
+          // Stories section
+          if (stories.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            ListTile(
+              leading: const Icon(Icons.amp_stories),
+              title: const Text('Сегодняшняя история'),
+              subtitle: Text('${stories.length} историй'),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => StoryViewerScreen(
+                    authorId: widget.peerId,
+                    authorName: widget.nickname,
+                    stories: stories,
+                  ),
+                ),
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 16),
+          const Divider(),
+
+          // Media library
+          _MediaSection(
+            title: 'Фото',
+            icon: Icons.photo_outlined,
+            count: _images.length,
+            child: _images.isEmpty
+                ? null
+                : SizedBox(
+                    height: 80,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _images.length,
+                      itemBuilder: (_, i) {
+                        final path = ImageService.instance.resolveStoredPath(_images[i].imagePath);
+                        if (path == null) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.file(File(path), width: 80, height: 80, fit: BoxFit.cover),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+          ),
+          _MediaSection(
+            title: 'Голосовые',
+            icon: Icons.mic_outlined,
+            count: _voices.length,
+          ),
+          _MediaSection(
+            title: 'Файлы',
+            icon: Icons.attach_file_outlined,
+            count: _files.length,
+          ),
+          _MediaSection(
+            title: 'Ссылки',
+            icon: Icons.link,
+            count: _links.length,
+            child: _links.isEmpty
+                ? null
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: _links.take(5).map((m) {
+                      final match = RegExp(r'https?://\S+').firstMatch(m.text);
+                      final url = match?.group(0) ?? '';
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: GestureDetector(
+                          onTap: () => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
+                          child: Text(url, style: TextStyle(color: cs.primary, fontSize: 13, decoration: TextDecoration.underline)),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MediaSection extends StatelessWidget {
+  final String title;
+  final IconData icon;
+  final int count;
+  final Widget? child;
+
+  const _MediaSection({
+    required this.title,
+    required this.icon,
+    required this.count,
+    this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(icon, size: 18, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(width: 8),
+            Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+            const SizedBox(width: 8),
+            Text('$count', style: TextStyle(fontSize: 13, color: Theme.of(context).hintColor)),
+          ]),
+          if (child != null) ...[
+            const SizedBox(height: 8),
+            child!,
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _RichMessageText extends StatelessWidget {
+  final String text;
+  final bool isOut;
+
+  const _RichMessageText({required this.text, required this.isOut});
+
+  static final _urlRegex = RegExp(r'https?://\S+');
+
+  // Combined regex — order matters: longer/more specific markers first
+  // group 1: **bold**, group 2: __underline__, group 3: ~~strike~~,
+  // group 4: _italic_, group 5: ||spoiler||, otherwise URL
+  static final _fmtRegex = RegExp(
+    r'\*\*([\s\S]*?)\*\*|__([\s\S]*?)__|~~([\s\S]*?)~~|_([\s\S]*?)_|\|\|([\s\S]*?)\|\||https?://\S+',
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final textColor = isOut ? cs.onPrimary : cs.onSurface;
+    final urlMatches = _urlRegex.allMatches(text).toList();
+
+    return Column(
+      crossAxisAlignment:
+          isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      children: [
+        _buildRichText(context, textColor),
+        ...urlMatches
+            .map((m) => _LinkPreviewCard(url: m.group(0)!, isOut: isOut)),
+      ],
+    );
+  }
+
+  Widget _buildRichText(BuildContext context, Color textColor) {
+    final cs = Theme.of(context).colorScheme;
+    final matches = _fmtRegex.allMatches(text).toList();
+
+    if (matches.isEmpty) {
+      return Text(text, style: TextStyle(color: textColor, fontSize: 15));
+    }
+
+    final spans = <InlineSpan>[];
+    int lastEnd = 0;
+    final baseStyle = TextStyle(color: textColor, fontSize: 15);
+
+    void addPlain(String s) {
+      if (s.isEmpty) return;
+      spans.add(TextSpan(text: s, style: baseStyle));
+    }
+
+    for (final match in matches) {
+      if (match.start > lastEnd) {
+        addPlain(text.substring(lastEnd, match.start));
+      }
+
+      final full = match.group(0)!;
+
+      if (match.group(1) != null) {
+        // **bold**
+        spans.add(TextSpan(
+          text: match.group(1)!,
+          style: baseStyle.copyWith(fontWeight: FontWeight.bold),
+        ));
+      } else if (match.group(2) != null) {
+        // __underline__
+        spans.add(TextSpan(
+          text: match.group(2)!,
+          style: baseStyle.copyWith(decoration: TextDecoration.underline),
+        ));
+      } else if (match.group(3) != null) {
+        // ~~strikethrough~~
+        spans.add(TextSpan(
+          text: match.group(3)!,
+          style: baseStyle.copyWith(decoration: TextDecoration.lineThrough),
+        ));
+      } else if (match.group(4) != null) {
+        // _italic_
+        spans.add(TextSpan(
+          text: match.group(4)!,
+          style: baseStyle.copyWith(fontStyle: FontStyle.italic),
+        ));
+      } else if (match.group(5) != null) {
+        // ||spoiler||
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
+          child: _SpoilerText(text: match.group(5)!, style: baseStyle),
+        ));
+      } else {
+        // URL
+        final url = full;
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
+          child: GestureDetector(
+            onTap: () => launchUrl(Uri.parse(url),
+                mode: LaunchMode.externalApplication),
+            child: Text(
+              url,
+              style: baseStyle.copyWith(
+                color: isOut
+                    ? Colors.white.withValues(alpha: 0.9)
+                    : cs.primary,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          ),
+        ));
+      }
+
+      lastEnd = match.end;
+    }
+
+    if (lastEnd < text.length) {
+      addPlain(text.substring(lastEnd));
+    }
+
+    return RichText(text: TextSpan(children: spans));
+  }
+}
+
+// ── Кнопка форматирования ──────────────────────────────────────────
+
+class _FmtBtn extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  final bool bold;
+  final bool italic;
+  final bool strikethrough;
+  final bool underline;
+
+  const _FmtBtn({
+    required this.label,
+    required this.onTap,
+    this.bold = false,
+    this.italic = false,
+    this.strikethrough = false,
+    this.underline = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontWeight: bold ? FontWeight.bold : FontWeight.normal,
+            fontStyle: italic ? FontStyle.italic : FontStyle.normal,
+            decoration: strikethrough
+                ? TextDecoration.lineThrough
+                : underline
+                    ? TextDecoration.underline
+                    : null,
+            fontSize: 15,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Спойлер ───────────────────────────────────────────────────────
+
+class _SpoilerText extends StatefulWidget {
+  final String text;
+  final TextStyle style;
+
+  const _SpoilerText({required this.text, required this.style});
+
+  @override
+  State<_SpoilerText> createState() => _SpoilerTextState();
+}
+
+class _SpoilerTextState extends State<_SpoilerText> {
+  bool _revealed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => setState(() => _revealed = !_revealed),
+      child: _revealed
+          ? Text(widget.text, style: widget.style)
+          : Text(
+              '▓' * widget.text.length.clamp(1, 20),
+              style: widget.style.copyWith(
+                color: widget.style.color?.withValues(alpha: 0.5),
+                letterSpacing: 1,
+              ),
+            ),
+    );
+  }
+}
+
+// ── Карточка предпросмотра ссылки ─────────────────────────────────
+
+class _LinkPreviewCard extends StatelessWidget {
+  final String url;
+  final bool isOut;
+
+  const _LinkPreviewCard({required this.url, required this.isOut});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final uri = Uri.tryParse(url);
+    final domain = uri?.host ?? url;
+
+    return GestureDetector(
+      onTap: () =>
+          launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
+      child: Container(
+        margin: const EdgeInsets.only(top: 6),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: isOut
+              ? Colors.black.withValues(alpha: 0.15)
+              : cs.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(10),
+          border: Border(
+            left: BorderSide(
+              color:
+                  isOut ? Colors.white.withValues(alpha: 0.4) : cs.primary,
+              width: 3,
+            ),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Icon(Icons.language,
+                  size: 14,
+                  color: isOut ? Colors.white70 : cs.primary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  domain,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: isOut ? Colors.white : cs.onSurface,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ]),
+            const SizedBox(height: 4),
+            Text(
+              url,
+              style: TextStyle(
+                fontSize: 11,
+                color: isOut
+                    ? Colors.white60
+                    : cs.onSurface.withValues(alpha: 0.5),
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
       ),
     );
   }

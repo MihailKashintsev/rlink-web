@@ -1,21 +1,38 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-/// Экран быстрой записи квадратного видео (аналог кружков Telegram, но квадрат).
-/// Возвращает путь к записанному файлу через Navigator.pop(context, path).
-class SquareVideoRecorderScreen extends StatefulWidget {
-  const SquareVideoRecorderScreen({super.key});
-
-  @override
-  State<SquareVideoRecorderScreen> createState() =>
-      _SquareVideoRecorderScreenState();
+/// Показывает квадратный видеорекордер как оверлей поверх чата с блюром (как Telegram).
+/// Возвращает путь к файлу или null.
+Future<String?> showSquareVideoRecorder(BuildContext context) {
+  return showGeneralDialog<String>(
+    context: context,
+    barrierDismissible: false,
+    barrierColor: Colors.transparent,
+    transitionDuration: const Duration(milliseconds: 250),
+    transitionBuilder: (ctx, anim, secondAnim, child) {
+      return FadeTransition(
+        opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
+        child: child,
+      );
+    },
+    pageBuilder: (ctx, anim, secondAnim) {
+      return const _VideoOverlay();
+    },
+  );
 }
 
-class _SquareVideoRecorderScreenState
-    extends State<SquareVideoRecorderScreen> {
+class _VideoOverlay extends StatefulWidget {
+  const _VideoOverlay();
+
+  @override
+  State<_VideoOverlay> createState() => _VideoOverlayState();
+}
+
+class _VideoOverlayState extends State<_VideoOverlay> {
   CameraController? _controller;
   List<CameraDescription> _cameras = [];
   int _selectedCamera = 0;
@@ -63,10 +80,17 @@ class _SquareVideoRecorderScreenState
         });
         return;
       }
-      final idx = cameraIndex.clamp(0, _cameras.length - 1);
+      // Prefer front camera by default
+      int idx = cameraIndex;
+      if (cameraIndex == 0) {
+        final frontIdx = _cameras.indexWhere(
+            (c) => c.lensDirection == CameraLensDirection.front);
+        if (frontIdx >= 0) idx = frontIdx;
+      }
+      idx = idx.clamp(0, _cameras.length - 1);
       final controller = CameraController(
         _cameras[idx],
-        ResolutionPreset.low,
+        ResolutionPreset.medium,
         enableAudio: true,
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
@@ -143,108 +167,140 @@ class _SquareVideoRecorderScreenState
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final previewSize = screenWidth * 0.85;
+    final previewSize = screenWidth * 0.75;
     final secs = _recordingSeconds.floor();
     final tenths = ((_recordingSeconds % 1) * 10).floor();
+    final progress = _recordingSeconds / _maxDuration;
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // Square camera preview
-            Center(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: SizedBox(
-                  width: previewSize,
-                  height: previewSize,
-                  child: _buildPreview(previewSize),
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            // Timer
-            AnimatedOpacity(
-              opacity: _isRecording ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 200),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: const BoxDecoration(
-                      color: Colors.red,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    '$secs.${tenths}s / ${_maxDuration.toInt()}s',
-                    style: const TextStyle(color: Colors.white70, fontSize: 14),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            // Controls
-            Row(
+    return Material(
+      type: MaterialType.transparency,
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          color: Colors.black.withValues(alpha: 0.4),
+          child: SafeArea(
+            child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // Close
-                _CircleIconButton(
-                  onTap: _isRecording ? null : () => Navigator.pop(context),
-                  icon: Icons.close,
-                  size: 52,
-                  bgColor: Colors.grey.shade800,
-                ),
-                const SizedBox(width: 28),
-                // Record button (hold or tap)
-                GestureDetector(
-                  onTapDown: (_) => _startRecording(),
-                  onTapUp: (_) => _stopAndSend(),
-                  onLongPressStart: (_) => _startRecording(),
-                  onLongPressEnd: (_) => _stopAndSend(),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    width: 72,
-                    height: 72,
-                    decoration: BoxDecoration(
-                      color: _isRecording
-                          ? Colors.red
-                          : const Color(0xFF1DB954),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 3),
-                    ),
-                    child: Icon(
-                      _isRecording ? Icons.stop_rounded : Icons.videocam,
-                      color: Colors.white,
-                      size: 32,
+                // Square camera preview with progress ring
+                Center(
+                  child: SizedBox(
+                    width: previewSize + 8,
+                    height: previewSize + 8,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        // Progress ring (visible during recording)
+                        if (_isRecording)
+                          SizedBox(
+                            width: previewSize + 8,
+                            height: previewSize + 8,
+                            child: CircularProgressIndicator(
+                              value: progress,
+                              strokeWidth: 3,
+                              color: Colors.red,
+                              backgroundColor: Colors.white24,
+                            ),
+                          ),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(16),
+                          child: SizedBox(
+                            width: previewSize,
+                            height: previewSize,
+                            child: _buildPreview(previewSize),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(width: 28),
-                // Switch camera
-                _CircleIconButton(
-                  onTap: _cameras.length > 1 && !_isRecording
-                      ? _switchCamera
-                      : null,
-                  icon: Icons.flip_camera_ios_outlined,
-                  size: 52,
-                  bgColor: Colors.grey.shade800,
+                const SizedBox(height: 20),
+                // Timer
+                AnimatedOpacity(
+                  opacity: _isRecording ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(
+                          color: Colors.red,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '$secs.${tenths}s / ${_maxDuration.toInt()}s',
+                        style:
+                            const TextStyle(color: Colors.white70, fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                // Controls
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Close
+                    _CircleIconButton(
+                      onTap:
+                          _isRecording ? null : () => Navigator.pop(context),
+                      icon: Icons.close,
+                      size: 52,
+                      bgColor: Colors.grey.shade800,
+                    ),
+                    const SizedBox(width: 28),
+                    // Record button (hold or tap)
+                    GestureDetector(
+                      onTapDown: (_) => _startRecording(),
+                      onTapUp: (_) {
+                        if (_isRecording) _stopAndSend();
+                      },
+                      onLongPressStart: (_) => _startRecording(),
+                      onLongPressEnd: (_) => _stopAndSend(),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          color: _isRecording
+                              ? Colors.red
+                              : const Color(0xFF1DB954),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 3),
+                        ),
+                        child: Icon(
+                          _isRecording ? Icons.stop_rounded : Icons.videocam,
+                          color: Colors.white,
+                          size: 32,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 28),
+                    // Switch camera
+                    _CircleIconButton(
+                      onTap: _cameras.length > 1 && !_isRecording
+                          ? _switchCamera
+                          : null,
+                      icon: Icons.flip_camera_ios_outlined,
+                      size: 52,
+                      bgColor: Colors.grey.shade800,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  _isRecording
+                      ? 'Отпустите для отправки'
+                      : 'Удерживайте кнопку для записи',
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-            Text(
-              _isRecording
-                  ? 'Отпустите для отправки'
-                  : 'Удерживайте кнопку для записи',
-              style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -278,7 +334,6 @@ class _SquareVideoRecorderScreenState
     if (ctrl == null || !ctrl.value.isInitialized) {
       return const ColoredBox(color: Color(0xFF1A1A1A));
     }
-    // Crop preview to square
     final previewAspect = ctrl.value.aspectRatio;
     return FittedBox(
       fit: BoxFit.cover,
@@ -288,6 +343,20 @@ class _SquareVideoRecorderScreenState
         child: CameraPreview(ctrl),
       ),
     );
+  }
+}
+
+// Keep the old class as an alias for backwards compat (used in imports)
+class SquareVideoRecorderScreen extends StatelessWidget {
+  const SquareVideoRecorderScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    // Redirect: use the overlay function instead
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Navigator.pop(context);
+    });
+    return const SizedBox.shrink();
   }
 }
 
