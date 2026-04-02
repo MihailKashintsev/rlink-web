@@ -24,6 +24,8 @@ class AppSettings extends ChangeNotifier {
   static const _keyOnlineStatusMode  = 'online_status_mode'; // 0=online,1=dnd,2=busy
   static const _keyRelayEnabled      = 'relay_enabled';
   static const _keyRelayServerUrl    = 'relay_server_url';
+  static const _keyConnectionMode    = 'connection_mode';   // 0=BLE, 1=Internet, 2=Both
+  static const _keyMediaPriority     = 'media_priority';    // 0=BLE, 1=Internet
 
   late SharedPreferences _prefs;
 
@@ -44,6 +46,8 @@ class AppSettings extends ChangeNotifier {
   int _onlineStatusMode = 0; // 0=online(green), 1=dnd(yellow), 2=busy(red)
   bool _relayEnabled = true;
   String _relayServerUrl = '';
+  int _connectionMode = 2;   // 0=BLE only, 1=Internet only, 2=Both
+  int _mediaPriority = 1;    // 0=BLE first, 1=Internet first
 
   ThemeMode get themeMode => _themeMode;
   int get accentColorIndex => _accentColorIndex;
@@ -62,6 +66,8 @@ class AppSettings extends ChangeNotifier {
   int get onlineStatusMode => _onlineStatusMode;
   bool get relayEnabled => _relayEnabled;
   String get relayServerUrl => _relayServerUrl;
+  int get connectionMode => _connectionMode;
+  int get mediaPriority => _mediaPriority;
 
   /// Цвет статуса: 0=зелёный(онлайн), 1=жёлтый(DND), 2=красный(занят), 3=серый(офлайн — авто)
   Color get onlineStatusColor => const [
@@ -124,6 +130,8 @@ class AppSettings extends ChangeNotifier {
     _onlineStatusMode = (_prefs.getInt(_keyOnlineStatusMode) ?? 0).clamp(0, 2);
     _relayEnabled = _prefs.getBool(_keyRelayEnabled) ?? true;
     _relayServerUrl = _prefs.getString(_keyRelayServerUrl) ?? '';
+    _connectionMode = (_prefs.getInt(_keyConnectionMode) ?? 2).clamp(0, 2);
+    _mediaPriority = (_prefs.getInt(_keyMediaPriority) ?? 1).clamp(0, 1);
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {
@@ -230,6 +238,21 @@ class AppSettings extends ChangeNotifier {
   Future<void> setRelayServerUrl(String url) async {
     _relayServerUrl = url;
     await _prefs.setString(_keyRelayServerUrl, url);
+    notifyListeners();
+  }
+
+  Future<void> setConnectionMode(int mode) async {
+    _connectionMode = mode.clamp(0, 2);
+    // Sync relayEnabled based on connection mode
+    _relayEnabled = mode >= 1; // Internet or Both
+    await _prefs.setInt(_keyConnectionMode, _connectionMode);
+    await _prefs.setBool(_keyRelayEnabled, _relayEnabled);
+    notifyListeners();
+  }
+
+  Future<void> setMediaPriority(int priority) async {
+    _mediaPriority = priority.clamp(0, 1);
+    await _prefs.setInt(_keyMediaPriority, _mediaPriority);
     notifyListeners();
   }
 }

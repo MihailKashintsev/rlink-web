@@ -6,7 +6,7 @@ import '../../l10n/app_l10n.dart';
 class AboutScreen extends StatelessWidget {
   const AboutScreen({super.key});
 
-  static const _version = '1.0.0';
+  static const _version = '0.0.2';
   static const _websiteUrl   = 'https://rendergames.tilda.ws/';
   static const _telegramUrl  = 'https://t.me/rendergm';
   static const _boostyUrl    = 'https://boosty.to/rendergamesru/purchase/3242287?ssource=DIRECT&share=subscription_link';

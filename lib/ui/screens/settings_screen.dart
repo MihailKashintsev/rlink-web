@@ -17,6 +17,7 @@ import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/group_service.dart';
 import '../../services/profile_service.dart';
+import '../../services/relay_service.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/chat_screen.dart';
 import '../screens/about_screen.dart';
@@ -321,29 +322,110 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           // ── Сеть ──────────────────────────────────────────────
           const _SectionHeader('Сеть'),
-          SwitchListTile(
-            secondary: Icon(Icons.cell_tower,
-                color: settings.relayEnabled ? cs.primary : Theme.of(context).hintColor),
-            title: const Text('Интернет-ретранслятор'),
+
+          // Тип связи
+          ListTile(
+            leading: Icon(Icons.swap_horiz_rounded, color: cs.primary),
+            title: const Text('Тип связи'),
             subtitle: Text(
-              settings.relayEnabled ? 'Сообщения идут через BLE + интернет' : 'Только BLE mesh',
+              const ['Только Bluetooth', 'Только Интернет', 'Оба канала'][settings.connectionMode],
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             ),
-            value: settings.relayEnabled,
-            onChanged: (v) => settings.setRelayEnabled(v),
           ),
-          if (settings.relayEnabled)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(children: [
+              _NetChip(
+                icon: Icons.bluetooth,
+                label: 'BLE',
+                selected: settings.connectionMode == 0,
+                onTap: () => settings.setConnectionMode(0),
+              ),
+              const SizedBox(width: 8),
+              _NetChip(
+                icon: Icons.wifi,
+                label: 'Интернет',
+                selected: settings.connectionMode == 1,
+                onTap: () => settings.setConnectionMode(1),
+              ),
+              const SizedBox(width: 8),
+              _NetChip(
+                icon: Icons.sync_alt_rounded,
+                label: 'Оба',
+                selected: settings.connectionMode == 2,
+                onTap: () => settings.setConnectionMode(2),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 12),
+
+          // Приоритет медиа / файлов
+          if (settings.connectionMode == 2) ...[
             ListTile(
-              leading: Icon(Icons.dns_outlined, color: cs.primary),
-              title: const Text('Сервер ретрансляции'),
+              leading: Icon(Icons.perm_media_outlined, color: cs.primary),
+              title: const Text('Приоритет для медиа'),
               subtitle: Text(
-                settings.relayServerUrl.isEmpty
-                    ? 'По умолчанию (rlink-relay.onrender.com)'
-                    : settings.relayServerUrl,
+                settings.mediaPriority == 0 ? 'Отправлять через Bluetooth' : 'Отправлять через Интернет',
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
               ),
-              trailing: const Icon(Icons.edit, size: 18),
-              onTap: () => _showRelayServerDialog(context, settings),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(children: [
+                _NetChip(
+                  icon: Icons.bluetooth,
+                  label: 'BLE',
+                  selected: settings.mediaPriority == 0,
+                  onTap: () => settings.setMediaPriority(0),
+                ),
+                const SizedBox(width: 8),
+                _NetChip(
+                  icon: Icons.wifi,
+                  label: 'Интернет',
+                  selected: settings.mediaPriority == 1,
+                  onTap: () => settings.setMediaPriority(1),
+                ),
+              ]),
+            ),
+            const SizedBox(height: 12),
+          ],
+
+          // Статус сервера
+          if (settings.connectionMode >= 1)
+            ValueListenableBuilder<RelayState>(
+              valueListenable: RelayService.instance.state,
+              builder: (_, relayState, __) {
+                final connected = relayState == RelayState.connected;
+                final connecting = relayState == RelayState.connecting;
+                return ValueListenableBuilder<int>(
+                  valueListenable: RelayService.instance.onlineCount,
+                  builder: (_, count, __) => ListTile(
+                    leading: Icon(
+                      connected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+                      color: connected
+                          ? const Color(0xFF4CAF50)
+                          : connecting
+                              ? Colors.amber
+                              : Colors.red,
+                    ),
+                    title: Text(connected
+                        ? 'Сервер подключён'
+                        : connecting
+                            ? 'Подключение...'
+                            : 'Сервер недоступен'),
+                    subtitle: Text(
+                      connected ? 'Онлайн: $count пользователей' : 'Нет соединения с ретранслятором',
+                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                    ),
+                    trailing: connected
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.refresh, size: 20),
+                            onPressed: () => RelayService.instance.connect(),
+                          ),
+                  ),
+                );
+              },
             ),
 
           // ── Данные ─────────────────────────────────────────────
@@ -440,38 +522,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const SizedBox(height: 16),
-        ],
-      ),
-    );
-  }
-
-  void _showRelayServerDialog(BuildContext context, AppSettings settings) {
-    final controller = TextEditingController(text: settings.relayServerUrl);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Сервер ретрансляции'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            hintText: 'wss://your-server.com',
-            labelText: 'URL сервера (пусто = по умолчанию)',
-            border: OutlineInputBorder(),
-          ),
-          keyboardType: TextInputType.url,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () {
-              settings.setRelayServerUrl(controller.text.trim());
-              Navigator.pop(ctx);
-            },
-            child: const Text('Сохранить'),
-          ),
         ],
       ),
     );
@@ -746,6 +796,51 @@ class _ThemeChip extends StatelessWidget {
             ),
           ),
         ]),
+      ),
+    );
+  }
+}
+
+class _NetChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _NetChip({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: selected ? cs.primary : cs.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(12),
+            border: selected ? null : Border.all(color: cs.outlineVariant),
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 20,
+                color: selected ? cs.onPrimary : cs.onSurfaceVariant),
+            const SizedBox(height: 4),
+            Text(label,
+              style: TextStyle(
+                fontSize: 11,
+                color: selected ? cs.onPrimary : cs.onSurfaceVariant,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ]),
+        ),
       ),
     );
   }

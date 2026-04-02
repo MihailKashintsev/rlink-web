@@ -16,6 +16,13 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
+  static const _tagColors = [
+    Color(0xFF1DB954),
+    Color(0xFF2196F3),
+    Color(0xFFFF7043),
+    Color(0xFFAB47BC),
+    Color(0xFFFFCA28),
+  ];
   late TextEditingController _controller;
   late TextEditingController _tagController;
   late int _selectedColor;
@@ -325,42 +332,45 @@ class _ProfileScreenState extends State<ProfileScreen> {
             const SizedBox(height: 8),
           ],
           if (_tags.isNotEmpty || !_editing)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E1E1E),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Теги',
-                      style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
-                  const SizedBox(height: 8),
-                  _tags.isEmpty
-                      ? Text('Нет тегов',
-                          style: TextStyle(color: Colors.grey.shade600, fontSize: 13))
-                      : Wrap(
-                          spacing: 8,
-                          runSpacing: 6,
-                          children: _tags.map((tag) {
-                            return Chip(
-                              label: Text(tag, style: const TextStyle(fontSize: 12)),
-                              deleteIcon: _editing
-                                  ? const Icon(Icons.close, size: 16)
-                                  : null,
-                              onDeleted: _editing
-                                  ? () => setState(() => _tags.remove(tag))
-                                  : null,
-                              materialTapTargetSize:
-                                  MaterialTapTargetSize.shrinkWrap,
-                              visualDensity: VisualDensity.compact,
-                            );
-                          }).toList(),
-                        ),
-                ],
-              ),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ..._tags.asMap().entries.map((entry) {
+                  final i = entry.key;
+                  final tag = entry.value;
+                  final color = _tagColors[i % _tagColors.length];
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: color.withValues(alpha: 0.4)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('#$tag',
+                            style: TextStyle(
+                              color: color,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            )),
+                        if (_editing) ...[
+                          const SizedBox(width: 4),
+                          GestureDetector(
+                            onTap: () => setState(() => _tags.remove(tag)),
+                            child: Icon(Icons.close, size: 14, color: color),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+                }),
+                if (_tags.isEmpty && !_editing)
+                  Text('Нет тегов',
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
+              ],
             ),
           const SizedBox(height: 12),
 

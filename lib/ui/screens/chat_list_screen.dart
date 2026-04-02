@@ -375,7 +375,10 @@ class _ChatsTabState extends State<_ChatsTab> with TickerProviderStateMixin {
             .toList();
 
     if (_items.isEmpty) {
-      return _EmptyChatsState();
+      return Column(children: [
+        _StoriesStrip(chatItems: _items),
+        const Expanded(child: _EmptyChatsState()),
+      ]);
     }
     if (visible.isEmpty) {
       return Center(
@@ -555,6 +558,7 @@ class _AnimatedChatCard extends StatelessWidget {
 // ── Empty chats animation ───────────────────────────────────────
 
 class _EmptyChatsState extends StatefulWidget {
+  const _EmptyChatsState();
   @override
   State<_EmptyChatsState> createState() => _EmptyChatsStateState();
 }
