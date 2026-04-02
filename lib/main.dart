@@ -23,6 +23,7 @@ import 'services/name_filter.dart';
 import 'services/profile_service.dart';
 import 'services/story_service.dart';
 import 'services/relay_service.dart';
+import 'services/typing_service.dart';
 import 'services/update_service.dart';
 import 'services/wifi_direct_service.dart';
 import 'ui/screens/chat_list_screen.dart';
@@ -427,6 +428,9 @@ Future<void> initServices() async {
           });
         }
       },
+      onTyping: (fromId, activity) {
+        TypingService.instance.update(fromId, activity);
+      },
       onImgChunkReceived:
           (fromId, msgId, totalChunks, index, base64Data) async {
         ImageService.instance.receiveChunk(
@@ -743,14 +747,17 @@ Future<void> initServices() async {
 
     // Start relay (internet) transport
     if (AppSettings.instance.relayEnabled) {
+      RelayService.instance.onBlobReceived = _onBlobReceived;
       unawaited(RelayService.instance.connect());
     }
 
     // Start Dynamic Island Live Activity on iOS
     if (Platform.isIOS) {
       unawaited(_startLiveActivity());
-      // Update Live Activity when peers count changes
+      // Update Live Activity when peers/relay count changes
       BleService.instance.peersCount.addListener(_updateLiveActivity);
+      RelayService.instance.onlineCount.addListener(_updateLiveActivity);
+      RelayService.instance.state.addListener(_updateLiveActivity);
     }
 
     // Проверка обновлений (Android → RuStore, десктоп → GitHub releases)
@@ -832,6 +839,25 @@ int _bestSignalLevel() {
   return 0; // none
 }
 
+/// Handle blob received from relay — reassemble into a file and save message
+void _onBlobReceived(String fromId, String msgId, Uint8List data,
+    bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName) {
+  debugPrint('[Main] Blob received: ${data.length} bytes from ${fromId.substring(0, 8)} msgId=$msgId');
+  // Feed directly to ImageService as if all chunks arrived at once
+  ImageService.instance.initAssembly(
+    msgId, 1, // single "chunk"
+    isAvatar: false,
+    isVoice: isVoice,
+    fromId: fromId,
+    isVideo: isVideo,
+    isSquare: isSquare,
+    isFile: isFile,
+    fileName: fileName,
+  );
+  // Deliver the compressed blob as a single chunk
+  ImageService.instance.receiveBlobData(msgId: msgId, compressedData: data);
+}
+
 Future<void> _startLiveActivity() async {
   try {
     await _kBleChannel.invokeMethod('startLiveActivity', {
@@ -847,10 +873,22 @@ Future<void> _startLiveActivity() async {
 }
 
 void _updateLiveActivity() {
+  final blePeers = BleService.instance.peersCount.value;
+  final relayOnline = RelayService.instance.onlineCount.value;
+  final mode = AppSettings.instance.connectionMode;
+  // Show relevant count based on connection mode
+  final String statusText;
+  if (mode == 0) {
+    statusText = 'BLE: $blePeers рядом';
+  } else if (mode == 1) {
+    statusText = 'Онлайн: $relayOnline';
+  } else {
+    statusText = 'BLE: $blePeers · Онлайн: $relayOnline';
+  }
   try {
     _kBleChannel.invokeMethod('updateLiveActivity', {
-      'peers': BleService.instance.peersCount.value,
-      'sender': '',
+      'peers': blePeers + relayOnline,
+      'sender': statusText,
       'message': '',
       'signal': _bestSignalLevel(),
     });

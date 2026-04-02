@@ -180,6 +180,17 @@ class ImageService {
 
   bool isComplete(String msgId) => _assemblies[msgId]?.isComplete ?? false;
 
+  /// Receive a complete compressed blob from relay (no chunking needed).
+  /// Sets the assembly as complete with a single data block.
+  void receiveBlobData({required String msgId, required Uint8List compressedData}) {
+    final assembly = _assemblies[msgId];
+    if (assembly == null) return;
+    // Override totalChunks=1 and put all data at index 0
+    assembly._totalOverride = 1;
+    assembly._chunks.clear();
+    assembly._chunks[0] = compressedData;
+  }
+
   /// Возвращает прогресс сборки: (received, total).
   (int received, int total) assemblyProgress(String msgId) {
     final assembly = _assemblies[msgId];
@@ -401,6 +412,7 @@ class _ImageAssembly {
   final String? storyId;
   final String fromId;
   final Map<int, Uint8List> _chunks = {};
+  int? _totalOverride; // set by receiveBlobData for relay blobs
 
   _ImageAssembly({
     required this.totalChunks,
@@ -418,11 +430,12 @@ class _ImageAssembly {
   void add(int index, Uint8List data) => _chunks[index] = data;
 
   int get receivedCount => _chunks.length;
-  bool get isComplete => _chunks.length == totalChunks;
+  int get _effectiveTotal => _totalOverride ?? totalChunks;
+  bool get isComplete => _chunks.length == _effectiveTotal;
 
   Uint8List assemble() {
     final out = BytesBuilder();
-    for (var i = 0; i < totalChunks; i++) {
+    for (var i = 0; i < _effectiveTotal; i++) {
       out.add(_chunks[i]!);
     }
     return out.toBytes();

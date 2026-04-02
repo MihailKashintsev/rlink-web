@@ -24,6 +24,8 @@ import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/voice_service.dart';
 import '../../services/story_service.dart';
+import '../../services/typing_service.dart';
+import '../../services/relay_service.dart';
 import '../widgets/avatar_widget.dart';
 import 'image_editor_screen.dart';
 import 'square_video_recorder_screen.dart';
@@ -67,6 +69,57 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _recordingTimer;
   double? _pendingLat;
   double? _pendingLng;
+  Timer? _typingDebounce;
+
+  /// Send media: prefer relay blob if connected, fallback to BLE chunks
+  Future<void> _sendMedia({
+    required Uint8List bytes,
+    required String msgId,
+    required String myId,
+    bool isVoice = false,
+    bool isVideo = false,
+    bool isSquare = false,
+    bool isFile = false,
+    String? fileName,
+  }) async {
+    final compressed = ImageService.instance.compress(bytes);
+    // Try relay blob first (instant delivery)
+    if (RelayService.instance.isConnected &&
+        AppSettings.instance.connectionMode >= 1) {
+      await RelayService.instance.sendBlob(
+        recipientKey: _resolvedPeerId,
+        fromId: myId,
+        msgId: msgId,
+        compressedData: compressed,
+        isVoice: isVoice,
+        isVideo: isVideo,
+        isSquare: isSquare,
+        isFile: isFile,
+        fileName: fileName,
+      );
+    }
+    // Also send via BLE chunks for mesh delivery
+    if (AppSettings.instance.connectionMode != 1) {
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        recipientId: _resolvedPeerId,
+        isVoice: isVoice,
+        isVideo: isVideo,
+        isSquare: isSquare,
+        isFile: isFile,
+        fileName: fileName,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId, index: i, base64Data: chunks[i],
+          fromId: myId, recipientId: _resolvedPeerId,
+        );
+      }
+    }
+  }
 
   // BLE ATT MTU ≈ 288 байт. Фиксированный overhead пакета ≈ 186 байт
   // (id36 + t + ttl + ts + from64 + r8 + структура JSON).
@@ -95,6 +148,7 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     _resolvedPeerId = BleService.instance.resolvePublicKey(widget.peerId);
     _load();
+    _controller.addListener(_onTyping);
     // Следим за изменением маппингов BLE UUID → public key
     BleService.instance.peersCount.addListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
@@ -134,8 +188,34 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _onTyping() {
+    _typingDebounce?.cancel();
+    if (_controller.text.isNotEmpty) {
+      _sendActivity(Activity.typing);
+      // Auto-stop after 4s of no typing
+      _typingDebounce = Timer(const Duration(seconds: 4), () {
+        _sendActivity(Activity.stopped);
+      });
+    } else {
+      _sendActivity(Activity.stopped);
+    }
+  }
+
+  void _sendActivity(int activity) {
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) return;
+    GossipRouter.instance.sendTypingIndicator(
+      fromId: myId,
+      recipientId: _resolvedPeerId,
+      activity: activity,
+    );
+  }
+
   @override
   void dispose() {
+    _typingDebounce?.cancel();
+    _sendActivity(Activity.stopped);
+    _controller.removeListener(_onTyping);
     BleService.instance.peersCount.removeListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.removeListener(_onPeersChanged);
     _recordingTimer?.cancel();
@@ -167,6 +247,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _isRecording = true;
     });
+    _sendActivity(Activity.recordingVoice);
     _recordingTimer?.cancel();
     _recordingTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
       if (!mounted || !_isRecording) return;
@@ -188,6 +269,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _isRecording = false;
     });
+    _sendActivity(Activity.stopped);
 
     if (path == null || duration < 0.5) return;
     if (!_looksLikePublicKey(_resolvedPeerId)) {
@@ -197,27 +279,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
     try {
       final bytes = await File(path).readAsBytes();
-      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final msgId = _uuid.v4();
       final myId = CryptoService.instance.publicKeyHex;
 
-      await GossipRouter.instance.sendImgMeta(
-        msgId: msgId,
-        totalChunks: chunks.length,
-        fromId: myId,
-        recipientId: _resolvedPeerId,
-        isAvatar: false,
-        isVoice: true,
-      );
-      for (var i = 0; i < chunks.length; i++) {
-        await GossipRouter.instance.sendImgChunk(
-          msgId: msgId,
-          index: i,
-          base64Data: chunks[i],
-          fromId: myId,
-          recipientId: _resolvedPeerId,
-        );
-      }
+      await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, isVoice: true);
 
       await ChatStorageService.instance.saveMessage(ChatMessage(
         id: msgId,
@@ -471,28 +536,12 @@ class _ChatScreenState extends State<ChatScreen> {
       await tmpFile.writeAsBytes(editedBytes);
       final path = await ImageService.instance.compressAndSave(tmpFile.path);
       final bytes = await File(path).readAsBytes();
-      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final msgId = _uuid.v4();
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
           ? _resolvedPeerId
           : widget.peerId;
 
-      await GossipRouter.instance.sendImgMeta(
-        msgId: msgId,
-        totalChunks: chunks.length,
-        fromId: myId,
-        recipientId: targetPeerId,
-        isAvatar: false,
-      );
-      for (var i = 0; i < chunks.length; i++) {
-        await GossipRouter.instance.sendImgChunk(
-          msgId: msgId,
-          index: i,
-          base64Data: chunks[i],
-          fromId: myId,
-          recipientId: targetPeerId,
-        );
-      }
+      await _sendMedia(bytes: bytes, msgId: msgId, myId: myId);
       final msg = ChatMessage(
         id: msgId,
         peerId: targetPeerId,
@@ -542,37 +591,21 @@ class _ChatScreenState extends State<ChatScreen> {
 
     // Open square video recorder as overlay with blur
     if (!mounted) return;
+    _sendActivity(Activity.recordingVideo);
     final videoPath = await showSquareVideoRecorder(context);
+    _sendActivity(Activity.stopped);
     if (videoPath == null || !mounted) return;
 
     setState(() => _isSending = true);
     try {
       final path = await ImageService.instance.saveVideo(videoPath, isSquare: true);
       final bytes = await File(path).readAsBytes();
-      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final msgId = _uuid.v4();
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
           ? _resolvedPeerId
           : widget.peerId;
 
-      await GossipRouter.instance.sendImgMeta(
-        msgId: msgId,
-        totalChunks: chunks.length,
-        fromId: myId,
-        recipientId: targetPeerId,
-        isAvatar: false,
-        isVideo: true,
-        isSquare: true,
-      );
-      for (var i = 0; i < chunks.length; i++) {
-        await GossipRouter.instance.sendImgChunk(
-          msgId: msgId,
-          index: i,
-          base64Data: chunks[i],
-          fromId: myId,
-          recipientId: targetPeerId,
-        );
-      }
+      await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, isVideo: true, isSquare: true);
 
       final msg = ChatMessage(
         id: msgId,
@@ -660,29 +693,18 @@ class _ChatScreenState extends State<ChatScreen> {
       final destPath = '${filesDir.path}/$originalName';
       await File(srcPath).copy(destPath);
 
-      final chunks = ImageService.instance.splitToBase64Chunks(fileBytes);
       final msgId = _uuid.v4();
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
           ? _resolvedPeerId
           : widget.peerId;
 
-      await GossipRouter.instance.sendImgMeta(
+      await _sendMedia(
+        bytes: fileBytes,
         msgId: msgId,
-        totalChunks: chunks.length,
-        fromId: myId,
-        recipientId: targetPeerId,
+        myId: myId,
         isFile: true,
         fileName: originalName,
       );
-      for (var i = 0; i < chunks.length; i++) {
-        await GossipRouter.instance.sendImgChunk(
-          msgId: msgId,
-          index: i,
-          base64Data: chunks[i],
-          fromId: myId,
-          recipientId: targetPeerId,
-        );
-      }
 
       await ChatStorageService.instance.saveMessage(ChatMessage(
         id: msgId,
@@ -996,19 +1018,30 @@ class _ChatScreenState extends State<ChatScreen> {
                 style:
                     const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
             ValueListenableBuilder<int>(
-              valueListenable: BleService.instance.peersCount,
+              valueListenable: TypingService.instance.version,
               builder: (_, __, ___) {
-                final online =
-                    BleService.instance.isPeerConnected(_resolvedPeerId);
-                final anyConnected = BleService.instance.peersCount.value > 0;
-                return Text(
-                  online
-                      ? 'в сети'
-                      : (anyConnected ? 'нет соединения' : 'BLE выкл'),
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: online ? Colors.green : Colors.grey.shade500,
-                  ),
+                final activity = TypingService.instance.activityFor(_resolvedPeerId);
+                if (activity != Activity.stopped) {
+                  final label = TypingService.instance.label(activity);
+                  return Text(label,
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF1DB954)),
+                  );
+                }
+                return ValueListenableBuilder<int>(
+                  valueListenable: BleService.instance.peersCount,
+                  builder: (_, __, ___) {
+                    final online = BleService.instance.isPeerConnected(_resolvedPeerId);
+                    final relayOnline = RelayService.instance.isConnected &&
+                        RelayService.instance.isPeerOnline(_resolvedPeerId);
+                    final isOnline = online || relayOnline;
+                    return Text(
+                      isOnline ? 'в сети' : 'не в сети',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isOnline ? Colors.green : Colors.grey.shade500,
+                      ),
+                    );
+                  },
                 );
               },
             ),
@@ -1736,30 +1769,53 @@ class _InputBarState extends State<_InputBar> {
               constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
               tooltip: 'Скрыть клавиатуру',
             ),
-          IconButton(
-            onPressed: widget.isSending ? null : widget.onPickImage,
-            icon: const Icon(Icons.photo_outlined),
-            color: cs.onSurfaceVariant,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-          ),
-          IconButton(
-            onPressed: widget.isSending ? null : widget.onPickFile,
-            icon: const Icon(Icons.attach_file_outlined),
-            color: cs.onSurfaceVariant,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            tooltip: 'Прикрепить файл',
-          ),
-          IconButton(
-            onPressed: widget.isSending ? null : widget.onLocation,
-            icon: Icon(
-              widget.locationActive ? Icons.location_on : Icons.location_on_outlined,
-              color: widget.locationActive ? cs.primary : cs.onSurfaceVariant,
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (widget.isSending) return;
+              switch (value) {
+                case 'photo': widget.onPickImage(); break;
+                case 'file': widget.onPickFile(); break;
+                case 'location': widget.onLocation(); break;
+              }
+            },
+            icon: AnimatedRotation(
+              turns: widget.locationActive ? 0.125 : 0,
+              duration: const Duration(milliseconds: 200),
+              child: Icon(Icons.add_rounded,
+                color: widget.locationActive ? cs.primary : cs.onSurfaceVariant,
+                size: 26,
+              ),
             ),
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            tooltip: widget.locationActive ? 'Убрать геолокацию' : 'Прикрепить геолокацию',
+            position: PopupMenuPosition.over,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'photo',
+                child: Row(children: [
+                  Icon(Icons.photo_outlined, size: 20),
+                  SizedBox(width: 12),
+                  Text('Фото'),
+                ]),
+              ),
+              const PopupMenuItem(value: 'file',
+                child: Row(children: [
+                  Icon(Icons.attach_file_outlined, size: 20),
+                  SizedBox(width: 12),
+                  Text('Файл'),
+                ]),
+              ),
+              PopupMenuItem(value: 'location',
+                child: Row(children: [
+                  Icon(widget.locationActive ? Icons.location_on : Icons.location_on_outlined,
+                    size: 20,
+                    color: widget.locationActive ? cs.primary : null,
+                  ),
+                  const SizedBox(width: 12),
+                  Text(widget.locationActive ? 'Убрать геометку' : 'Геометка'),
+                ]),
+              ),
+            ],
           ),
           const SizedBox(width: 4),
           Expanded(

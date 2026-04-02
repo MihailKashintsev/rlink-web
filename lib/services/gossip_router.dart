@@ -126,6 +126,9 @@ typedef OnPairRequest = void Function(
     String bleId, String publicKey, String nick, int color, String emoji,
     String x25519Key);
 
+/// Typing/activity indicator: 0=stopped, 1=typing, 2=recording video, 3=recording voice
+typedef OnTypingReceived = void Function(String fromId, int activity);
+
 /// Pair accepted: device accepted our pair request.
 typedef OnPairAccepted = void Function(
     String bleId, String publicKey, String nick, int color, String emoji,
@@ -162,6 +165,10 @@ class GossipRouter {
   final _uuid = const Uuid();
   final Map<String, DateTime> _seenIds = {};
   Timer? _cleanupTimer;
+  /// Maps msgId → rid8 prefix from img_meta for chunk filtering
+  final Map<String, String> _imgMetaRid8 = {};
+  /// Maps msgId → fromId from img_meta for chunk sender tracking
+  final Map<String, String> _imgMetaFrom = {};
 
   OnMessageReceived? onMessageReceived;
   OnAckReceived? onAckReceived;
@@ -176,6 +183,7 @@ class GossipRouter {
   OnStoryReceived? onStoryReceived;
   OnPairRequest? onPairRequest;
   OnPairAccepted? onPairAccepted;
+  OnTypingReceived? onTypingReceived;
 
   void init({
     String? myKey,
@@ -192,6 +200,7 @@ class GossipRouter {
     OnStoryReceived? onStory,
     OnPairRequest? onPairReq,
     OnPairAccepted? onPairAcc,
+    OnTypingReceived? onTyping,
   }) {
     myPublicKey = myKey;
     onMessageReceived = onMessage;
@@ -207,6 +216,7 @@ class GossipRouter {
     onStoryReceived = onStory;
     onPairRequest = onPairReq;
     onPairAccepted = onPairAcc;
+    onTypingReceived = onTyping;
     _cleanupTimer =
         Timer.periodic(const Duration(minutes: 10), (_) => _cleanup());
   }
@@ -568,6 +578,28 @@ class GossipRouter {
     }
   }
 
+  /// Send typing/activity indicator. activity: 0=stopped, 1=typing, 2=recording video, 3=recording voice
+  Future<void> sendTypingIndicator({
+    required String fromId,
+    required String recipientId,
+    required int activity,
+  }) async {
+    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'typing',
+      ttl: 2, // short range — no need to flood the mesh
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'from': fromId,
+        'a': activity,
+        if (rid8 != null) 'r': rid8,
+      },
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
+  }
+
   Future<void> broadcastProfile({
     required String id,
     required String nick,
@@ -795,6 +827,9 @@ class GossipRouter {
           return;
         }
         if (msgId != null && totalChunks != null) {
+          // Store rid8 and from for chunk filtering
+          if (rid8 != null) _imgMetaRid8[msgId] = rid8;
+          _imgMetaFrom[msgId] = from;
           onImgMeta?.call(from, msgId, totalChunks, isAvatar, isVoice, isVideo, isSquare, isFile, fileName);
         }
         return;
@@ -851,17 +886,34 @@ class GossipRouter {
         return;
       }
 
+      if (packet.type == 'typing') {
+        final from = packet.payload['from'] as String?;
+        final activity = packet.payload['a'] as int?;
+        final rid8 = packet.payload['r'] as String?;
+        if (from == null || activity == null) return;
+        // Filter by recipient prefix
+        if (rid8 != null && myPublicKey != null && !myPublicKey!.startsWith(rid8)) return;
+        onTypingReceived?.call(from, activity);
+        return;
+      }
+
       if (packet.type == 'img_chunk') {
         final msgId = packet.payload['msgId'] as String?;
         final index = packet.payload['idx'] as int?;
         final data = packet.payload['data'] as String?;
-        // 'from' отсутствует в chunk-пакетах (только в img_meta для экономии MTU).
-        // ImageService получит fromId из img_meta через initAssembly.
-        // totalChunks = 0 как sentinel — ImageService уже знает totalChunks из img_meta.
-        if (msgId != null && msgId.isNotEmpty && index != null && index >= 0 &&
-            data != null && data.isNotEmpty) {
-          onImgChunk?.call('', msgId, 0, index, data);
+        if (msgId == null || msgId.isEmpty || index == null || index < 0 ||
+            data == null || data.isEmpty) return;
+        // Filter chunks: if we received img_meta with rid8 for this msgId,
+        // and it wasn't for us, skip the chunk too
+        final storedRid8 = _imgMetaRid8[msgId];
+        if (storedRid8 != null && myPublicKey != null &&
+            !myPublicKey!.startsWith(storedRid8)) {
+          return; // chunk not for us
         }
+        // If we never got img_meta for this msgId, skip (prevents orphan chunks)
+        final from = _imgMetaFrom[msgId];
+        if (from == null) return;
+        onImgChunk?.call(from, msgId, 0, index, data);
         return;
       }
     } catch (e) {
@@ -921,6 +973,14 @@ class GossipRouter {
   void _cleanup() {
     final cutoff = DateTime.now().subtract(_kSeenCacheTtl);
     _seenIds.removeWhere((_, time) => time.isBefore(cutoff));
+    // Clean up img tracking maps (keep last 200 entries max)
+    if (_imgMetaRid8.length > 200) {
+      final keys = _imgMetaRid8.keys.toList();
+      for (var i = 0; i < keys.length - 100; i++) {
+        _imgMetaRid8.remove(keys[i]);
+        _imgMetaFrom.remove(keys[i]);
+      }
+    }
   }
 
   // ══════════════════════════════════════════════════════════════

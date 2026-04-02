@@ -57,6 +57,10 @@ class RelayService {
   /// Search results
   final ValueNotifier<List<RelayPeer>> searchResults = ValueNotifier([]);
 
+  /// Callback for receiving blobs
+  void Function(String fromId, String msgId, Uint8List data,
+      bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName)? onBlobReceived;
+
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
 
@@ -231,6 +235,51 @@ class RelayService {
     }
   }
 
+  /// Send a compressed blob (voice/video/file) as a single relay message.
+  /// This bypasses the chunk protocol — much faster over internet.
+  /// The blob carries img_meta info so the receiver can reconstruct.
+  Future<void> sendBlob({
+    required String recipientKey,
+    required String fromId,
+    required String msgId,
+    required Uint8List compressedData,
+    bool isVoice = false,
+    bool isVideo = false,
+    bool isSquare = false,
+    bool isFile = false,
+    String? fileName,
+  }) async {
+    if (!isConnected) return;
+    final b64 = base64Encode(compressedData);
+    final envelope = {
+      'type': 'blob',
+      'to': recipientKey,
+      'msgId': msgId,
+      'from': fromId,
+      'data': b64,
+      if (isVoice) 'voice': true,
+      if (isVideo) 'video': true,
+      if (isSquare) 'sq': true,
+      if (isFile) 'file': true,
+      if (fileName != null) 'fname': fileName,
+    };
+    try {
+      _channel?.sink.add(jsonEncode(envelope));
+      debugPrint('[Relay] Sent blob ${compressedData.length} bytes for $msgId');
+    } catch (e) {
+      debugPrint('[Relay] Failed to send blob: $e');
+    }
+  }
+
+  /// Progress notifier for current blob transfer (0.0 - 1.0)
+  final ValueNotifier<double> sendProgress = ValueNotifier(0);
+  String? _currentSendMsgId;
+  String? get currentSendMsgId => _currentSendMsgId;
+  void updateSendProgress(String msgId, double progress) {
+    _currentSendMsgId = progress >= 1.0 ? null : msgId;
+    sendProgress.value = progress;
+  }
+
   /// Search for users by nickname or ID
   Future<void> searchUsers(String query) async {
     if (!isConnected || query.trim().isEmpty) {
@@ -273,6 +322,10 @@ class RelayService {
 
       case 'presence':
         _handlePresence(msg);
+        break;
+
+      case 'blob':
+        _handleIncomingBlob(msg);
         break;
 
       case 'delivery_status':
@@ -327,6 +380,27 @@ class RelayService {
     _peerOnline[publicKey] = online;
     presenceVersion.value++;
     debugPrint('[Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'}');
+  }
+
+  void _handleIncomingBlob(Map<String, dynamic> msg) {
+    final from = msg['from'] as String?;
+    final msgId = msg['msgId'] as String?;
+    final data = msg['data'] as String?;
+    if (from == null || msgId == null || data == null) return;
+
+    try {
+      final bytes = base64Decode(data);
+      final isVoice = (msg['voice'] as bool?) ?? false;
+      final isVideo = (msg['video'] as bool?) ?? false;
+      final isSquare = (msg['sq'] as bool?) ?? false;
+      final isFile = (msg['file'] as bool?) ?? false;
+      final fileName = msg['fname'] as String?;
+      debugPrint('[Relay] Received blob ${bytes.length} bytes for $msgId');
+      onBlobReceived?.call(from, msgId, Uint8List.fromList(bytes),
+          isVoice, isVideo, isSquare, isFile, fileName);
+    } catch (e) {
+      debugPrint('[Relay] Failed to decode blob: $e');
+    }
   }
 
   void _handleDeliveryStatus(Map<String, dynamic> msg) {
