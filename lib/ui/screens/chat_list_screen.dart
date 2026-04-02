@@ -16,13 +16,16 @@ import '../../services/gossip_router.dart';
 import '../../services/story_service.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/mesh_radar_widget.dart';
+import 'channels_screen.dart';
 import 'chat_screen.dart';
 import 'ether_screen.dart';
+import 'groups_screen.dart';
 import 'profile_screen.dart';
 import 'contacts_screen.dart';
 import 'settings_screen.dart';
 import 'story_creator_screen.dart';
 import 'story_viewer_screen.dart';
+
 
 // ── Slide + fade page transition helper ─────────────────────────
 Route<T> slideRoute<T>(Widget page) {
@@ -188,6 +191,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
             ContactsScreen(
                 searchQuery: _searchActive ? _searchController.text : ''),
             _NearbyTab(),
+            ChannelsScreen(searchQuery: _searchActive ? _searchController.text : ''),
+            const GroupsScreen(),
             const EtherScreen(),
           ],
         ),
@@ -200,7 +205,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
             _searchActive = false;
             _searchController.clear();
           }
-          if (i == 3) EtherService.instance.markRead();
+          if (i == 5) EtherService.instance.markRead();
         }),
       ),
     );
@@ -258,6 +263,16 @@ class _AnimatedNavBar extends StatelessWidget {
                 : const Icon(Icons.radar),
           ),
           label: AppL10n.t('nav_nearby'),
+        ),
+        const NavigationDestination(
+          icon: Icon(Icons.campaign_outlined),
+          selectedIcon: Icon(Icons.campaign),
+          label: 'Каналы',
+        ),
+        const NavigationDestination(
+          icon: Icon(Icons.group_outlined),
+          selectedIcon: Icon(Icons.group),
+          label: 'Группы',
         ),
         NavigationDestination(
           icon: ValueListenableBuilder<int>(
