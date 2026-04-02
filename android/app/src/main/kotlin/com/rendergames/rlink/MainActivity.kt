@@ -138,6 +138,9 @@ class MainActivity : FlutterActivity() {
                 override fun onListen(args: Any?, sink: EventChannel.EventSink?) { eventSink = sink }
                 override fun onCancel(args: Any?) { eventSink = null }
             })
+
+        // Native square video cropping
+        VideoCropPlugin.register(flutterEngine.dartExecutor.binaryMessenger)
     }
 
     private fun startGattServer() {

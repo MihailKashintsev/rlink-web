@@ -102,6 +102,9 @@ struct RlinkActivityAttributes: ActivityAttributes {
         NSLog("[AppDelegate] setupChannels OK")
         let m = vc.binaryMessenger
 
+        // Register native video crop channel
+        VideoCropPlugin.register(with: m)
+
         let method = FlutterMethodChannel(name: "com.rendergames.rlink/ble", binaryMessenger: m)
         method.setMethodCallHandler { [weak self] call, result in
             guard let self = self else { return }

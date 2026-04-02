@@ -922,4 +922,251 @@ class GossipRouter {
     final cutoff = DateTime.now().subtract(_kSeenCacheTtl);
     _seenIds.removeWhere((_, time) => time.isBefore(cutoff));
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // Channel methods
+  // ══════════════════════════════════════════════════════════════
+
+  Future<void> broadcastChannelMeta({
+    required String channelId,
+    required String name,
+    required String adminId,
+    int? avatarColor,
+    String? avatarEmoji,
+    String? description,
+    bool commentsEnabled = true,
+    int? createdAt,
+    bool verified = false,
+    String? verifiedBy,
+    List<String>? subscriberIds,
+    List<String>? moderatorIds,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'channel_meta',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'channelId': channelId,
+        'name': name,
+        'adminId': adminId,
+        if (avatarColor != null) 'avatarColor': avatarColor,
+        if (avatarEmoji != null) 'avatarEmoji': avatarEmoji,
+        if (description != null) 'description': description,
+        'commentsEnabled': commentsEnabled,
+        if (createdAt != null) 'createdAt': createdAt,
+        'verified': verified,
+        if (verifiedBy != null) 'verifiedBy': verifiedBy,
+        if (subscriberIds != null) 'subscriberIds': subscriberIds,
+        if (moderatorIds != null) 'moderatorIds': moderatorIds,
+      },
+    );
+    await _forward(packet);
+  }
+
+  Future<void> sendChannelPost({
+    required String channelId,
+    required String postId,
+    required String authorId,
+    String? text,
+    String? imageUrl,
+    String? videoUrl,
+    String? fileUrl,
+    String? fileName,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'channel_post',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'channelId': channelId,
+        'postId': postId,
+        'authorId': authorId,
+        if (text != null) 'text': text,
+        if (imageUrl != null) 'imageUrl': imageUrl,
+        if (videoUrl != null) 'videoUrl': videoUrl,
+        if (fileUrl != null) 'fileUrl': fileUrl,
+        if (fileName != null) 'fileName': fileName,
+      },
+    );
+    await _forward(packet);
+  }
+
+  Future<void> sendChannelDeletePost({
+    required String postId,
+    String? channelId,
+    String? authorId,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'channel_delete_post',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'postId': postId,
+        if (channelId != null) 'channelId': channelId,
+        if (authorId != null) 'authorId': authorId,
+      },
+    );
+    await _forward(packet);
+  }
+
+  Future<void> broadcastChannelSubscribe({
+    required String channelId,
+    required String userId,
+    bool unsubscribe = false,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'channel_subscribe',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'channelId': channelId,
+        'userId': userId,
+        'unsubscribe': unsubscribe,
+      },
+    );
+    await _forward(packet);
+  }
+
+  Future<void> sendChannelInvite({
+    required String channelId,
+    required String channelName,
+    required String adminId,
+    required String inviterId,
+    required String inviterNick,
+    required String targetPublicKey,
+    int? avatarColor,
+    String? avatarEmoji,
+    String? description,
+    int? createdAt,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'channel_invite',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: targetPublicKey,
+      payload: {
+        'channelId': channelId,
+        'channelName': channelName,
+        'adminId': adminId,
+        'inviterId': inviterId,
+        'inviterNick': inviterNick,
+        if (avatarColor != null) 'avatarColor': avatarColor,
+        if (avatarEmoji != null) 'avatarEmoji': avatarEmoji,
+        if (description != null) 'description': description,
+        if (createdAt != null) 'createdAt': createdAt,
+      },
+    );
+    await _forward(packet);
+  }
+
+  Future<void> sendChannelComment({
+    required String postId,
+    required String commentId,
+    required String authorId,
+    required String text,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'channel_comment',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'postId': postId,
+        'commentId': commentId,
+        'authorId': authorId,
+        'text': text,
+      },
+    );
+    await _forward(packet);
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // Group methods
+  // ══════════════════════════════════════════════════════════════
+
+  Future<void> sendGroupMessage({
+    required String groupId,
+    required String senderId,
+    required String text,
+    required String messageId,
+    String? imageUrl,
+    String? videoUrl,
+    String? fileUrl,
+    String? fileName,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'group_message',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'groupId': groupId,
+        'senderId': senderId,
+        'text': text,
+        'messageId': messageId,
+        if (imageUrl != null) 'imageUrl': imageUrl,
+        if (videoUrl != null) 'videoUrl': videoUrl,
+        if (fileUrl != null) 'fileUrl': fileUrl,
+        if (fileName != null) 'fileName': fileName,
+      },
+    );
+    await _forward(packet);
+  }
+
+  Future<void> sendGroupInvite({
+    required String groupId,
+    required String groupName,
+    required String inviterId,
+    required String inviterNick,
+    required String creatorId,
+    required List<String> memberIds,
+    required String targetPublicKey,
+    int? avatarColor,
+    String? avatarEmoji,
+    int? createdAt,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'group_invite',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: targetPublicKey,
+      payload: {
+        'groupId': groupId,
+        'groupName': groupName,
+        'inviterId': inviterId,
+        'inviterNick': inviterNick,
+        'creatorId': creatorId,
+        'memberIds': memberIds,
+        if (avatarColor != null) 'avatarColor': avatarColor,
+        if (avatarEmoji != null) 'avatarEmoji': avatarEmoji,
+        if (createdAt != null) 'createdAt': createdAt,
+      },
+    );
+    await _forward(packet);
+  }
+
+  Future<void> sendGroupAccept({
+    required String groupId,
+    required String accepterId,
+    required String accepterNick,
+  }) async {
+    final packet = GossipPacket(
+      id: const Uuid().v4(),
+      type: 'group_accept',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: {
+        'groupId': groupId,
+        'accepterId': accepterId,
+        'accepterNick': accepterNick,
+      },
+    );
+    await _forward(packet);
+  }
 }

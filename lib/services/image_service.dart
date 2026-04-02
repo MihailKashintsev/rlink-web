@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:video_compress/video_compress.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -81,22 +84,26 @@ class ImageService {
 
   /// Сжимает изображение и сохраняет в <documents>/images/.
   /// [isAvatar] = true: жёсткое сжатие 256×256 px; иначе — чат-качество.
+  /// [quality] и [maxSize] позволяют явно задать параметры сжатия.
   Future<String> compressAndSave(
     String sourcePath, {
     bool isAvatar = false,
+    int? quality,
+    int? maxSize,
   }) async {
     final dir = await _imagesDir();
     final name = '${_uuid.v4()}.jpg';
     final targetPath = p.join(dir.path, name);
 
-    // Chat images: 320×320 quality 55 ≈ 15–30 KB → ~220 BLE chunks → ~7 seconds transfer.
-    // Avatar images: 192×192 quality 60 ≈ 8–15 KB → ~120 chunks → ~4 seconds transfer.
+    final w = maxSize ?? (isAvatar ? 192 : 320);
+    final h = maxSize ?? (isAvatar ? 192 : 320);
+    final q = quality ?? (isAvatar ? 60 : 55);
     final result = await FlutterImageCompress.compressAndGetFile(
       sourcePath,
       targetPath,
-      minWidth: isAvatar ? 192 : 320,
-      minHeight: isAvatar ? 192 : 320,
-      quality: isAvatar ? 60 : 55,
+      minWidth: w,
+      minHeight: h,
+      quality: q,
       format: CompressFormat.jpeg,
     );
 
@@ -117,14 +124,39 @@ class ImageService {
     return path;
   }
 
+  // ── Сжатие zlib ──────────────────────────────────────────────
+
+  /// Сжимает данные через zlib (deflate) перед отправкой.
+  /// Для уже сжатых форматов (JPEG, M4A, MP4) выигрыш ~5-10%.
+  /// Для документов (PDF, TXT, DOCX) выигрыш 30-70%.
+  Uint8List compress(Uint8List data) {
+    final compressed = Uint8List.fromList(ZLibCodec(level: 6).encode(data));
+    debugPrint('[ImageService] compress: ${data.length} → ${compressed.length} '
+        '(${(100 - compressed.length * 100 / data.length).toStringAsFixed(0)}% saved)');
+    // Используем сжатое только если оно меньше оригинала
+    return compressed.length < data.length ? compressed : data;
+  }
+
+  /// Распаковывает zlib-сжатые данные на приёмнике.
+  Uint8List decompress(Uint8List data) {
+    try {
+      return Uint8List.fromList(ZLibCodec().decode(data));
+    } catch (_) {
+      // Если данные не сжаты (обратная совместимость) — возвращаем как есть
+      return data;
+    }
+  }
+
   // ── Разбивка на чанки ─────────────────────────────────────────
 
+  /// Сжимает данные zlib → разбивает на base64-чанки для BLE.
   List<String> splitToBase64Chunks(Uint8List data) {
+    final compressed = compress(data);
     final chunks = <String>[];
     int offset = 0;
-    while (offset < data.length) {
-      final end = (offset + kImgChunkBytes).clamp(0, data.length);
-      final slice = data.sublist(offset, end);
+    while (offset < compressed.length) {
+      final end = (offset + kImgChunkBytes).clamp(0, compressed.length);
+      final slice = compressed.sublist(offset, end);
       chunks.add(base64Encode(slice));
       offset = end;
     }
@@ -148,7 +180,14 @@ class ImageService {
 
   bool isComplete(String msgId) => _assemblies[msgId]?.isComplete ?? false;
 
-  /// Собирает, сохраняет на диск и возвращает путь.
+  /// Возвращает прогресс сборки: (received, total).
+  (int received, int total) assemblyProgress(String msgId) {
+    final assembly = _assemblies[msgId];
+    if (assembly == null) return (0, 0);
+    return (assembly.receivedCount, assembly.totalChunks);
+  }
+
+  /// Собирает, распаковывает zlib, сохраняет на диск и возвращает путь.
   /// [forContactKey] — если задан, пишет в avatar_<short>.jpg.
   Future<String?> assembleAndSave(
     String msgId, {
@@ -157,7 +196,8 @@ class ImageService {
     final assembly = _assemblies.remove(msgId);
     if (assembly == null || !assembly.isComplete) return null;
 
-    final data = assembly.assemble();
+    final raw = assembly.assemble();
+    final data = decompress(raw);
     final dir = await _imagesDir();
     final name = forContactKey != null
         ? 'avatar_${forContactKey.substring(0, 16)}.jpg'
@@ -174,7 +214,9 @@ class ImageService {
       bool isVideo = false,
       bool isSquare = false,
       bool isFile = false,
+      bool isStory = false,
       String? fileName,
+      String? storyId,
       String fromId = ''}) {
     _assemblies.putIfAbsent(
       msgId,
@@ -185,7 +227,9 @@ class ImageService {
         isVideo: isVideo,
         isSquare: isSquare,
         isFile: isFile,
+        isStory: isStory,
         fileName: fileName,
+        storyId: storyId,
         fromId: fromId,
       ),
     );
@@ -196,16 +240,19 @@ class ImageService {
   bool isVideoAssembly(String msgId) => _assemblies[msgId]?.isVideo ?? false;
   bool isSquareAssembly(String msgId) => _assemblies[msgId]?.isSquare ?? false;
   bool isFileAssembly(String msgId) => _assemblies[msgId]?.isFile ?? false;
+  bool isStoryAssembly(String msgId) => _assemblies[msgId]?.isStory ?? false;
+  String? assemblyStoryId(String msgId) => _assemblies[msgId]?.storyId;
   String? assemblyFileName(String msgId) => _assemblies[msgId]?.fileName;
   String assemblyFromId(String msgId) => _assemblies[msgId]?.fromId ?? '';
 
   void cancelAssembly(String msgId) => _assemblies.remove(msgId);
 
-  /// Собирает голосовое сообщение и сохраняет как .m4a в voices/.
+  /// Собирает голосовое сообщение, распаковывает zlib, сохраняет как .m4a.
   Future<String?> assembleAndSaveVoice(String msgId) async {
     final assembly = _assemblies.remove(msgId);
     if (assembly == null || !assembly.isComplete) return null;
-    final data = assembly.assemble();
+    final raw = assembly.assemble();
+    final data = decompress(raw);
     final dir = await _voicesDir();
     final path = p.join(dir.path, '$msgId.m4a');
     await File(path).writeAsBytes(data);
@@ -235,19 +282,79 @@ class ImageService {
     return dir;
   }
 
+  /// Native platform channel for square video cropping.
+  static const _videoCropChannel = MethodChannel('com.rendergames.rlink/video_crop');
+
+  /// Saves a video with native compression (no FFmpeg / no external Maven).
+  /// Uses platform-native codec (Android MediaCodec / iOS AVFoundation).
+  /// When [isSquare] is true, the video is first center-cropped to 1:1 via
+  /// a native platform channel (AVFoundation on iOS, file copy + display crop
+  /// on Android), then compressed.
   Future<String> saveVideo(String sourcePath, {bool isSquare = false}) async {
     final dir = await _videosDir();
     final suffix = isSquare ? '_sq' : '';
     final name = '${_uuid.v4()}$suffix.mp4';
     final targetPath = p.join(dir.path, name);
-    await File(sourcePath).copy(targetPath);
+
+    // Step 1: Native square crop (if requested)
+    String inputForCompress = sourcePath;
+    if (isSquare) {
+      debugPrint('[VideoSave] Cropping to square via native platform…');
+      try {
+        final croppedPath = p.join(dir.path, '${_uuid.v4()}_cropped.mp4');
+        final success = await _videoCropChannel.invokeMethod<bool>(
+          'cropToSquare',
+          {'input': sourcePath, 'output': croppedPath},
+        );
+        if (success == true && await File(croppedPath).exists()) {
+          inputForCompress = croppedPath;
+          debugPrint('[VideoSave] Native crop OK: ${(await File(croppedPath).length()) ~/ 1024}KB');
+        } else {
+          debugPrint('[VideoSave] Native crop returned false, using original');
+        }
+      } catch (e) {
+        debugPrint('[VideoSave] Native crop failed: $e — using original');
+      }
+    }
+
+    // Step 2: Compress
+    debugPrint('[VideoSave] Compressing via native codec (isSquare=$isSquare)…');
+    try {
+      final mediaInfo = await VideoCompress.compressVideo(
+        inputForCompress,
+        quality: VideoQuality.LowQuality,
+        includeAudio: true,
+        deleteOrigin: false,
+      );
+      if (mediaInfo?.path != null) {
+        final origKB = (await File(sourcePath).length()) ~/ 1024;
+        final outKB  = (await File(mediaInfo!.path!).length()) ~/ 1024;
+        debugPrint('[VideoSave] Compressed: ${origKB}KB → ${outKB}KB');
+        await File(mediaInfo.path!).copy(targetPath);
+        await VideoCompress.deleteAllCache();
+        // Clean up intermediate cropped file
+        if (inputForCompress != sourcePath) {
+          try { await File(inputForCompress).delete(); } catch (_) {}
+        }
+        return targetPath;
+      }
+    } catch (e) {
+      debugPrint('[VideoSave] Compression failed: $e — falling back to copy');
+    }
+
+    // Fallback: plain copy
+    await File(inputForCompress).copy(targetPath);
+    if (inputForCompress != sourcePath) {
+      try { await File(inputForCompress).delete(); } catch (_) {}
+    }
     return targetPath;
   }
 
   Future<String?> assembleAndSaveVideo(String msgId, {bool isSquare = false}) async {
     final assembly = _assemblies.remove(msgId);
     if (assembly == null || !assembly.isComplete) return null;
-    final data = assembly.assemble();
+    final raw = assembly.assemble();
+    final data = decompress(raw);
     final dir = await _videosDir();
     final suffix = isSquare ? '_sq' : '';
     final path = p.join(dir.path, '$msgId$suffix.mp4');
@@ -260,7 +367,8 @@ class ImageService {
   Future<String?> assembleAndSaveFile(String msgId) async {
     final assembly = _assemblies.remove(msgId);
     if (assembly == null || !assembly.isComplete) return null;
-    final data = assembly.assemble();
+    final raw = assembly.assemble();
+    final data = decompress(raw);
     final dir = await _filesDir();
     // Preserve original extension from fileName, else use .bin
     final originalName = assembly.fileName;
@@ -288,7 +396,9 @@ class _ImageAssembly {
   final bool isVideo;
   final bool isSquare;
   final bool isFile;
+  final bool isStory;
   final String? fileName;
+  final String? storyId;
   final String fromId;
   final Map<int, Uint8List> _chunks = {};
 
@@ -299,12 +409,15 @@ class _ImageAssembly {
     this.isVideo = false,
     this.isSquare = false,
     this.isFile = false,
+    this.isStory = false,
     this.fileName,
+    this.storyId,
     this.fromId = '',
   });
 
   void add(int index, Uint8List data) => _chunks[index] = data;
 
+  int get receivedCount => _chunks.length;
   bool get isComplete => _chunks.length == totalChunks;
 
   Uint8List assemble() {

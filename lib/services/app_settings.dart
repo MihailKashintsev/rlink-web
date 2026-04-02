@@ -22,6 +22,8 @@ class AppSettings extends ChangeNotifier {
   static const _keyCompactMode     = 'compact_mode';
   static const _keyEtherRulesAccepted = 'ether_rules_accepted';
   static const _keyOnlineStatusMode  = 'online_status_mode'; // 0=online,1=dnd,2=busy
+  static const _keyRelayEnabled      = 'relay_enabled';
+  static const _keyRelayServerUrl    = 'relay_server_url';
 
   late SharedPreferences _prefs;
 
@@ -40,6 +42,8 @@ class AppSettings extends ChangeNotifier {
   bool _compactMode = false;
   bool _etherRulesAccepted = false;
   int _onlineStatusMode = 0; // 0=online(green), 1=dnd(yellow), 2=busy(red)
+  bool _relayEnabled = true;
+  String _relayServerUrl = '';
 
   ThemeMode get themeMode => _themeMode;
   int get accentColorIndex => _accentColorIndex;
@@ -56,6 +60,8 @@ class AppSettings extends ChangeNotifier {
   bool get compactMode => _compactMode;
   bool get etherRulesAccepted => _etherRulesAccepted;
   int get onlineStatusMode => _onlineStatusMode;
+  bool get relayEnabled => _relayEnabled;
+  String get relayServerUrl => _relayServerUrl;
 
   /// Цвет статуса: 0=зелёный(онлайн), 1=жёлтый(DND), 2=красный(занят), 3=серый(офлайн — авто)
   Color get onlineStatusColor => const [
@@ -116,6 +122,8 @@ class AppSettings extends ChangeNotifier {
     _compactMode = _prefs.getBool(_keyCompactMode) ?? false;
     _etherRulesAccepted = _prefs.getBool(_keyEtherRulesAccepted) ?? false;
     _onlineStatusMode = (_prefs.getInt(_keyOnlineStatusMode) ?? 0).clamp(0, 2);
+    _relayEnabled = _prefs.getBool(_keyRelayEnabled) ?? true;
+    _relayServerUrl = _prefs.getString(_keyRelayServerUrl) ?? '';
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {
@@ -210,6 +218,18 @@ class AppSettings extends ChangeNotifier {
   Future<void> setOnlineStatusMode(int mode) async {
     _onlineStatusMode = mode.clamp(0, 2);
     await _prefs.setInt(_keyOnlineStatusMode, _onlineStatusMode);
+    notifyListeners();
+  }
+
+  Future<void> setRelayEnabled(bool value) async {
+    _relayEnabled = value;
+    await _prefs.setBool(_keyRelayEnabled, value);
+    notifyListeners();
+  }
+
+  Future<void> setRelayServerUrl(String url) async {
+    _relayServerUrl = url;
+    await _prefs.setString(_keyRelayServerUrl, url);
     notifyListeners();
   }
 }

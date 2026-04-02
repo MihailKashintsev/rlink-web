@@ -5,7 +5,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-/// Показывает квадратный видеорекордер как оверлей поверх чата с блюром (как Telegram).
+/// Показывает квадратный видеорекордер-оверлей поверх чата с блюром.
 /// Возвращает путь к файлу или null.
 Future<String?> showSquareVideoRecorder(BuildContext context) {
   return showGeneralDialog<String>(
@@ -14,50 +14,60 @@ Future<String?> showSquareVideoRecorder(BuildContext context) {
     barrierColor: Colors.transparent,
     transitionDuration: const Duration(milliseconds: 250),
     transitionBuilder: (ctx, anim, secondAnim, child) {
+      final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
       return FadeTransition(
-        opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
-        child: child,
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.85, end: 1.0).animate(curved),
+          child: child,
+        ),
       );
     },
-    pageBuilder: (ctx, anim, secondAnim) {
-      return const _VideoOverlay();
-    },
+    pageBuilder: (ctx, anim, secondAnim) => const _VideoOverlay(),
   );
 }
 
 class _VideoOverlay extends StatefulWidget {
   const _VideoOverlay();
-
   @override
   State<_VideoOverlay> createState() => _VideoOverlayState();
 }
 
-class _VideoOverlayState extends State<_VideoOverlay> {
+class _VideoOverlayState extends State<_VideoOverlay>
+    with SingleTickerProviderStateMixin {
   CameraController? _controller;
   List<CameraDescription> _cameras = [];
-  int _selectedCamera = 0;
+  int _selectedCamera = -1;
   bool _isRecording = false;
   double _recordingSeconds = 0;
   Timer? _recordingTimer;
   bool _isInitializing = true;
+  bool _isSwitching = false;
   String? _initError;
+
+  late AnimationController _pulseController;
 
   static const _maxDuration = 15.0;
 
   @override
   void initState() {
     super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1000),
+    );
     _initCamera();
   }
 
   @override
   void dispose() {
     _recordingTimer?.cancel();
+    _pulseController.dispose();
     _controller?.dispose();
     super.dispose();
   }
 
-  Future<void> _initCamera([int cameraIndex = 0]) async {
+  Future<void> _initCamera() async {
     setState(() {
       _isInitializing = true;
       _initError = null;
@@ -80,31 +90,11 @@ class _VideoOverlayState extends State<_VideoOverlay> {
         });
         return;
       }
-      // Prefer front camera by default
-      int idx = cameraIndex;
-      if (cameraIndex == 0) {
-        final frontIdx = _cameras.indexWhere(
-            (c) => c.lensDirection == CameraLensDirection.front);
-        if (frontIdx >= 0) idx = frontIdx;
-      }
-      idx = idx.clamp(0, _cameras.length - 1);
-      final controller = CameraController(
-        _cameras[idx],
-        ResolutionPreset.medium,
-        enableAudio: true,
-        imageFormatGroup: ImageFormatGroup.jpeg,
-      );
-      await controller.initialize();
-      if (!mounted) {
-        controller.dispose();
-        return;
-      }
-      _controller?.dispose();
-      setState(() {
-        _controller = controller;
-        _selectedCamera = idx;
-        _isInitializing = false;
-      });
+      // Default to front camera
+      int idx = _cameras.indexWhere(
+          (c) => c.lensDirection == CameraLensDirection.front);
+      if (idx < 0) idx = 0;
+      await _setupController(idx);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -115,10 +105,38 @@ class _VideoOverlayState extends State<_VideoOverlay> {
     }
   }
 
+  Future<void> _setupController(int cameraIndex) async {
+    final controller = CameraController(
+      _cameras[cameraIndex],
+      ResolutionPreset.high,
+      enableAudio: true,
+      imageFormatGroup: ImageFormatGroup.jpeg,
+    );
+    await controller.initialize();
+    if (!mounted) {
+      controller.dispose();
+      return;
+    }
+    final old = _controller;
+    setState(() {
+      _controller = controller;
+      _selectedCamera = cameraIndex;
+      _isInitializing = false;
+      _isSwitching = false;
+    });
+    old?.dispose();
+  }
+
   Future<void> _switchCamera() async {
-    if (_cameras.length < 2 || _isRecording) return;
+    if (_cameras.length < 2 || _isRecording || _isSwitching) return;
+    setState(() => _isSwitching = true);
     final next = (_selectedCamera + 1) % _cameras.length;
-    await _initCamera(next);
+    try {
+      await _setupController(next);
+    } catch (e) {
+      debugPrint('[SquareVideo] switchCamera error: $e');
+      if (mounted) setState(() => _isSwitching = false);
+    }
   }
 
   Future<void> _startRecording() async {
@@ -126,6 +144,7 @@ class _VideoOverlayState extends State<_VideoOverlay> {
     if (ctrl == null || !ctrl.value.isInitialized || _isRecording) return;
     try {
       await ctrl.startVideoRecording();
+      _pulseController.repeat(reverse: true);
       setState(() {
         _isRecording = true;
         _recordingSeconds = 0;
@@ -146,6 +165,8 @@ class _VideoOverlayState extends State<_VideoOverlay> {
     if (!_isRecording) return;
     _recordingTimer?.cancel();
     _recordingTimer = null;
+    _pulseController.stop();
+    _pulseController.reset();
     final ctrl = _controller;
     if (ctrl == null) return;
     try {
@@ -167,7 +188,7 @@ class _VideoOverlayState extends State<_VideoOverlay> {
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final previewSize = screenWidth * 0.75;
+    final squareSize = screenWidth * 0.82;
     final secs = _recordingSeconds.floor();
     final tenths = ((_recordingSeconds % 1) * 10).floor();
     final progress = _recordingSeconds / _maxDuration;
@@ -175,128 +196,206 @@ class _VideoOverlayState extends State<_VideoOverlay> {
     return Material(
       type: MaterialType.transparency,
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
         child: Container(
-          color: Colors.black.withValues(alpha: 0.4),
+          color: Colors.black.withValues(alpha: 0.5),
           child: SafeArea(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // Square camera preview with progress ring
+                // Square camera preview
                 Center(
-                  child: SizedBox(
-                    width: previewSize + 8,
-                    height: previewSize + 8,
+                  child: Container(
+                    width: squareSize + 6,
+                    height: squareSize + 6,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: _isRecording ? Colors.red : Colors.white24,
+                        width: 3,
+                      ),
+                    ),
                     child: Stack(
-                      alignment: Alignment.center,
                       children: [
-                        // Progress ring (visible during recording)
-                        if (_isRecording)
-                          SizedBox(
-                            width: previewSize + 8,
-                            height: previewSize + 8,
-                            child: CircularProgressIndicator(
-                              value: progress,
-                              strokeWidth: 3,
-                              color: Colors.red,
-                              backgroundColor: Colors.white24,
-                            ),
-                          ),
+                        // Square preview
                         ClipRRect(
-                          borderRadius: BorderRadius.circular(16),
+                          borderRadius: BorderRadius.circular(17),
                           child: SizedBox(
-                            width: previewSize,
-                            height: previewSize,
-                            child: _buildPreview(previewSize),
+                            width: squareSize,
+                            height: squareSize,
+                            child: _buildPreview(squareSize),
                           ),
                         ),
+                        // Progress bar at top
+                        if (_isRecording)
+                          Positioned(
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            child: ClipRRect(
+                              borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(17)),
+                              child: LinearProgressIndicator(
+                                value: progress,
+                                minHeight: 3,
+                                color: Colors.red,
+                                backgroundColor: Colors.white24,
+                              ),
+                            ),
+                          ),
+                        // Camera switch button (top right)
+                        if (_cameras.length > 1 && !_isRecording)
+                          Positioned(
+                            top: 10,
+                            right: 10,
+                            child: GestureDetector(
+                              onTap: _switchCamera,
+                              child: Container(
+                                width: 40,
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  color: Colors.black54,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                      color: Colors.white24, width: 1),
+                                ),
+                                child: AnimatedRotation(
+                                  turns: _isSwitching ? 0.5 : 0,
+                                  duration: const Duration(milliseconds: 300),
+                                  child: const Icon(
+                                    Icons.flip_camera_ios_rounded,
+                                    color: Colors.white,
+                                    size: 20,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        // Recording timer overlay (bottom left)
+                        if (_isRecording)
+                          Positioned(
+                            bottom: 10,
+                            left: 12,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  AnimatedBuilder(
+                                    animation: _pulseController,
+                                    builder: (_, __) => Container(
+                                      width: 7,
+                                      height: 7,
+                                      decoration: BoxDecoration(
+                                        color: Colors.red.withValues(
+                                            alpha: 0.5 +
+                                                _pulseController.value * 0.5),
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    '0:${secs.toString().padLeft(2, '0')}.$tenths',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500,
+                                      fontFeatures: [
+                                        FontFeature.tabularFigures()
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                       ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 20),
-                // Timer
-                AnimatedOpacity(
-                  opacity: _isRecording ? 1.0 : 0.0,
-                  duration: const Duration(milliseconds: 200),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: const BoxDecoration(
-                          color: Colors.red,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        '$secs.${tenths}s / ${_maxDuration.toInt()}s',
-                        style:
-                            const TextStyle(color: Colors.white70, fontSize: 14),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 24),
                 // Controls
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     // Close
-                    _CircleIconButton(
-                      onTap:
-                          _isRecording ? null : () => Navigator.pop(context),
-                      icon: Icons.close,
-                      size: 52,
-                      bgColor: Colors.grey.shade800,
+                    GestureDetector(
+                      onTap: _isRecording ? null : () => Navigator.pop(context),
+                      child: Container(
+                        width: 52,
+                        height: 52,
+                        decoration: BoxDecoration(
+                          color: _isRecording
+                              ? Colors.grey.shade800.withValues(alpha: 0.3)
+                              : Colors.grey.shade800,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.close_rounded,
+                          color:
+                              _isRecording ? Colors.grey.shade700 : Colors.white,
+                          size: 24,
+                        ),
+                      ),
                     ),
-                    const SizedBox(width: 28),
-                    // Record button (hold or tap)
+                    const SizedBox(width: 32),
+                    // Record button
                     GestureDetector(
                       onTapDown: (_) => _startRecording(),
                       onTapUp: (_) {
                         if (_isRecording) _stopAndSend();
                       },
-                      onLongPressStart: (_) => _startRecording(),
-                      onLongPressEnd: (_) => _stopAndSend(),
+                      onTapCancel: () {
+                        if (_isRecording) _stopAndSend();
+                      },
                       child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        width: 72,
-                        height: 72,
+                        duration: const Duration(milliseconds: 200),
+                        width: _isRecording ? 80 : 72,
+                        height: _isRecording ? 80 : 72,
                         decoration: BoxDecoration(
-                          color: _isRecording
-                              ? Colors.red
-                              : const Color(0xFF1DB954),
                           shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 3),
+                          border: Border.all(
+                            color: _isRecording ? Colors.red : Colors.white,
+                            width: _isRecording ? 4 : 3,
+                          ),
                         ),
-                        child: Icon(
-                          _isRecording ? Icons.stop_rounded : Icons.videocam,
-                          color: Colors.white,
-                          size: 32,
+                        child: Center(
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            width: _isRecording ? 32 : 58,
+                            height: _isRecording ? 32 : 58,
+                            decoration: BoxDecoration(
+                              color: _isRecording
+                                  ? Colors.red
+                                  : const Color(0xFF1DB954),
+                              borderRadius:
+                                  BorderRadius.circular(_isRecording ? 8 : 29),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                    const SizedBox(width: 28),
-                    // Switch camera
-                    _CircleIconButton(
-                      onTap: _cameras.length > 1 && !_isRecording
-                          ? _switchCamera
-                          : null,
-                      icon: Icons.flip_camera_ios_outlined,
-                      size: 52,
-                      bgColor: Colors.grey.shade800,
-                    ),
+                    const SizedBox(width: 32),
+                    // Spacer
+                    const SizedBox(width: 52, height: 52),
                   ],
                 ),
-                const SizedBox(height: 12),
-                Text(
-                  _isRecording
-                      ? 'Отпустите для отправки'
-                      : 'Удерживайте кнопку для записи',
-                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                const SizedBox(height: 14),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 200),
+                  child: Text(
+                    _isRecording
+                        ? 'Нажмите для остановки'
+                        : 'Нажмите для записи',
+                    key: ValueKey(_isRecording),
+                    style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                  ),
                 ),
               ],
             ),
@@ -308,23 +407,34 @@ class _VideoOverlayState extends State<_VideoOverlay> {
 
   Widget _buildPreview(double size) {
     if (_isInitializing) {
-      return const ColoredBox(
-        color: Color(0xFF1A1A1A),
-        child: Center(
-          child: CircularProgressIndicator(color: Color(0xFF1DB954)),
+      return Container(
+        color: const Color(0xFF111111),
+        child: const Center(
+          child: CircularProgressIndicator(
+            color: Color(0xFF1DB954),
+            strokeWidth: 2,
+          ),
         ),
       );
     }
     if (_initError != null) {
-      return ColoredBox(
-        color: const Color(0xFF1A1A1A),
+      return Container(
+        color: const Color(0xFF111111),
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              _initError!,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.videocam_off_rounded,
+                    color: Colors.white38, size: 36),
+                const SizedBox(height: 12),
+                Text(
+                  _initError!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                ),
+              ],
             ),
           ),
         ),
@@ -332,15 +442,17 @@ class _VideoOverlayState extends State<_VideoOverlay> {
     }
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) {
-      return const ColoredBox(color: Color(0xFF1A1A1A));
+      return Container(color: const Color(0xFF111111));
     }
+    // Fill the square — scale camera preview to cover the entire square area
     final previewAspect = ctrl.value.aspectRatio;
-    return FittedBox(
-      fit: BoxFit.cover,
-      child: SizedBox(
-        width: previewAspect > 1 ? size * previewAspect : size,
-        height: previewAspect > 1 ? size : size / previewAspect,
-        child: CameraPreview(ctrl),
+    return Transform.scale(
+      scale: previewAspect > 1 ? previewAspect : 1.0 / previewAspect,
+      child: Center(
+        child: AspectRatio(
+          aspectRatio: previewAspect,
+          child: CameraPreview(ctrl),
+        ),
       ),
     );
   }
@@ -352,44 +464,9 @@ class SquareVideoRecorderScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Redirect: use the overlay function instead
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Navigator.pop(context);
     });
     return const SizedBox.shrink();
-  }
-}
-
-class _CircleIconButton extends StatelessWidget {
-  final VoidCallback? onTap;
-  final IconData icon;
-  final double size;
-  final Color bgColor;
-
-  const _CircleIconButton({
-    required this.onTap,
-    required this.icon,
-    required this.size,
-    required this.bgColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: onTap == null ? bgColor.withValues(alpha: 0.4) : bgColor,
-          shape: BoxShape.circle,
-        ),
-        child: Icon(
-          icon,
-          color: onTap == null ? Colors.grey : Colors.white,
-          size: size * 0.45,
-        ),
-      ),
-    );
   }
 }

@@ -22,6 +22,7 @@ import 'services/image_service.dart';
 import 'services/name_filter.dart';
 import 'services/profile_service.dart';
 import 'services/story_service.dart';
+import 'services/relay_service.dart';
 import 'services/update_service.dart';
 import 'services/wifi_direct_service.dart';
 import 'ui/screens/chat_list_screen.dart';
@@ -289,6 +290,10 @@ Future<void> initServices() async {
         if (WifiDirectService.instance.isRunning) {
           unawaited(WifiDirectService.instance.sendToAll(packet.encode()));
         }
+        // Also forward through relay (internet)
+        if (RelayService.instance.isConnected) {
+          unawaited(RelayService.instance.broadcastPacket(packet));
+        }
       },
       onEdit: (fromId, messageId, newText) async {
         await ChatStorageService.instance.editMessage(messageId, newText);
@@ -352,14 +357,25 @@ Future<void> initServices() async {
         BleService.instance.addPairRequest(bleId, info);
         // Бумшшшш! + открываем полноэкранный баннер
         boomVibration();
-        // Use WidgetsBinding to ensure we're on next frame
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          final nav = navigatorKey.currentState;
-          final ctx = nav?.context;
-          if (ctx != null) {
-            showPairRequestScreen(ctx, bleId, info);
-          }
-        });
+        // Retry mechanism — Navigator context may be null during transitions
+        void tryShowScreen(int attempt) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            final ctx = navigatorKey.currentContext;
+            if (ctx != null) {
+              try {
+                showPairRequestScreen(ctx, bleId, info);
+              } catch (e) {
+                debugPrint('[Main] showPairRequestScreen error: $e');
+              }
+            } else if (attempt < 5) {
+              debugPrint('[Main] Navigator ctx null, retry ${attempt + 1}/5');
+              Future.delayed(const Duration(milliseconds: 300), () => tryShowScreen(attempt + 1));
+            } else {
+              debugPrint('[Main] Could not show pair screen after 5 retries');
+            }
+          });
+        }
+        tryShowScreen(0);
       },
       onPairAcc: (bleId, publicKey, nick, color, emoji, x25519Key) async {
         debugPrint('[Main] Pair accepted by $nick ($bleId)');
@@ -723,6 +739,11 @@ Future<void> initServices() async {
       unawaited(WifiDirectService.instance.start(
         userName: myProfile?.nickname ?? 'Rlink',
       ));
+    }
+
+    // Start relay (internet) transport
+    if (AppSettings.instance.relayEnabled) {
+      unawaited(RelayService.instance.connect());
     }
 
     // Start Dynamic Island Live Activity on iOS

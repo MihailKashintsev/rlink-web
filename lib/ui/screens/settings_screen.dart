@@ -13,7 +13,9 @@ import '../../l10n/app_l10n.dart';
 import '../../models/contact.dart';
 import '../../services/app_settings.dart';
 import '../../services/ble_service.dart';
+import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/group_service.dart';
 import '../../services/profile_service.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/chat_screen.dart';
@@ -555,6 +557,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (_) {}
     BleService.instance.clearMappings();
     await ChatStorageService.instance.resetAll();
+    await ChannelService.instance.resetAll();
+    await GroupService.instance.resetAll();
     const storage = FlutterSecureStorage(
       aOptions: AndroidOptions(encryptedSharedPreferences: true),
       iOptions: IOSOptions(

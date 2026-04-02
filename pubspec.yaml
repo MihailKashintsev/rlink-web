@@ -1,6 +1,6 @@
 name: rlink
 description: Rlink — Bluetooth mesh messenger
-version: 0.0.1+1
+version: 0.0.2+2
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -86,6 +86,12 @@ dependencies:
 
   # File / document picker
   file_picker: ^8.1.2
+
+  # Video compression (native codec, no FFmpeg)
+  video_compress: ^3.1.4
+
+  # WebSocket for relay server
+  web_socket_channel: ^3.0.1
 
 dev_dependencies:
   flutter_test:
