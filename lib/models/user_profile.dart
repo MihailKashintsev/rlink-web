@@ -8,6 +8,8 @@ class UserProfile {
   final int avatarColor;
   final String avatarEmoji;
   final String? avatarImagePath; // локальный путь к фото аватара
+  final List<String> tags;       // теги профиля (интересы)
+  final String? bannerImagePath; // баннер профиля
 
   const UserProfile({
     required this.publicKeyHex,
@@ -15,6 +17,8 @@ class UserProfile {
     required this.avatarColor,
     required this.avatarEmoji,
     this.avatarImagePath,
+    this.tags = const [],
+    this.bannerImagePath,
   });
 
   String get initials {
@@ -32,6 +36,8 @@ class UserProfile {
         'color': avatarColor,
         'emoji': avatarEmoji,
         if (avatarImagePath != null) 'imgPath': avatarImagePath,
+        if (tags.isNotEmpty) 'tags': tags,
+        if (bannerImagePath != null) 'bannerPath': bannerImagePath,
       };
 
   factory UserProfile.fromJson(Map<String, dynamic> j) => UserProfile(
@@ -39,9 +45,11 @@ class UserProfile {
         nickname: j['nick'] as String,
         avatarColor: j['color'] as int,
         avatarEmoji: j['emoji'] as String,
-        // Resolve potentially stale iOS sandbox path
         avatarImagePath: ImageService.instance.resolveStoredPath(
             j['imgPath'] as String?),
+        tags: (j['tags'] as List<dynamic>?)?.cast<String>() ?? const [],
+        bannerImagePath: ImageService.instance.resolveStoredPath(
+            j['bannerPath'] as String?),
       );
 
   String encode() => jsonEncode(toJson());

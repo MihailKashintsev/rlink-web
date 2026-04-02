@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -15,9 +17,12 @@ class ProfileScreen extends StatefulWidget {
 
 class _ProfileScreenState extends State<ProfileScreen> {
   late TextEditingController _controller;
+  late TextEditingController _tagController;
   late int _selectedColor;
   late String _selectedEmoji;
-  String? _selectedImagePath; // null = без изменений
+  String? _selectedImagePath;
+  String? _bannerImagePath;
+  late List<String> _tags;
   bool _editing = false;
   bool _saving = false;
   bool _showEmojiPicker = false;
@@ -29,9 +34,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.initState();
     final p = ProfileService.instance.profile!;
     _controller = TextEditingController(text: p.nickname);
+    _tagController = TextEditingController();
     _selectedColor = p.avatarColor;
     _selectedEmoji = p.avatarEmoji;
     _selectedImagePath = p.avatarImagePath;
+    _bannerImagePath = p.bannerImagePath;
+    _tags = List<String>.from(p.tags);
   }
 
   Future<void> _pickImage() async {
@@ -44,9 +52,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() => _selectedImagePath = path);
   }
 
+  Future<void> _pickBanner() async {
+    final picked = await _picker.pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
+    final path = await ImageService.instance.compressAndSave(
+      picked.path,
+      maxSize: 1200,
+    );
+    setState(() => _bannerImagePath = path);
+  }
+
+  void _addTag() {
+    final tag = _tagController.text.trim();
+    if (tag.isEmpty || _tags.length >= 5 || _tags.contains(tag)) return;
+    setState(() {
+      _tags.add(tag);
+      _tagController.clear();
+    });
+  }
+
   @override
   void dispose() {
     _controller.dispose();
+    _tagController.dispose();
     super.dispose();
   }
 
@@ -58,6 +86,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
         avatarColor: _selectedColor,
         avatarEmoji: _selectedEmoji,
         avatarImagePath: _selectedImagePath,
+        tags: _tags,
+        bannerImagePath: _bannerImagePath,
       );
       setState(() {
         _editing = false;
@@ -96,6 +126,56 @@ class _ProfileScreenState extends State<ProfileScreen> {
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(children: [
+          // Баннер
+          GestureDetector(
+            onTap: _editing ? _pickBanner : null,
+            child: Container(
+              width: double.infinity,
+              height: 120,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                color: const Color(0xFF1A1A1A),
+                image: _bannerImagePath != null && File(_bannerImagePath!).existsSync()
+                    ? DecorationImage(
+                        image: FileImage(File(_bannerImagePath!)),
+                        fit: BoxFit.cover,
+                      )
+                    : null,
+              ),
+              child: _bannerImagePath == null || !File(_bannerImagePath!).existsSync()
+                  ? Center(
+                      child: _editing
+                          ? Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.add_photo_alternate_outlined,
+                                    color: Colors.grey.shade600, size: 32),
+                                const SizedBox(height: 4),
+                                Text('Добавить баннер',
+                                    style: TextStyle(
+                                        color: Colors.grey.shade600, fontSize: 12)),
+                              ],
+                            )
+                          : Icon(Icons.panorama_outlined,
+                              color: Colors.grey.shade700, size: 40),
+                    )
+                  : _editing
+                      ? Align(
+                          alignment: Alignment.topRight,
+                          child: Padding(
+                            padding: const EdgeInsets.all(8),
+                            child: CircleAvatar(
+                              radius: 14,
+                              backgroundColor: Colors.black54,
+                              child: Icon(Icons.edit, size: 14, color: Colors.white),
+                            ),
+                          ),
+                        )
+                      : null,
+            ),
+          ),
+          const SizedBox(height: 16),
+
           // Аватар
           Center(
             child: Stack(children: [
@@ -207,7 +287,82 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 )
               : _InfoTile(label: 'Имя', value: profile.nickname),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
+
+          // Краткий код
+          _InfoTile(
+            label: 'Краткий код',
+            value: '#${profile.shortId}',
+            monospace: true,
+            onCopy: () {
+              Clipboard.setData(ClipboardData(text: profile.shortId));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Краткий код скопирован!')),
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+
+          // Теги
+          if (_editing) ...[
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: _tagController,
+                  decoration: InputDecoration(
+                    labelText: 'Добавить тег (макс. 5)',
+                    hintText: 'Например: музыка',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: _addTag,
+                    ),
+                  ),
+                  onSubmitted: (_) => _addTag(),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 8),
+          ],
+          if (_tags.isNotEmpty || !_editing)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E1E),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Теги',
+                      style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+                  const SizedBox(height: 8),
+                  _tags.isEmpty
+                      ? Text('Нет тегов',
+                          style: TextStyle(color: Colors.grey.shade600, fontSize: 13))
+                      : Wrap(
+                          spacing: 8,
+                          runSpacing: 6,
+                          children: _tags.map((tag) {
+                            return Chip(
+                              label: Text(tag, style: const TextStyle(fontSize: 12)),
+                              deleteIcon: _editing
+                                  ? const Icon(Icons.close, size: 16)
+                                  : null,
+                              onDeleted: _editing
+                                  ? () => setState(() => _tags.remove(tag))
+                                  : null,
+                              materialTapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                              visualDensity: VisualDensity.compact,
+                            );
+                          }).toList(),
+                        ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 12),
 
           _InfoTile(
             label: 'Публичный ключ (ID)',

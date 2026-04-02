@@ -79,6 +79,8 @@ class ProfileService {
     int? avatarColor,
     String? avatarEmoji,
     String? avatarImagePath,
+    List<String>? tags,
+    String? bannerImagePath,
   }) async {
     if (_profile == null) throw StateError('No profile');
     final updated = UserProfile(
@@ -87,6 +89,8 @@ class ProfileService {
       avatarColor: avatarColor ?? _profile!.avatarColor,
       avatarEmoji: avatarEmoji ?? _profile!.avatarEmoji,
       avatarImagePath: avatarImagePath ?? _profile!.avatarImagePath,
+      tags: tags ?? _profile!.tags,
+      bannerImagePath: bannerImagePath ?? _profile!.bannerImagePath,
     );
     await _write(updated.encode());
     _profile = updated;

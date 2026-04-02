@@ -319,6 +319,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onTap: () => _showSearchById(context),
           ),
 
+          // ── Сеть ──────────────────────────────────────────────
+          const _SectionHeader('Сеть'),
+          SwitchListTile(
+            secondary: Icon(Icons.cell_tower,
+                color: settings.relayEnabled ? cs.primary : Theme.of(context).hintColor),
+            title: const Text('Интернет-ретранслятор'),
+            subtitle: Text(
+              settings.relayEnabled ? 'Сообщения идут через BLE + интернет' : 'Только BLE mesh',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
+            value: settings.relayEnabled,
+            onChanged: (v) => settings.setRelayEnabled(v),
+          ),
+          if (settings.relayEnabled)
+            ListTile(
+              leading: Icon(Icons.dns_outlined, color: cs.primary),
+              title: const Text('Сервер ретрансляции'),
+              subtitle: Text(
+                settings.relayServerUrl.isEmpty
+                    ? 'По умолчанию (rlink-relay.onrender.com)'
+                    : settings.relayServerUrl,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+              trailing: const Icon(Icons.edit, size: 18),
+              onTap: () => _showRelayServerDialog(context, settings),
+            ),
+
           // ── Данные ─────────────────────────────────────────────
           _SectionHeader(AppL10n.t('settings_data')),
           ListTile(
@@ -408,11 +435,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           Center(
             child: Text(
-              'Rlink v0.0.1 • BLE mesh messenger',
+              'Rlink v0.0.2 • BLE mesh messenger',
               style: TextStyle(color: Theme.of(context).hintColor, fontSize: 12),
             ),
           ),
           const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+
+  void _showRelayServerDialog(BuildContext context, AppSettings settings) {
+    final controller = TextEditingController(text: settings.relayServerUrl);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Сервер ретрансляции'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: 'wss://your-server.com',
+            labelText: 'URL сервера (пусто = по умолчанию)',
+            border: OutlineInputBorder(),
+          ),
+          keyboardType: TextInputType.url,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () {
+              settings.setRelayServerUrl(controller.text.trim());
+              Navigator.pop(ctx);
+            },
+            child: const Text('Сохранить'),
+          ),
         ],
       ),
     );
