@@ -81,6 +81,7 @@ class GroupService {
       avatarEmoji: avatarEmoji,
       createdAt: DateTime.now().millisecondsSinceEpoch,
     );
+    if (_db == null) throw StateError('GroupService DB not initialized');
     await _db!.insert('groups', {
       'id': group.id,
       'name': group.name,

@@ -95,6 +95,7 @@ class ChannelService {
       description: description,
       createdAt: DateTime.now().millisecondsSinceEpoch,
     );
+    if (_db == null) throw StateError('ChannelService DB not initialized');
     await _db!.insert('channels', {
       'id': channel.id,
       'name': channel.name,

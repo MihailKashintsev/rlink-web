@@ -1,63 +1,303 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../models/contact.dart';
 import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/relay_service.dart';
 import '../widgets/avatar_widget.dart';
 import 'chat_screen.dart';
 
-class ContactsScreen extends StatelessWidget {
+class ContactsScreen extends StatefulWidget {
   final String searchQuery;
   const ContactsScreen({super.key, this.searchQuery = ''});
 
   @override
+  State<ContactsScreen> createState() => _ContactsScreenState();
+}
+
+class _ContactsScreenState extends State<ContactsScreen> {
+  Timer? _debounce;
+  String _lastQuery = '';
+
+  @override
+  void didUpdateWidget(ContactsScreen old) {
+    super.didUpdateWidget(old);
+    if (widget.searchQuery != old.searchQuery) {
+      _onQueryChanged(widget.searchQuery);
+    }
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    RelayService.instance.searchResults.value = [];
+    super.dispose();
+  }
+
+  void _onQueryChanged(String query) {
+    _debounce?.cancel();
+    final q = query.trim();
+    if (q.isEmpty || q.length < 2) {
+      RelayService.instance.searchResults.value = [];
+      _lastQuery = '';
+      return;
+    }
+    if (q == _lastQuery) return;
+    _debounce = Timer(const Duration(milliseconds: 500), () {
+      if (RelayService.instance.isConnected) {
+        RelayService.instance.searchUsers(q);
+        _lastQuery = q;
+      }
+    });
+  }
+
+  void _openChat(BuildContext context, String publicKey, String nick,
+      int color, String emoji, String? avatarPath) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChatScreen(
+          peerId: publicKey,
+          peerNickname: nick,
+          peerAvatarColor: color,
+          peerAvatarEmoji: emoji,
+          peerAvatarImagePath: avatarPath,
+        ),
+      ),
+    );
+  }
+
+  void _openDirectByKey(BuildContext context) {
+    final key = widget.searchQuery.trim().toLowerCase();
+    if (key.length < 8) return;
+    // Save as contact stub
+    final nick = '${key.substring(0, 8)}...';
+    ChatStorageService.instance.saveContact(Contact(
+      publicKeyHex: key,
+      nickname: nick,
+      avatarColor: 0xFF607D8B,
+      avatarEmoji: '',
+      addedAt: DateTime.now(),
+    ));
+    _openChat(context, key, nick, 0xFF607D8B, '', null);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final q = widget.searchQuery.toLowerCase().trim();
+
     return ValueListenableBuilder<List<Contact>>(
       valueListenable: ChatStorageService.instance.contactsNotifier,
       builder: (_, contacts, __) {
-        final q = searchQuery.toLowerCase().trim();
-        final visible = q.isEmpty
+        final localVisible = q.isEmpty
             ? contacts
-            : contacts
-                .where((c) => c.nickname.toLowerCase().contains(q))
+            : contacts.where((c) =>
+                c.nickname.toLowerCase().contains(q) ||
+                c.publicKeyHex.toLowerCase().startsWith(q) ||
+                c.shortId.toLowerCase().contains(q)).toList();
+
+        return ValueListenableBuilder<List<RelayPeer>>(
+          valueListenable: RelayService.instance.searchResults,
+          builder: (_, relayResults, __) {
+            // Filter out relay results that are already in local contacts
+            final localKeys = contacts.map((c) => c.publicKeyHex).toSet();
+            final filteredRelay = relayResults
+                .where((r) => !localKeys.contains(r.publicKey))
                 .toList();
 
-        if (contacts.isEmpty) {
-          return Center(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.people_outline, size: 64, color: Colors.grey.shade700),
-              const SizedBox(height: 16),
-              Text('Нет контактов',
-                  style: TextStyle(color: Colors.grey.shade500, fontSize: 16)),
-              const SizedBox(height: 8),
-              Text(
-                  'Найди устройства на вкладке "Рядом"\nи добавь их в контакты',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
-            ]),
-          );
-        }
+            final hasLocal = localVisible.isNotEmpty;
+            final hasRelay = filteredRelay.isNotEmpty && q.isNotEmpty;
+            final showDirectButton = q.length >= 8 && !hasLocal && !hasRelay;
 
-        if (visible.isEmpty) {
-          return Center(
-            child: Text('Ничего не найдено',
-                style: TextStyle(color: Colors.grey.shade500, fontSize: 15)),
-          );
-        }
+            if (contacts.isEmpty && q.isEmpty) {
+              return Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.people_outline,
+                      size: 64, color: Colors.grey.shade700),
+                  const SizedBox(height: 16),
+                  Text('Нет контактов',
+                      style: TextStyle(
+                          color: Colors.grey.shade500, fontSize: 16)),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Используй поиск чтобы найти\nсобеседников в сети',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        color: Colors.grey.shade600, fontSize: 13),
+                  ),
+                ]),
+              );
+            }
 
-        return ListView.separated(
-          itemCount: visible.length,
-          separatorBuilder: (_, __) =>
-              Divider(height: 1, indent: 72, color: Colors.grey.shade800),
-          itemBuilder: (_, i) {
-            final c = visible[i];
-            return _ContactTile(contact: c);
+            return ListView(
+              children: [
+                // ── Local contacts ──
+                if (hasLocal) ...[
+                  if (q.isNotEmpty)
+                    _SectionHeader(
+                      title: 'Мои контакты',
+                      count: localVisible.length,
+                    ),
+                  for (final c in localVisible) _ContactTile(contact: c),
+                ],
+
+                // ── Relay results ──
+                if (hasRelay) ...[
+                  _SectionHeader(
+                    title: 'Найдены в сети',
+                    count: filteredRelay.length,
+                    icon: Icons.wifi,
+                  ),
+                  for (final peer in filteredRelay)
+                    _RelayPeerTile(
+                      peer: peer,
+                      onTap: () {
+                        // Save as contact
+                        final nick = peer.nick.isNotEmpty
+                            ? peer.nick
+                            : peer.shortId;
+                        ChatStorageService.instance.saveContact(Contact(
+                          publicKeyHex: peer.publicKey,
+                          nickname: nick,
+                          avatarColor: 0xFF607D8B,
+                          avatarEmoji: '',
+                          addedAt: DateTime.now(),
+                        ));
+                        _openChat(context, peer.publicKey, nick,
+                            0xFF607D8B, '', null);
+                      },
+                    ),
+                ],
+
+                // ── No results ──
+                if (q.isNotEmpty && !hasLocal && !hasRelay) ...[
+                  const SizedBox(height: 48),
+                  Icon(Icons.person_search_rounded,
+                      color: Colors.grey.shade600, size: 40),
+                  const SizedBox(height: 12),
+                  Center(
+                    child: Text(
+                      RelayService.instance.isConnected
+                          ? 'Никого не найдено'
+                          : 'Relay не подключён — поиск в сети недоступен',
+                      style: TextStyle(
+                          color: Colors.grey.shade500, fontSize: 13),
+                    ),
+                  ),
+                ],
+
+                // ── Direct key button ──
+                if (showDirectButton && q.length >= 16) ...[
+                  const SizedBox(height: 16),
+                  Center(
+                    child: FilledButton.icon(
+                      onPressed: () => _openDirectByKey(context),
+                      icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                      label: const Text('Открыть чат по ключу'),
+                      style: FilledButton.styleFrom(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+
+                const SizedBox(height: 80),
+              ],
+            );
           },
         );
       },
     );
   }
 }
+
+// ── Section Header ──────────────────────────────────────────────
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  final int count;
+  final IconData? icon;
+  const _SectionHeader({required this.title, required this.count, this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      child: Row(
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 14, color: Colors.grey.shade500),
+            const SizedBox(width: 6),
+          ],
+          Text(
+            '$title ($count)',
+            style: TextStyle(
+              color: Colors.grey.shade500,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Relay Peer Tile ─────────────────────────────────────────────
+
+class _RelayPeerTile extends StatelessWidget {
+  final RelayPeer peer;
+  final VoidCallback onTap;
+  const _RelayPeerTile({required this.peer, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return ListTile(
+      leading: CircleAvatar(
+        backgroundColor: cs.primary.withValues(alpha: 0.15),
+        child: Text(
+          peer.nick.isNotEmpty ? peer.nick[0].toUpperCase() : '#',
+          style: TextStyle(
+            color: cs.primary,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      title: Text(
+        peer.nick.isNotEmpty ? peer.nick : peer.shortId,
+        style: const TextStyle(fontWeight: FontWeight.w500),
+      ),
+      subtitle: Text(
+        peer.shortId,
+        style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+      ),
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: const BoxDecoration(
+            color: Color(0xFF4CAF50),
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text('в сети',
+            style:
+                TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+      ]),
+      onTap: onTap,
+    );
+  }
+}
+
+// ── Contact Tile ────────────────────────────────────────────────
 
 class _ContactTile extends StatelessWidget {
   final Contact contact;

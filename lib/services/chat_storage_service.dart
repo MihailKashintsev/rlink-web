@@ -45,7 +45,7 @@ class ChatStorageService {
       path,
       version: 9,
       onCreate: (db, v) async {
-        await db.execute('PRAGMA journal_mode = WAL');
+        try { await db.rawQuery('PRAGMA journal_mode = WAL'); } catch (_) {}
         await db.execute('''
           CREATE TABLE contacts (
             id                TEXT PRIMARY KEY,
@@ -82,7 +82,7 @@ class ChatStorageService {
             'CREATE INDEX idx_messages_peer ON messages(peer_id, timestamp)');
       },
       onOpen: (db) async {
-        await db.execute('PRAGMA journal_mode = WAL');
+        try { await db.rawQuery('PRAGMA journal_mode = WAL'); } catch (_) {}
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
