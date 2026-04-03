@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../services/gossip_router.dart';
+import '../../services/image_service.dart';
 import '../../services/story_service.dart';
 
 /// Screen for creating a story: pick a color/photo and type text.
@@ -51,11 +52,20 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
     final text = _textCtrl.text.trim();
     if (text.isEmpty && _imagePath == null) return;
 
+    // Compress story image if present
+    String? savedImagePath;
+    if (_imagePath != null) {
+      savedImagePath = await ImageService.instance.compressAndSave(
+        _imagePath!,
+        maxSize: 480,
+      );
+    }
+
     final story = StoryItem(
       id: const Uuid().v4(),
       authorId: widget.authorId,
       text: text,
-      imagePath: _imagePath,
+      imagePath: savedImagePath,
       bgColor: _bgColor,
       createdAt: DateTime.now(),
     );
@@ -66,6 +76,30 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       text: story.text,
       bgColor: story.bgColor,
     );
+    // Send story image via img_meta/img_chunk (broadcast)
+    if (savedImagePath != null) {
+      final bytes = await File(savedImagePath).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      // Use story ID as link between story text and its image
+      await GossipRouter.instance.sendImgMeta(
+        msgId: story.id,
+        totalChunks: chunks.length,
+        fromId: widget.authorId,
+        isAvatar: false,
+      );
+      await Future.delayed(const Duration(milliseconds: 100));
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: story.id,
+          index: i,
+          base64Data: chunks[i],
+          fromId: widget.authorId,
+        );
+        if (i % 5 == 4) {
+          await Future.delayed(const Duration(milliseconds: 30));
+        }
+      }
+    }
     if (mounted) Navigator.of(context).pop(story);
   }
 

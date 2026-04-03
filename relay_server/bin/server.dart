@@ -49,10 +49,11 @@ class _User {
   final WebSocketChannel ws;
   final String publicKey;
   String nick;
+  String x25519Key;
   String get shortId => publicKey.length > 8 ? publicKey.substring(0, 8) : publicKey;
   DateTime connectedAt = DateTime.now();
 
-  _User({required this.ws, required this.publicKey, required this.nick});
+  _User({required this.ws, required this.publicKey, required this.nick, this.x25519Key = ''});
 }
 
 // ── Server state ────────────────────────────────────────────────
@@ -78,7 +79,8 @@ bool _checkRate(String publicKey) {
 
 void _handleMessage(_User user, dynamic raw) {
   if (raw is! String) return;
-  if (raw.length > 65536) return; // max 64KB per message
+  // 10 MB limit for blobs (voice/video/files), 64 KB for regular packets
+  if (raw.length > 10 * 1024 * 1024) return;
 
   Map<String, dynamic> msg;
   try {
@@ -90,9 +92,12 @@ void _handleMessage(_User user, dynamic raw) {
   final type = msg['type'] as String?;
   if (type == null) return;
 
-  if (!_checkRate(user.publicKey)) {
-    user.ws.sink.add(jsonEncode({'type': 'error', 'msg': 'rate_limited'}));
-    return;
+  // Blobs bypass rate limiting (they're large single messages)
+  if (type != 'blob') {
+    if (!_checkRate(user.publicKey)) {
+      user.ws.sink.add(jsonEncode({'type': 'error', 'msg': 'rate_limited'}));
+      return;
+    }
   }
 
   switch (type) {
@@ -101,6 +106,9 @@ void _handleMessage(_User user, dynamic raw) {
       break;
     case 'broadcast':
       _handleBroadcast(user, msg);
+      break;
+    case 'blob':
+      _handleBlob(user, msg);
       break;
     case 'search':
       _handleSearch(user, msg);
@@ -129,11 +137,21 @@ void _handlePacket(_User sender, Map<String, dynamic> msg) {
   }
 
   // Forward opaque blob — server NEVER decrypts
-  recipient.ws.sink.add(jsonEncode({
-    'type': 'packet',
-    'from': sender.publicKey,
-    'data': data,
-  }));
+  try {
+    recipient.ws.sink.add(jsonEncode({
+      'type': 'packet',
+      'from': sender.publicKey,
+      'data': data,
+    }));
+    print('[Relay] Packet: ${sender.shortId} → ${recipient.shortId} (${data.length} chars)');
+  } catch (e) {
+    print('[Relay] Packet forward failed: $e');
+    sender.ws.sink.add(jsonEncode({
+      'type': 'delivery_status',
+      'to': to,
+      'status': 'error',
+    }));
+  }
 }
 
 void _handleBroadcast(_User sender, Map<String, dynamic> msg) {
@@ -147,11 +165,48 @@ void _handleBroadcast(_User sender, Map<String, dynamic> msg) {
   });
 
   // Forward to ALL online users except sender
+  var sent = 0;
   for (final user in _users.values) {
     if (user.publicKey == sender.publicKey) continue;
     try {
       user.ws.sink.add(encoded);
+      sent++;
     } catch (_) {}
+  }
+  print('[Relay] Broadcast from ${sender.shortId}: ${data.length} chars → $sent peers');
+}
+
+void _handleBlob(_User sender, Map<String, dynamic> msg) {
+  final to = msg['to'] as String?;
+  if (to == null) return;
+
+  final recipient = _users[to];
+  if (recipient == null) {
+    sender.ws.sink.add(jsonEncode({
+      'type': 'delivery_status',
+      'to': to,
+      'status': 'offline',
+    }));
+    return;
+  }
+
+  // Forward the entire blob as-is, replacing 'to' with 'from'
+  final forwarded = Map<String, dynamic>.from(msg);
+  forwarded.remove('to');
+  forwarded['from'] = sender.publicKey;
+  forwarded['type'] = 'blob';
+
+  try {
+    recipient.ws.sink.add(jsonEncode(forwarded));
+    final dataLen = (msg['data'] as String?)?.length ?? 0;
+    print('[Relay] Blob forwarded: ${sender.publicKey.substring(0, 8)} → ${to.substring(0, 8)} (${dataLen} chars)');
+  } catch (e) {
+    print('[Relay] Blob forward failed: $e');
+    sender.ws.sink.add(jsonEncode({
+      'type': 'delivery_status',
+      'to': to,
+      'status': 'error',
+    }));
   }
 }
 
@@ -172,6 +227,7 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
         'nick': user.nick,
         'shortId': user.shortId,
         'online': true,
+        if (user.x25519Key.isNotEmpty) 'x25519': user.x25519Key,
       });
       if (results.length >= 20) break; // limit results
     }
@@ -181,6 +237,7 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
     'type': 'search_result',
     'results': results,
   }));
+  print('[Relay] Search "$query" by ${requester.publicKey.substring(0, 8)}: ${results.length} results');
 }
 
 // ── WebSocket handler ───────────────────────────────────────────
@@ -203,6 +260,7 @@ shelf.Handler _wsHandler() {
             }
             final publicKey = msg['publicKey'] as String?;
             final nick = msg['nick'] as String? ?? '';
+            final x25519Key = msg['x25519'] as String? ?? '';
             if (publicKey == null ||
                 !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(publicKey)) {
               ws.sink.add(jsonEncode({'type': 'error', 'msg': 'invalid_key'}));
@@ -215,7 +273,7 @@ shelf.Handler _wsHandler() {
               try { prev.ws.sink.close(); } catch (_) {}
             }
 
-            user = _User(ws: ws, publicKey: publicKey, nick: nick);
+            user = _User(ws: ws, publicKey: publicKey, nick: nick, x25519Key: x25519Key);
             _users[publicKey] = user!;
 
             final shortId = publicKey.substring(0, 8);
@@ -253,10 +311,14 @@ shelf.Handler _wsHandler() {
 }
 
 void _broadcastPresence(String publicKey, bool online) {
+  // Include X25519 key when user comes online (for E2E encryption)
+  final sourceUser = _users[publicKey];
+  final x25519Key = sourceUser?.x25519Key ?? '';
   final msg = jsonEncode({
     'type': 'presence',
     'publicKey': publicKey,
     'online': online,
+    if (x25519Key.isNotEmpty) 'x25519': x25519Key,
   });
   for (final user in _users.values) {
     if (user.publicKey == publicKey) continue;

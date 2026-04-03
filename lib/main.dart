@@ -286,14 +286,35 @@ Future<void> initServices() async {
         );
       },
       onForward: (packet) async {
+        // 1. BLE mesh broadcast
         await BleService.instance.broadcastPacket(packet);
-        // Also forward through WiFi Direct (if running)
+        // 2. WiFi Direct (if running)
         if (WifiDirectService.instance.isRunning) {
           unawaited(WifiDirectService.instance.sendToAll(packet.encode()));
         }
-        // Also forward through relay (internet)
-        if (RelayService.instance.isConnected) {
-          unawaited(RelayService.instance.broadcastPacket(packet));
+        // 3. Relay (internet) — prefer directed send for private messages
+        if (RelayService.instance.isConnected &&
+            AppSettings.instance.connectionMode >= 1) {
+          try {
+            // Extract full recipient key from payload context
+            final rid8 = packet.payload['r'] as String?;
+            String? recipientKey;
+            if (rid8 != null) {
+              // Look up full key from known peers
+              recipientKey = RelayService.instance.findPeerByPrefix(rid8);
+            }
+            if (recipientKey != null && recipientKey.isNotEmpty) {
+              // Directed send — reliable, goes straight to recipient
+              await RelayService.instance.sendPacket(packet, recipientKey: recipientKey);
+              debugPrint('[Forward] Relay DIRECTED to ${recipientKey.substring(0, 8)} type=${packet.type}');
+            } else {
+              // Broadcast fallback — goes to all connected peers
+              await RelayService.instance.broadcastPacket(packet);
+              debugPrint('[Forward] Relay BROADCAST type=${packet.type} rid8=$rid8');
+            }
+          } catch (e) {
+            debugPrint('[Forward] Relay send failed: $e');
+          }
         }
       },
       onEdit: (fromId, messageId, newText) async {
@@ -543,6 +564,16 @@ Future<void> initServices() async {
         } else {
           final path = await ImageService.instance.assembleAndSave(msgId);
           if (path == null) return;
+
+          // Check if this image belongs to a story (msgId == storyId)
+          final existingStory = StoryService.instance.findStory(msgId);
+          if (existingStory != null) {
+            existingStory.imagePath = path;
+            StoryService.instance.notifyUpdate();
+            debugPrint('[Main] Story image received for ${msgId.substring(0, 8)}');
+            return;
+          }
+
           await ensureContact();
           final msg = ChatMessage(
             id: msgId,
@@ -786,7 +817,6 @@ Future<void> _updateEtherNameFilter() async {
 Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
   try {
     // Wait for profile packets and BLE stack to settle after pair exchange.
-    // Both sides send profiles simultaneously — give BLE time to drain queues.
     await Future.delayed(const Duration(milliseconds: 1500));
     // Resolve potentially stale iOS sandbox path
     final resolvedPath = ImageService.instance.resolveStoredPath(imagePath);
@@ -797,6 +827,7 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
     final bytes = await File(resolvedPath).readAsBytes();
     final chunks = ImageService.instance.splitToBase64Chunks(bytes);
     final msgId = const Uuid().v4();
+    debugPrint('[Avatar] Starting broadcast: ${chunks.length} chunks, ${bytes.length} bytes');
     await GossipRouter.instance.sendImgMeta(
       msgId: msgId,
       totalChunks: chunks.length,
@@ -804,7 +835,7 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
       isAvatar: true,
     );
     // Small delay after meta to let receiver initialize assembly
-    await Future.delayed(const Duration(milliseconds: 100));
+    await Future.delayed(const Duration(milliseconds: 200));
     for (var i = 0; i < chunks.length; i++) {
       await GossipRouter.instance.sendImgChunk(
         msgId: msgId,
@@ -812,13 +843,11 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
         base64Data: chunks[i],
         fromId: myPublicKey,
       );
-      // Throttle: give BLE stack time between chunks to avoid queue overflow.
-      // 20ms × 120 chunks = ~2.4 sec extra, but prevents dropped notifications.
       if (i % 5 == 4) {
         await Future.delayed(const Duration(milliseconds: 30));
       }
     }
-    debugPrint('[Avatar] Sent ${chunks.length} chunks');
+    debugPrint('[Avatar] Sent ${chunks.length} chunks via BLE+relay');
   } catch (e) {
     debugPrint('[Avatar] Send failed: $e');
   }

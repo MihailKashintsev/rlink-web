@@ -96,6 +96,7 @@ class GroupService {
   }
 
   Future<List<Group>> getGroups() async {
+    if (_db == null) return [];
     final rows = await _db!.query('groups', orderBy: 'created_at DESC');
     return rows
         .map((r) => Group(
@@ -113,6 +114,7 @@ class GroupService {
   }
 
   Future<Group?> getGroup(String id) async {
+    if (_db == null) return null;
     final rows = await _db!.query('groups', where: 'id = ?', whereArgs: [id]);
     if (rows.isEmpty) return null;
     final r = rows.first;

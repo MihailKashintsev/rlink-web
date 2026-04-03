@@ -333,7 +333,7 @@ class ImageService {
     try {
       final mediaInfo = await VideoCompress.compressVideo(
         inputForCompress,
-        quality: VideoQuality.LowQuality,
+        quality: VideoQuality.MediumQuality,
         includeAudio: true,
         deleteOrigin: false,
       );

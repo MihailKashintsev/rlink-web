@@ -112,11 +112,13 @@ class ChannelService {
   }
 
   Future<List<Channel>> getChannels() async {
+    if (_db == null) return [];
     final rows = await _db!.query('channels', orderBy: 'created_at DESC');
     return rows.map(_channelFromRow).toList();
   }
 
   Future<Channel?> getChannel(String id) async {
+    if (_db == null) return null;
     final rows = await _db!.query('channels', where: 'id = ?', whereArgs: [id]);
     if (rows.isEmpty) return null;
     return _channelFromRow(rows.first);

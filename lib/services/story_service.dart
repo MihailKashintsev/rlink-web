@@ -8,7 +8,7 @@ class StoryItem {
   final String id;
   final String authorId; // Ed25519 public key
   final String text;
-  final String? imagePath;
+  String? imagePath;
   final int bgColor;
   final DateTime createdAt;
   bool viewed;
@@ -98,6 +98,20 @@ class StoryService {
     // Keep at most 10 stories per author
     if (list.length > 10) list.removeRange(0, list.length - 10);
     debugPrint('[Stories] Added story from ${story.authorId.substring(0, 16)}, total=${list.length}');
+    version.value++;
+    _save();
+  }
+
+  StoryItem? findStory(String storyId) {
+    for (final list in _stories.values) {
+      for (final s in list) {
+        if (s.id == storyId) return s;
+      }
+    }
+    return null;
+  }
+
+  void notifyUpdate() {
     version.value++;
     _save();
   }

@@ -442,7 +442,17 @@ class _ChatScreenState extends State<ChatScreen> {
       await ChatStorageService.instance.saveMessage(msg);
       _scrollToBottom();
 
-      final x25519Key = BleService.instance.getPeerX25519Key(targetPeerId);
+      // Check X25519 key: BLE service first, then relay service
+      var x25519Key = BleService.instance.getPeerX25519Key(targetPeerId);
+      if (x25519Key == null || x25519Key.isEmpty) {
+        x25519Key = RelayService.instance.getPeerX25519Key(targetPeerId);
+      }
+
+      debugPrint('[Chat] Sending to ${targetPeerId.substring(0, 8)}, '
+          'x25519=${x25519Key != null && x25519Key.isNotEmpty ? "YES" : "NO"}, '
+          'relay=${RelayService.instance.isConnected}, '
+          'mode=${AppSettings.instance.connectionMode}');
+
       if (x25519Key != null && x25519Key.isNotEmpty) {
         // Зашифрованная отправка — ChaCha20-Poly1305 + X25519 ECDH
         final encrypted = await CryptoService.instance.encryptMessage(
@@ -455,8 +465,9 @@ class _ChatScreenState extends State<ChatScreen> {
           recipientId: targetPeerId,
           messageId: msgId,
         );
+        debugPrint('[Chat] Sent ENCRYPTED msg $msgId');
       } else {
-        // Fallback — plaintext если X25519 ключ ещё не получен (обмен профилями в процессе)
+        // Fallback — plaintext если X25519 ключ ещё не получен
         await GossipRouter.instance.sendRawMessage(
           text: text,
           senderId: myId,
@@ -464,6 +475,7 @@ class _ChatScreenState extends State<ChatScreen> {
           messageId: msgId,
           replyToMessageId: _replyToMessageId,
         );
+        debugPrint('[Chat] Sent RAW msg $msgId');
       }
 
       await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
@@ -2202,7 +2214,8 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
       child: SizedBox(
         width: 160,
         height: 160,
-        child: ClipOval(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
           child: Stack(
             children: [
               Positioned.fill(

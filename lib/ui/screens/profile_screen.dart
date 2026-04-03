@@ -4,8 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../services/crypto_service.dart';
+import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
+import '../../main.dart' show broadcastMyAvatar;
 import '../widgets/avatar_widget.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -88,7 +91,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      await ProfileService.instance.updateProfile(
+      final updated = await ProfileService.instance.updateProfile(
         nickname: _controller.text.trim(),
         avatarColor: _selectedColor,
         avatarEmoji: _selectedEmoji,
@@ -100,6 +103,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _editing = false;
         _showEmojiPicker = false;
       });
+      // Broadcast updated profile + avatar to all peers
+      final x25519 = CryptoService.instance.x25519PublicKeyBase64;
+      GossipRouter.instance.broadcastProfile(
+        id: updated.publicKeyHex,
+        nick: updated.nickname,
+        color: updated.avatarColor,
+        emoji: updated.avatarEmoji,
+        x25519Key: x25519,
+      );
+      if (updated.avatarImagePath != null) {
+        broadcastMyAvatar();
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -141,7 +156,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               height: 120,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(16),
-                color: const Color(0xFF1A1A1A),
+                color: Theme.of(context).colorScheme.surfaceContainerHigh,
                 image: _bannerImagePath != null && File(_bannerImagePath!).existsSync()
                     ? DecorationImage(
                         image: FileImage(File(_bannerImagePath!)),
@@ -156,15 +171,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(Icons.add_photo_alternate_outlined,
-                                    color: Colors.grey.shade600, size: 32),
+                                    color: Theme.of(context).hintColor, size: 32),
                                 const SizedBox(height: 4),
                                 Text('Добавить баннер',
                                     style: TextStyle(
-                                        color: Colors.grey.shade600, fontSize: 12)),
+                                        color: Theme.of(context).hintColor, fontSize: 12)),
                               ],
                             )
                           : Icon(Icons.panorama_outlined,
-                              color: Colors.grey.shade700, size: 40),
+                              color: Theme.of(context).hintColor, size: 40),
                     )
                   : _editing
                       ? Align(
@@ -216,7 +231,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         color: const Color(0xFF1DB954),
                         shape: BoxShape.circle,
                         border: Border.all(
-                            color: const Color(0xFF0A0A0A), width: 2),
+                            color: Theme.of(context).scaffoldBackgroundColor, width: 2),
                       ),
                       child:
                           const Icon(Icons.edit, size: 14, color: Colors.white),
@@ -233,10 +248,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       width: 28,
                       height: 28,
                       decoration: BoxDecoration(
-                        color: Colors.grey.shade800,
+                        color: Theme.of(context).colorScheme.surfaceContainerHighest,
                         shape: BoxShape.circle,
                         border: Border.all(
-                            color: const Color(0xFF0A0A0A), width: 2),
+                            color: Theme.of(context).scaffoldBackgroundColor, width: 2),
                       ),
                       child: const Icon(Icons.photo_camera,
                           size: 14, color: Colors.white),
@@ -258,7 +273,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       padding: const EdgeInsets.all(12),
                       margin: const EdgeInsets.only(bottom: 16),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1A1A1A),
+                        color: Theme.of(context).colorScheme.surfaceContainerHigh,
                         borderRadius: BorderRadius.circular(14),
                       ),
                       child: AvatarEmojiPicker(
@@ -287,7 +302,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     labelText: 'Имя',
                     border: const OutlineInputBorder(),
                     counterStyle:
-                        TextStyle(color: Colors.grey.shade600, fontSize: 11),
+                        TextStyle(color: Theme.of(context).hintColor, fontSize: 11),
                   ),
                   textCapitalization: TextCapitalization.words,
                   onChanged: (_) => setState(() {}),
@@ -369,7 +384,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 }),
                 if (_tags.isEmpty && !_editing)
                   Text('Нет тегов',
-                      style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
+                      style: TextStyle(color: Theme.of(context).hintColor, fontSize: 13)),
               ],
             ),
           const SizedBox(height: 12),
@@ -406,7 +421,7 @@ class _InfoTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1E1E1E),
+        color: Theme.of(context).colorScheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(children: [
@@ -414,7 +429,7 @@ class _InfoTile extends StatelessWidget {
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(label,
-                style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+                style: TextStyle(color: Theme.of(context).hintColor, fontSize: 12)),
             const SizedBox(height: 4),
             Text(value,
                 style: TextStyle(

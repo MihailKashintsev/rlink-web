@@ -117,6 +117,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
       controller.dispose();
       return;
     }
+    // Dispose any existing controller (for initial setup; _switchCamera pre-disposes)
     final old = _controller;
     setState(() {
       _controller = controller;
@@ -124,7 +125,9 @@ class _VideoOverlayState extends State<_VideoOverlay>
       _isInitializing = false;
       _isSwitching = false;
     });
-    old?.dispose();
+    if (old != null && old != controller) {
+      try { await old.dispose(); } catch (_) {}
+    }
   }
 
   Future<void> _switchCamera() async {
@@ -132,6 +135,10 @@ class _VideoOverlayState extends State<_VideoOverlay>
     setState(() => _isSwitching = true);
     final next = (_selectedCamera + 1) % _cameras.length;
     try {
+      // Dispose old controller first — two controllers can't share the camera
+      final old = _controller;
+      _controller = null;
+      await old?.dispose();
       await _setupController(next);
     } catch (e) {
       debugPrint('[SquareVideo] switchCamera error: $e');

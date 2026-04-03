@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -580,77 +581,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _showSearchById(BuildContext context) {
-    final ctrl = TextEditingController();
-    showDialog(
+    showModalBottomSheet(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(AppL10n.t('settings_search_by_id')),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Введи публичный ключ собеседника (hex). '
-              'Его можно найти в Профиле → Публичный ключ.',
-              style: TextStyle(color: Theme.of(context).hintColor, fontSize: 13),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: ctrl,
-              autofocus: true,
-              maxLines: 3,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-              decoration: InputDecoration(
-                hintText: '1e326bb1a4f2...',
-                hintStyle: TextStyle(color: Theme.of(context).hintColor),
-                border: const OutlineInputBorder(),
-                contentPadding: const EdgeInsets.all(12),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _PeerSearchSheet(
+        onOpenChat: (publicKey, nickname, color, emoji) async {
+          Navigator.pop(ctx);
+          final contact = await ChatStorageService.instance.getContact(publicKey);
+          final finalNick = contact?.nickname ?? nickname;
+          final finalColor = contact?.avatarColor ?? color;
+          final finalEmoji = contact?.avatarEmoji ?? emoji;
+          final imagePath = contact?.avatarImagePath;
+          if (contact == null) {
+            await ChatStorageService.instance.saveContact(Contact(
+              publicKeyHex: publicKey,
+              nickname: finalNick,
+              avatarColor: finalColor,
+              avatarEmoji: finalEmoji,
+              addedAt: DateTime.now(),
+            ));
+          }
+          if (context.mounted) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ChatScreen(
+                  peerId: publicKey,
+                  peerNickname: finalNick,
+                  peerAvatarColor: finalColor,
+                  peerAvatarEmoji: finalEmoji,
+                  peerAvatarImagePath: imagePath,
+                ),
               ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text(AppL10n.t('cancel')),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final id = ctrl.text.trim().toLowerCase();
-              if (id.length < 8) return;
-              Navigator.pop(ctx);
-              final contact = await ChatStorageService.instance.getContact(id);
-              final nickname = contact?.nickname ?? '${id.substring(0, 8)}...';
-              final color = contact?.avatarColor ?? 0xFF607D8B;
-              final emoji = contact?.avatarEmoji ?? '';
-              final imagePath = contact?.avatarImagePath;
-              if (contact == null) {
-                await ChatStorageService.instance.saveContact(Contact(
-                  publicKeyHex: id,
-                  nickname: nickname,
-                  avatarColor: color,
-                  avatarEmoji: emoji,
-                  addedAt: DateTime.now(),
-                ));
-              }
-              if (context.mounted) {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ChatScreen(
-                      peerId: id,
-                      peerNickname: nickname,
-                      peerAvatarColor: color,
-                      peerAvatarEmoji: emoji,
-                      peerAvatarImagePath: imagePath,
-                    ),
-                  ),
-                );
-              }
-            },
-            child: const Text('Открыть чат'),
-          ),
-        ],
+            );
+          }
+        },
       ),
     );
   }
@@ -983,17 +951,21 @@ class _PermissionsSectionState extends State<_PermissionsSection> {
   final Map<Permission, PermissionStatus> _statuses = {};
   bool _loading = true;
 
-  static const _permissions = <(Permission, String, IconData)>[
-    (Permission.bluetooth, 'Bluetooth', Icons.bluetooth),
-    (Permission.bluetoothScan, 'Bluetooth сканирование', Icons.bluetooth_searching),
-    (Permission.bluetoothConnect, 'Bluetooth подключение', Icons.bluetooth_connected),
-    (Permission.bluetoothAdvertise, 'Bluetooth реклама', Icons.settings_bluetooth),
-    (Permission.location, 'Геолокация', Icons.location_on_outlined),
+  static List<(Permission, String, IconData)> get _permissions => [
+    if (Platform.isAndroid) ...[
+      (Permission.bluetoothScan, 'Bluetooth сканирование', Icons.bluetooth_searching),
+      (Permission.bluetoothConnect, 'Bluetooth подключение', Icons.bluetooth_connected),
+      (Permission.bluetoothAdvertise, 'Bluetooth реклама', Icons.settings_bluetooth),
+    ],
+    if (Platform.isIOS)
+      (Permission.bluetooth, 'Bluetooth', Icons.bluetooth),
+    (Permission.locationWhenInUse, 'Геолокация', Icons.location_on_outlined),
     (Permission.microphone, 'Микрофон', Icons.mic_outlined),
     (Permission.camera, 'Камера', Icons.camera_alt_outlined),
     (Permission.notification, 'Уведомления', Icons.notifications_outlined),
     (Permission.photos, 'Фото', Icons.photo_library_outlined),
-    (Permission.storage, 'Хранилище', Icons.folder_outlined),
+    if (Platform.isAndroid)
+      (Permission.nearbyWifiDevices, 'Wi-Fi устройства', Icons.wifi),
   ];
 
   @override
@@ -1068,6 +1040,286 @@ class _PermissionsSectionState extends State<_PermissionsSection> {
       ));
     }
 
-    return Column(children: items);
+    return Column(children: [
+      ...items,
+      const SizedBox(height: 8),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: () {
+                setState(() => _loading = true);
+                _loadStatuses();
+              },
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('Проверить разрешения'),
+              style: OutlinedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: () => openAppSettings(),
+              icon: const Icon(Icons.settings_outlined, size: 18),
+              label: const Text('Настройки ОС'),
+              style: OutlinedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+        ]),
+      ),
+      const SizedBox(height: 8),
+    ]);
+  }
+}
+
+// ── Поиск собеседника (relay + прямой ключ) ─────────────────────
+
+class _PeerSearchSheet extends StatefulWidget {
+  final void Function(String publicKey, String nickname, int color, String emoji) onOpenChat;
+
+  const _PeerSearchSheet({required this.onOpenChat});
+
+  @override
+  State<_PeerSearchSheet> createState() => _PeerSearchSheetState();
+}
+
+class _PeerSearchSheetState extends State<_PeerSearchSheet> {
+  final _ctrl = TextEditingController();
+  bool _searching = false;
+  Timer? _debounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl.addListener(_onTextChanged);
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _ctrl.dispose();
+    // Clear search results on close
+    RelayService.instance.searchResults.value = [];
+    super.dispose();
+  }
+
+  void _onTextChanged() {
+    _debounce?.cancel();
+    final q = _ctrl.text.trim();
+    if (q.isEmpty) {
+      RelayService.instance.searchResults.value = [];
+      setState(() => _searching = false);
+      return;
+    }
+    setState(() => _searching = true);
+    _debounce = Timer(const Duration(milliseconds: 400), () {
+      RelayService.instance.searchUsers(q);
+      // Give server time to respond
+      Future.delayed(const Duration(milliseconds: 800), () {
+        if (mounted) setState(() => _searching = false);
+      });
+    });
+  }
+
+  void _openDirect() {
+    final id = _ctrl.text.trim().toLowerCase();
+    if (id.length < 8) return;
+    widget.onOpenChat(id, '${id.substring(0, 8)}...', 0xFF607D8B, '');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final relayConnected = RelayService.instance.isConnected;
+
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: Theme.of(context).dividerColor,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text('Найти собеседника',
+                style: Theme.of(context).textTheme.titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
+            Text(
+              relayConnected
+                  ? 'Поиск по никнейму, короткому коду или ключу'
+                  : 'Введи полный публичный ключ (relay не подключён)',
+              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+            ),
+            const SizedBox(height: 12),
+            // Search field
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: TextField(
+                controller: _ctrl,
+                autofocus: true,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: 'Никнейм, код или ключ...',
+                  hintStyle: TextStyle(
+                    color: Theme.of(context).hintColor,
+                    fontFamily: 'sans-serif',
+                  ),
+                  prefixIcon: const Icon(Icons.search, size: 20),
+                  suffixIcon: _ctrl.text.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.clear, size: 18),
+                          onPressed: () {
+                            _ctrl.clear();
+                            RelayService.instance.searchResults.value = [];
+                          },
+                        )
+                      : null,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            // Results
+            ValueListenableBuilder<List<RelayPeer>>(
+              valueListenable: RelayService.instance.searchResults,
+              builder: (_, results, __) {
+                if (_searching) {
+                  return const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: SizedBox(
+                      width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  );
+                }
+                if (results.isEmpty && _ctrl.text.trim().isNotEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        Icon(Icons.person_search_rounded,
+                            color: Theme.of(context).hintColor, size: 36),
+                        const SizedBox(height: 8),
+                        Text(
+                          relayConnected
+                              ? 'Никого не найдено в сети'
+                              : 'Relay не подключён — поиск недоступен',
+                          style: TextStyle(
+                            color: Theme.of(context).hintColor, fontSize: 13),
+                        ),
+                        if (_ctrl.text.trim().length >= 8) ...[
+                          const SizedBox(height: 12),
+                          FilledButton.icon(
+                            onPressed: _openDirect,
+                            icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                            label: const Text('Открыть чат по ключу'),
+                            style: FilledButton.styleFrom(
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+                }
+                if (results.isEmpty) {
+                  return const SizedBox(height: 16);
+                }
+                return ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 300),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: results.length,
+                    itemBuilder: (_, i) {
+                      final peer = results[i];
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: cs.primary.withValues(alpha: 0.15),
+                          child: Text(
+                            peer.nick.isNotEmpty
+                                ? peer.nick[0].toUpperCase()
+                                : '#',
+                            style: TextStyle(
+                              color: cs.primary,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          peer.nick.isNotEmpty ? peer.nick : peer.shortId,
+                          style: const TextStyle(fontWeight: FontWeight.w500),
+                        ),
+                        subtitle: Text(
+                          peer.shortId,
+                          style: const TextStyle(
+                            fontFamily: 'monospace', fontSize: 11),
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 8, height: 8,
+                              decoration: const BoxDecoration(
+                                color: Color(0xFF4CAF50),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Text('в сети',
+                                style: TextStyle(
+                                  fontSize: 11, color: cs.onSurfaceVariant)),
+                          ],
+                        ),
+                        onTap: () => widget.onOpenChat(
+                          peer.publicKey,
+                          peer.nick.isNotEmpty ? peer.nick : peer.shortId,
+                          0xFF607D8B,
+                          '',
+                        ),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+            // Direct open button when results present
+            if (_ctrl.text.trim().length >= 32)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: TextButton.icon(
+                  onPressed: _openDirect,
+                  icon: const Icon(Icons.arrow_forward_rounded, size: 18),
+                  label: const Text('Открыть чат напрямую по ключу'),
+                ),
+              ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
   }
 }

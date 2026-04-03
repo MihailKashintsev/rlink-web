@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'app_settings.dart';
+import 'ble_service.dart';
 import 'crypto_service.dart';
 import 'gossip_router.dart';
 import 'profile_service.dart';
@@ -77,6 +78,17 @@ class RelayService {
   /// Get X25519 key for a peer discovered via relay
   String? getPeerX25519Key(String publicKey) => _peerX25519Keys[publicKey];
 
+  /// Find full public key by 8-char prefix (for directed relay sends).
+  /// Checks online peers first, then all known peers.
+  String? findPeerByPrefix(String rid8) {
+    final prefix = rid8.toLowerCase();
+    // Check online peers first
+    for (final key in _peerOnline.keys) {
+      if (key.toLowerCase().startsWith(prefix)) return key;
+    }
+    return null;
+  }
+
   // ── Connect / Disconnect ─────────────────────────────────────
 
   Future<void> connect() async {
@@ -107,12 +119,14 @@ class RelayService {
         },
       );
 
-      // Register with server
+      // Register with server (include X25519 key for E2E encryption)
       final nick = ProfileService.instance.profile?.nickname ?? '';
+      final x25519Key = CryptoService.instance.x25519PublicKeyBase64;
       _channel!.sink.add(jsonEncode({
         'type': 'register',
         'publicKey': myKey,
         'nick': nick,
+        if (x25519Key.isNotEmpty) 'x25519': x25519Key,
       }));
 
       // Start ping timer (keep-alive every 30s)
@@ -286,6 +300,7 @@ class RelayService {
       searchResults.value = [];
       return;
     }
+    debugPrint('[Relay] Searching for: "${query.trim()}"');
     _channel?.sink.add(jsonEncode({
       'type': 'search',
       'query': query.trim(),
@@ -361,15 +376,31 @@ class RelayService {
 
   void _handleSearchResult(Map<String, dynamic> msg) {
     final results = msg['results'] as List? ?? [];
-    searchResults.value = results.map((r) {
+    final peers = results.map((r) {
       final m = r as Map<String, dynamic>;
-      return RelayPeer(
+      final peer = RelayPeer(
         publicKey: m['publicKey'] as String? ?? '',
         nick: m['nick'] as String? ?? '',
         shortId: m['shortId'] as String? ?? '',
         online: m['online'] as bool? ?? false,
+        x25519Key: m['x25519'] as String? ?? '',
       );
+      // Store X25519 key from search results
+      if (peer.x25519Key.isNotEmpty && peer.publicKey.isNotEmpty) {
+        _peerX25519Keys[peer.publicKey] = peer.x25519Key;
+        BleService.instance.registerPeerX25519Key(peer.publicKey, peer.x25519Key);
+      }
+      // Track as online
+      if (peer.publicKey.isNotEmpty) {
+        _peerOnline[peer.publicKey] = peer.online;
+      }
+      return peer;
     }).toList();
+    debugPrint('[Relay] Search results: ${peers.length} peers found');
+    for (final p in peers) {
+      debugPrint('[Relay]   → ${p.shortId} "${p.nick}" (${p.publicKey.substring(0, 16)}...)');
+    }
+    searchResults.value = peers;
   }
 
   void _handlePresence(Map<String, dynamic> msg) {
@@ -379,7 +410,17 @@ class RelayService {
 
     _peerOnline[publicKey] = online;
     presenceVersion.value++;
-    debugPrint('[Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'}');
+
+    // Store X25519 key if provided (for E2E encryption with relay-discovered peers)
+    final x25519Key = msg['x25519'] as String?;
+    if (x25519Key != null && x25519Key.isNotEmpty) {
+      _peerX25519Keys[publicKey] = x25519Key;
+      // Also register in BleService so chat_screen can find it
+      BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
+      debugPrint('[Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'} (x25519 key received)');
+    } else {
+      debugPrint('[Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'}');
+    }
   }
 
   void _handleIncomingBlob(Map<String, dynamic> msg) {
@@ -420,11 +461,13 @@ class RelayPeer {
   final String nick;
   final String shortId;
   final bool online;
+  final String x25519Key;
 
   const RelayPeer({
     required this.publicKey,
     required this.nick,
     required this.shortId,
     required this.online,
+    this.x25519Key = '',
   });
 }
