@@ -448,7 +448,7 @@ class _ChatScreenState extends State<ChatScreen> {
         x25519Key = RelayService.instance.getPeerX25519Key(targetPeerId);
       }
 
-      debugPrint('[Chat] Sending to ${targetPeerId.substring(0, 8)}, '
+      debugPrint('[RLINK][Chat] Sending to ${targetPeerId.substring(0, 8)}, '
           'x25519=${x25519Key != null && x25519Key.isNotEmpty ? "YES" : "NO"}, '
           'relay=${RelayService.instance.isConnected}, '
           'mode=${AppSettings.instance.connectionMode}');
@@ -465,7 +465,7 @@ class _ChatScreenState extends State<ChatScreen> {
           recipientId: targetPeerId,
           messageId: msgId,
         );
-        debugPrint('[Chat] Sent ENCRYPTED msg $msgId');
+        debugPrint('[RLINK][Chat] Sent ENCRYPTED msg $msgId');
       } else {
         // Fallback — plaintext если X25519 ключ ещё не получен
         await GossipRouter.instance.sendRawMessage(
@@ -475,7 +475,7 @@ class _ChatScreenState extends State<ChatScreen> {
           messageId: msgId,
           replyToMessageId: _replyToMessageId,
         );
-        debugPrint('[Chat] Sent RAW msg $msgId');
+        debugPrint('[RLINK][Chat] Sent RAW msg $msgId');
       }
 
       await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
@@ -954,6 +954,7 @@ class _ChatScreenState extends State<ChatScreen> {
       messageId: msg.id,
       emoji: emoji,
       fromId: CryptoService.instance.publicKeyHex,
+      recipientId: _resolvedPeerId,
     );
   }
 

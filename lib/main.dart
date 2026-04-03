@@ -166,6 +166,19 @@ Future<void> initServices() async {
     await ChatStorageService.instance.init();
     await StoryService.instance.init();
 
+    // Restore X25519 keys from contacts DB (survive app restarts)
+    try {
+      final savedContacts = await ChatStorageService.instance.getContacts();
+      for (final c in savedContacts) {
+        if (c.x25519Key != null && c.x25519Key!.isNotEmpty) {
+          BleService.instance.registerPeerX25519Key(c.publicKeyHex, c.x25519Key!);
+        }
+      }
+      debugPrint('[RLINK][Init] Loaded ${savedContacts.where((c) => c.x25519Key != null && c.x25519Key!.isNotEmpty).length} X25519 keys from DB');
+    } catch (e) {
+      debugPrint('[RLINK][Init] Failed to load X25519 keys: $e');
+    }
+
     // Populate ether name filter with known contacts + own name
     _updateEtherNameFilter();
 
@@ -185,14 +198,14 @@ Future<void> initServices() async {
           if (encrypted.nonce.isEmpty ||
               encrypted.cipherText.isEmpty ||
               encrypted.mac.isEmpty) {
-            debugPrint('[Main] Dropping malformed encrypted message (missing fields)');
+            debugPrint('[RLINK][Main] Dropping malformed encrypted message (missing fields)');
             return;
           }
           final plaintext =
               await CryptoService.instance.decryptMessage(encrypted);
           if (plaintext == null) {
-            debugPrint('[Main] Decryption failed! from=${fromId.substring(0, 16)} msgId=$messageId');
-            debugPrint('[Main] Trying fallback: x25519 key present=${BleService.instance.getPeerX25519Key(fromId) != null}');
+            debugPrint('[RLINK][Main] Decryption failed! from=${fromId.substring(0, 16)} msgId=$messageId');
+            debugPrint('[RLINK][Main] Trying fallback: x25519 key present=${BleService.instance.getPeerX25519Key(fromId) != null}');
             return;
           }
           text = plaintext;
@@ -217,7 +230,7 @@ Future<void> initServices() async {
             avatarEmoji: '',
             addedAt: now,
           ));
-          debugPrint('[Main] Auto-created stranger contact: $displayName');
+          debugPrint('[RLINK][Main] Auto-created stranger contact: $displayName');
         }
 
         // Сохраняем сообщение в БД немедленно (peerId = fromId = public key)
@@ -306,14 +319,14 @@ Future<void> initServices() async {
             if (recipientKey != null && recipientKey.isNotEmpty) {
               // Directed send — reliable, goes straight to recipient
               await RelayService.instance.sendPacket(packet, recipientKey: recipientKey);
-              debugPrint('[Forward] Relay DIRECTED to ${recipientKey.substring(0, 8)} type=${packet.type}');
+              debugPrint('[RLINK][Forward] Relay DIRECTED to ${recipientKey.substring(0, 8)} type=${packet.type}');
             } else {
               // Broadcast fallback — goes to all connected peers
               await RelayService.instance.broadcastPacket(packet);
-              debugPrint('[Forward] Relay BROADCAST type=${packet.type} rid8=$rid8');
+              debugPrint('[RLINK][Forward] Relay BROADCAST type=${packet.type} rid8=$rid8');
             }
           } catch (e) {
-            debugPrint('[Forward] Relay send failed: $e');
+            debugPrint('[RLINK][Forward] Relay send failed: $e');
           }
         }
       },
@@ -343,7 +356,7 @@ Future<void> initServices() async {
         );
       },
       onEther: (id, text, color, senderId, senderNick) {
-        debugPrint('[Main] onEther: text=${text.substring(0, text.length.clamp(0, 20))} sender=$senderNick');
+        debugPrint('[RLINK][Main] onEther: text=${text.substring(0, text.length.clamp(0, 20))} sender=$senderNick');
         EtherService.instance.addMessage(EtherMessage(
           id: id,
           text: text,
@@ -354,7 +367,7 @@ Future<void> initServices() async {
         ));
       },
       onStory: (storyId, authorId, text, bgColor) {
-        debugPrint('[Main] onStory: author=${authorId.substring(0, 16)} text=${text.substring(0, text.length.clamp(0, 20))}');
+        debugPrint('[RLINK][Main] onStory: author=${authorId.substring(0, 16)} text=${text.substring(0, text.length.clamp(0, 20))}');
         StoryService.instance.addStory(StoryItem(
           id: storyId,
           authorId: authorId,
@@ -364,10 +377,11 @@ Future<void> initServices() async {
         ));
       },
       onPairReq: (bleId, publicKey, nick, color, emoji, x25519Key) {
-        debugPrint('[Main] Pair request from $nick ($bleId)');
+        debugPrint('[RLINK][Main] Pair request from $nick ($bleId)');
         // Store x25519 key if provided
         if (x25519Key.isNotEmpty) {
           BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
+          unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
         }
         final info = <String, dynamic>{
           'publicKey': publicKey,
@@ -387,20 +401,20 @@ Future<void> initServices() async {
               try {
                 showPairRequestScreen(ctx, bleId, info);
               } catch (e) {
-                debugPrint('[Main] showPairRequestScreen error: $e');
+                debugPrint('[RLINK][Main] showPairRequestScreen error: $e');
               }
             } else if (attempt < 5) {
-              debugPrint('[Main] Navigator ctx null, retry ${attempt + 1}/5');
+              debugPrint('[RLINK][Main] Navigator ctx null, retry ${attempt + 1}/5');
               Future.delayed(const Duration(milliseconds: 300), () => tryShowScreen(attempt + 1));
             } else {
-              debugPrint('[Main] Could not show pair screen after 5 retries');
+              debugPrint('[RLINK][Main] Could not show pair screen after 5 retries');
             }
           });
         }
         tryShowScreen(0);
       },
       onPairAcc: (bleId, publicKey, nick, color, emoji, x25519Key) async {
-        debugPrint('[Main] Pair accepted by $nick ($bleId)');
+        debugPrint('[RLINK][Main] Pair accepted by $nick ($bleId)');
         BleService.instance.removePairRequest(bleId);
         // Register peer key — always register, even if bleId isn't recognized as direct.
         // pair_acc only comes from directly connected devices (TTL=1).
@@ -410,6 +424,7 @@ Future<void> initServices() async {
         BleService.instance.registerPeerKeyForAllRoles(publicKey);
         if (x25519Key.isNotEmpty) {
           BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
+          unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
         }
         BleService.instance.setExchangeState(publicKey, 3); // complete
         // Force-clear all pending entries for this device
@@ -570,7 +585,7 @@ Future<void> initServices() async {
           if (existingStory != null) {
             existingStory.imagePath = path;
             StoryService.instance.notifyUpdate();
-            debugPrint('[Main] Story image received for ${msgId.substring(0, 8)}');
+            debugPrint('[RLINK][Main] Story image received for ${msgId.substring(0, 8)}');
             return;
           }
 
@@ -608,6 +623,7 @@ Future<void> initServices() async {
         // X25519 ключ сохраняем для любого профиля (прямого или пересланного).
         if (x25519Key.isNotEmpty) {
           BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
+          unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
         }
 
         // Контакт сохраняем в БД при любом профиле (прямом или пересланном).
@@ -794,7 +810,7 @@ Future<void> initServices() async {
     // Проверка обновлений (Android → RuStore, десктоп → GitHub releases)
     unawaited(_checkUpdate());
   } catch (e) {
-    debugPrint('[main] Init error: $e');
+    debugPrint('[RLINK][main] Init error: $e');
   }
 }
 
@@ -821,13 +837,13 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
     // Resolve potentially stale iOS sandbox path
     final resolvedPath = ImageService.instance.resolveStoredPath(imagePath);
     if (resolvedPath == null || !File(resolvedPath).existsSync()) {
-      debugPrint('[Avatar] File not found: $imagePath → $resolvedPath');
+      debugPrint('[RLINK][Avatar] File not found: $imagePath → $resolvedPath');
       return;
     }
     final bytes = await File(resolvedPath).readAsBytes();
     final chunks = ImageService.instance.splitToBase64Chunks(bytes);
     final msgId = const Uuid().v4();
-    debugPrint('[Avatar] Starting broadcast: ${chunks.length} chunks, ${bytes.length} bytes');
+    debugPrint('[RLINK][Avatar] Starting broadcast: ${chunks.length} chunks, ${bytes.length} bytes');
     await GossipRouter.instance.sendImgMeta(
       msgId: msgId,
       totalChunks: chunks.length,
@@ -847,9 +863,9 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
         await Future.delayed(const Duration(milliseconds: 30));
       }
     }
-    debugPrint('[Avatar] Sent ${chunks.length} chunks via BLE+relay');
+    debugPrint('[RLINK][Avatar] Sent ${chunks.length} chunks via BLE+relay');
   } catch (e) {
-    debugPrint('[Avatar] Send failed: $e');
+    debugPrint('[RLINK][Avatar] Send failed: $e');
   }
 }
 
@@ -870,11 +886,12 @@ int _bestSignalLevel() {
 
 /// Handle blob received from relay — reassemble into a file and save message
 void _onBlobReceived(String fromId, String msgId, Uint8List data,
-    bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName) {
-  debugPrint('[Main] Blob received: ${data.length} bytes from ${fromId.substring(0, 8)} msgId=$msgId');
+    bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName) async {
+  debugPrint('[RLINK][Blob] Received ${data.length} bytes from ${fromId.substring(0, 8)} msgId=$msgId voice=$isVoice video=$isVideo file=$isFile');
+
   // Feed directly to ImageService as if all chunks arrived at once
   ImageService.instance.initAssembly(
-    msgId, 1, // single "chunk"
+    msgId, 1,
     isAvatar: false,
     isVoice: isVoice,
     fromId: fromId,
@@ -883,8 +900,131 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
     isFile: isFile,
     fileName: fileName,
   );
-  // Deliver the compressed blob as a single chunk
   ImageService.instance.receiveBlobData(msgId: msgId, compressedData: data);
+
+  if (!ImageService.instance.isComplete(msgId)) {
+    debugPrint('[RLINK][Blob] Assembly not complete for $msgId — unexpected');
+    return;
+  }
+
+  final senderKey = fromId;
+
+  // Ensure contact exists
+  Future<void> ensureContact() async {
+    final existing = await ChatStorageService.instance.getContact(senderKey);
+    if (existing == null) {
+      await ChatStorageService.instance.saveContact(Contact(
+        publicKeyHex: senderKey,
+        nickname: '${senderKey.substring(0, 8)}...',
+        avatarColor: 0xFF607D8B,
+        avatarEmoji: '',
+        addedAt: DateTime.now(),
+      ));
+    }
+  }
+
+  if (isVoice) {
+    final path = await ImageService.instance.assembleAndSaveVoice(msgId);
+    if (path == null) { debugPrint('[RLINK][Blob] Voice assemble failed'); return; }
+    await ensureContact();
+    final msg = ChatMessage(
+      id: msgId,
+      peerId: senderKey,
+      text: '🎤 Голосовое',
+      isOutgoing: false,
+      timestamp: DateTime.now(),
+      status: MessageStatus.delivered,
+      voicePath: path,
+    );
+    await ChatStorageService.instance.saveMessage(msg);
+    incomingMessageController.add(IncomingMessage(
+      fromId: senderKey,
+      text: '🎤 Голосовое',
+      timestamp: msg.timestamp,
+      msgId: msgId,
+    ));
+    debugPrint('[RLINK][Blob] Voice saved: $path');
+  } else if (isFile) {
+    final origName = fileName ?? ImageService.instance.assemblyFileName(msgId);
+    final path = await ImageService.instance.assembleAndSaveFile(msgId);
+    if (path == null) { debugPrint('[RLINK][Blob] File assemble failed'); return; }
+    await ensureContact();
+    final fileLabel = '📎 ${origName ?? 'Файл'}';
+    final fileBytes = await File(path).length();
+    final msg = ChatMessage(
+      id: msgId,
+      peerId: senderKey,
+      text: fileLabel,
+      isOutgoing: false,
+      timestamp: DateTime.now(),
+      status: MessageStatus.delivered,
+      filePath: path,
+      fileName: origName,
+      fileSize: fileBytes,
+    );
+    await ChatStorageService.instance.saveMessage(msg);
+    incomingMessageController.add(IncomingMessage(
+      fromId: senderKey,
+      text: fileLabel,
+      timestamp: msg.timestamp,
+      msgId: msgId,
+    ));
+    debugPrint('[RLINK][Blob] File saved: $path ($origName)');
+  } else if (isVideo) {
+    final path = await ImageService.instance.assembleAndSaveVideo(msgId, isSquare: isSquare);
+    if (path == null) { debugPrint('[RLINK][Blob] Video assemble failed'); return; }
+    await ensureContact();
+    final label = isSquare ? '⬛ Видео' : '📹 Видео';
+    final msg = ChatMessage(
+      id: msgId,
+      peerId: senderKey,
+      text: label,
+      isOutgoing: false,
+      timestamp: DateTime.now(),
+      status: MessageStatus.delivered,
+      videoPath: path,
+    );
+    await ChatStorageService.instance.saveMessage(msg);
+    incomingMessageController.add(IncomingMessage(
+      fromId: senderKey,
+      text: label,
+      timestamp: msg.timestamp,
+      msgId: msgId,
+    ));
+    debugPrint('[RLINK][Blob] Video saved: $path (square=$isSquare)');
+  } else {
+    // Image
+    final path = await ImageService.instance.assembleAndSave(msgId);
+    if (path == null) { debugPrint('[RLINK][Blob] Image assemble failed'); return; }
+
+    // Check if this image belongs to a story
+    final existingStory = StoryService.instance.findStory(msgId);
+    if (existingStory != null) {
+      existingStory.imagePath = path;
+      StoryService.instance.notifyUpdate();
+      debugPrint('[RLINK][Blob] Story image received for ${msgId.substring(0, 8)}');
+      return;
+    }
+
+    await ensureContact();
+    final msg = ChatMessage(
+      id: msgId,
+      peerId: senderKey,
+      text: '',
+      isOutgoing: false,
+      timestamp: DateTime.now(),
+      status: MessageStatus.delivered,
+      imagePath: path,
+    );
+    await ChatStorageService.instance.saveMessage(msg);
+    incomingMessageController.add(IncomingMessage(
+      fromId: senderKey,
+      text: '',
+      timestamp: msg.timestamp,
+      msgId: msgId,
+    ));
+    debugPrint('[RLINK][Blob] Image saved: $path');
+  }
 }
 
 Future<void> _startLiveActivity() async {
@@ -895,9 +1035,9 @@ Future<void> _startLiveActivity() async {
       'message': '',
       'signal': _bestSignalLevel(),
     });
-    debugPrint('[LiveActivity] Started');
+    debugPrint('[RLINK][LiveActivity] Started');
   } catch (e) {
-    debugPrint('[LiveActivity] Start failed: $e');
+    debugPrint('[RLINK][LiveActivity] Start failed: $e');
   }
 }
 

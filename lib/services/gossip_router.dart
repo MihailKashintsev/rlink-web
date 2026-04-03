@@ -314,13 +314,18 @@ class GossipRouter {
     required String senderId,
     required String recipientId,
   }) async {
+    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
     final packet = GossipPacket(
       id: _uuid.v4(), // ACK packet id must be different (seen-cache dedup)
       type: 'ack',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
       recipientId: recipientId,
-      payload: {'messageId': messageId, 'from': senderId},
+      payload: {
+        'messageId': messageId,
+        'from': senderId,
+        if (rid8 != null) 'r': rid8,
+      },
     );
     _markSeen(packet.id);
     for (var i = 0; i < 2; i++) {
@@ -335,8 +340,7 @@ class GossipRouter {
     required String senderId,
     required String recipientId,
   }) async {
-    // rid and from omitted — saves ~146 bytes, keeping packet under BLE MTU.
-    // onEdit callback ignores fromId anyway; mesh broadcast reaches the right peer.
+    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
     final packet = GossipPacket(
       id: _uuid.v4(), // separate packet id for dedup
       type: 'edit',
@@ -345,6 +349,7 @@ class GossipRouter {
       payload: {
         'messageId': messageId,
         'text': newText,
+        if (rid8 != null) 'r': rid8,
       },
     );
     _markSeen(packet.id);
@@ -359,14 +364,16 @@ class GossipRouter {
     required String senderId,
     required String recipientId,
   }) async {
-    // rid and from omitted — saves ~146 bytes, keeping packet under BLE MTU.
-    // onDelete callback ignores fromId anyway.
+    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
     final packet = GossipPacket(
       id: _uuid.v4(), // separate packet id for dedup
       type: 'delete',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
-      payload: {'messageId': messageId},
+      payload: {
+        'messageId': messageId,
+        if (rid8 != null) 'r': rid8,
+      },
     );
     _markSeen(packet.id);
     for (var i = 0; i < 2; i++) {
@@ -508,13 +515,20 @@ class GossipRouter {
     required String messageId,
     required String emoji,
     required String fromId,
+    String recipientId = '',
   }) async {
+    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'react',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
-      payload: {'messageId': messageId, 'emoji': emoji, 'from': fromId},
+      payload: {
+        'messageId': messageId,
+        'emoji': emoji,
+        'from': fromId,
+        if (rid8 != null) 'r': rid8,
+      },
     );
     _markSeen(packet.id);
     await _forward(packet);
@@ -632,13 +646,13 @@ class GossipRouter {
   Future<void> onPacketReceived(Uint8List rawBytes, {String? sourceId}) async {
     final packet = GossipPacket.decode(rawBytes);
     if (packet == null) {
-      debugPrint('[Gossip] Failed to decode packet (${rawBytes.length} bytes)');
+      debugPrint('[RLINK][Gossip] Failed to decode packet (${rawBytes.length} bytes)');
       return;
     }
 
     if (_hasSeen(packet.id)) return;
     _markSeen(packet.id);
-    debugPrint('[Gossip] Received type=${packet.type} ttl=${packet.ttl} id=${packet.id.substring(0, 8)}');
+    debugPrint('[RLINK][Gossip] Received type=${packet.type} ttl=${packet.ttl} id=${packet.id.substring(0, 8)}');
 
     if (packet.isExpired) return;
     if (packet.ttl <= 0) return;
@@ -664,7 +678,7 @@ class GossipRouter {
           rid.isNotEmpty &&
           myPublicKey != null &&
           rid != myPublicKey) {
-        debugPrint('[Gossip] Message for $rid — not for us, skip');
+        debugPrint('[RLINK][Gossip] Message for $rid — not for us, skip');
         return;
       }
 
@@ -683,7 +697,7 @@ class GossipRouter {
         if (rid8 != null &&
             myKey != null &&
             !myKey.startsWith(rid8)) {
-          debugPrint('[Gossip] Raw message not for us (rid prefix mismatch)');
+          debugPrint('[RLINK][Gossip] Raw message not for us (rid prefix mismatch)');
           return;
         }
 
@@ -775,7 +789,7 @@ class GossipRouter {
           final bleId = sourceId ?? publicKey;
           onProfileReceived?.call(bleId, publicKey, nick, color, emoji, x25519Key);
         } else {
-          debugPrint('[Gossip] Invalid profile packet: key=$publicKey nick=$nick');
+          debugPrint('[RLINK][Gossip] Invalid profile packet: key=$publicKey nick=$nick');
         }
         return;
       }
@@ -794,7 +808,7 @@ class GossipRouter {
             encrypted.nonce.isEmpty ||
             encrypted.cipherText.isEmpty ||
             encrypted.mac.isEmpty) {
-          debugPrint('[Gossip] Dropping malformed msg packet (missing fields)');
+          debugPrint('[RLINK][Gossip] Dropping malformed msg packet (missing fields)');
           return;
         }
         final handler = onMessageReceived;
@@ -823,7 +837,7 @@ class GossipRouter {
         final rid8 = packet.payload['r'] as String?;
         if (!isAvatar && rid8 != null && myPublicKey != null &&
             !myPublicKey!.startsWith(rid8)) {
-          debugPrint('[Gossip] img_meta not for us (rid8 mismatch), skip');
+          debugPrint('[RLINK][Gossip] img_meta not for us (rid8 mismatch), skip');
           return;
         }
         if (msgId != null && totalChunks != null) {
@@ -838,7 +852,7 @@ class GossipRouter {
       if (packet.type == 'ether') {
         final text = packet.payload['text'] as String?;
         final color = packet.payload['col'] as int?;
-        debugPrint('[Gossip] Ether packet: text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} col=$color handler=${onEtherReceived != null}');
+        debugPrint('[RLINK][Gossip] Ether packet: text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} col=$color handler=${onEtherReceived != null}');
         if (text != null && text.isNotEmpty && color != null) {
           final senderId = packet.payload['from'] as String?;
           final senderNick = packet.payload['nick'] as String?;
@@ -851,7 +865,7 @@ class GossipRouter {
         final authorId = packet.payload['from'] as String?;
         final text = packet.payload['text'] as String?;
         final bgColor = packet.payload['col'] as int?;
-        debugPrint('[Gossip] Story packet: author=${authorId == null ? 'null' : authorId.substring(0, authorId.length.clamp(0, 16))} text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} handler=${onStoryReceived != null}');
+        debugPrint('[RLINK][Gossip] Story packet: author=${authorId == null ? 'null' : authorId.substring(0, authorId.length.clamp(0, 16))} text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} handler=${onStoryReceived != null}');
         if (authorId != null && text != null && bgColor != null) {
           onStoryReceived?.call(packet.id, authorId, text, bgColor);
         }
@@ -866,7 +880,7 @@ class GossipRouter {
         final x25519Key = packet.payload['x'] as String? ?? '';
         final bleId = sourceId ?? publicKey ?? '';
         if (publicKey != null && nick != null && color != null) {
-          debugPrint('[Gossip] Pair request from $nick (${publicKey.substring(0, 8)})');
+          debugPrint('[RLINK][Gossip] Pair request from $nick (${publicKey.substring(0, 8)})');
           onPairRequest?.call(bleId, publicKey, nick, color, emoji, x25519Key);
         }
         return;
@@ -880,7 +894,7 @@ class GossipRouter {
         final x25519Key = packet.payload['x'] as String? ?? '';
         final bleId = sourceId ?? publicKey ?? '';
         if (publicKey != null && nick != null && color != null) {
-          debugPrint('[Gossip] Pair accepted by $nick (${publicKey.substring(0, 8)})');
+          debugPrint('[RLINK][Gossip] Pair accepted by $nick (${publicKey.substring(0, 8)})');
           onPairAccepted?.call(bleId, publicKey, nick, color, emoji, x25519Key);
         }
         return;
@@ -917,7 +931,7 @@ class GossipRouter {
         return;
       }
     } catch (e) {
-      debugPrint('[Gossip] Failed to parse payload: $e');
+      debugPrint('[RLINK][Gossip] Failed to parse payload: $e');
     }
   }
 
@@ -925,13 +939,13 @@ class GossipRouter {
     if (onForwardPacket == null) return;
     final bytes = packet.encode();
     if (bytes.length > _kMaxPayloadBytes) {
-      debugPrint('[Gossip] Packet too large (${bytes.length} bytes), dropping');
+      debugPrint('[RLINK][Gossip] Packet too large (${bytes.length} bytes), dropping');
       return;
     }
     try {
       await onForwardPacket!(packet);
     } catch (e) {
-      debugPrint('[Gossip] Forward failed: $e');
+      debugPrint('[RLINK][Gossip] Forward failed: $e');
     }
   }
 
@@ -947,7 +961,7 @@ class GossipRouter {
     try {
       await onForwardPacket!(packet);
     } catch (e) {
-      debugPrint('[Gossip] Encrypted forward failed: $e');
+      debugPrint('[RLINK][Gossip] Encrypted forward failed: $e');
     }
   }
 
@@ -963,7 +977,7 @@ class GossipRouter {
     try {
       await onForwardPacket!(packet);
     } catch (e) {
-      debugPrint('[Gossip] Img forward failed: $e');
+      debugPrint('[RLINK][Gossip] Img forward failed: $e');
     }
   }
 

@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'app_settings.dart';
 import 'ble_service.dart';
+import 'chat_storage_service.dart';
 import 'crypto_service.dart';
 import 'gossip_router.dart';
 import 'profile_service.dart';
@@ -105,7 +106,7 @@ class RelayService {
     _intentionalClose = false;
 
     try {
-      debugPrint('[Relay] Connecting to $url');
+      debugPrint('[RLINK][Relay] Connecting to $url');
       _channel = WebSocketChannel.connect(Uri.parse(url));
       await _channel!.ready;
 
@@ -114,7 +115,7 @@ class RelayService {
         _onMessage,
         onDone: _onDisconnected,
         onError: (e) {
-          debugPrint('[Relay] WebSocket error: $e');
+          debugPrint('[RLINK][Relay] WebSocket error: $e');
           _onDisconnected();
         },
       );
@@ -140,9 +141,9 @@ class RelayService {
       });
 
       state.value = RelayState.connected;
-      debugPrint('[Relay] Connected and registered');
+      debugPrint('[RLINK][Relay] Connected and registered');
     } catch (e) {
-      debugPrint('[Relay] Connection failed: $e');
+      debugPrint('[RLINK][Relay] Connection failed: $e');
       state.value = RelayState.disconnected;
       _scheduleReconnect();
     }
@@ -158,7 +159,7 @@ class RelayService {
     try { _channel?.sink.close(); } catch (_) {}
     _channel = null;
     state.value = RelayState.disconnected;
-    debugPrint('[Relay] Disconnected');
+    debugPrint('[RLINK][Relay] Disconnected');
   }
 
   void _onDisconnected() {
@@ -279,9 +280,9 @@ class RelayService {
     };
     try {
       _channel?.sink.add(jsonEncode(envelope));
-      debugPrint('[Relay] Sent blob ${compressedData.length} bytes for $msgId');
+      debugPrint('[RLINK][Relay] Sent blob ${compressedData.length} bytes for $msgId');
     } catch (e) {
-      debugPrint('[Relay] Failed to send blob: $e');
+      debugPrint('[RLINK][Relay] Failed to send blob: $e');
     }
   }
 
@@ -300,7 +301,7 @@ class RelayService {
       searchResults.value = [];
       return;
     }
-    debugPrint('[Relay] Searching for: "${query.trim()}"');
+    debugPrint('[RLINK][Relay] Searching for: "${query.trim()}"');
     _channel?.sink.add(jsonEncode({
       'type': 'search',
       'query': query.trim(),
@@ -324,7 +325,7 @@ class RelayService {
       case 'registered':
         final count = msg['onlineCount'] as int? ?? 0;
         onlineCount.value = count;
-        debugPrint('[Relay] Registered, $count users online');
+        debugPrint('[RLINK][Relay] Registered, $count users online');
         break;
 
       case 'packet':
@@ -351,7 +352,7 @@ class RelayService {
         break; // keep-alive response
 
       case 'error':
-        debugPrint('[Relay] Server error: ${msg['msg']}');
+        debugPrint('[RLINK][Relay] Server error: ${msg['msg']}');
         break;
     }
   }
@@ -370,7 +371,7 @@ class RelayService {
         sourceId: 'relay:$from',
       );
     } catch (e) {
-      debugPrint('[Relay] Failed to decode incoming packet: $e');
+      debugPrint('[RLINK][Relay] Failed to decode incoming packet: $e');
     }
   }
 
@@ -389,6 +390,7 @@ class RelayService {
       if (peer.x25519Key.isNotEmpty && peer.publicKey.isNotEmpty) {
         _peerX25519Keys[peer.publicKey] = peer.x25519Key;
         BleService.instance.registerPeerX25519Key(peer.publicKey, peer.x25519Key);
+        unawaited(ChatStorageService.instance.updateContactX25519Key(peer.publicKey, peer.x25519Key));
       }
       // Track as online
       if (peer.publicKey.isNotEmpty) {
@@ -396,9 +398,9 @@ class RelayService {
       }
       return peer;
     }).toList();
-    debugPrint('[Relay] Search results: ${peers.length} peers found');
+    debugPrint('[RLINK][Relay] Search results: ${peers.length} peers found');
     for (final p in peers) {
-      debugPrint('[Relay]   → ${p.shortId} "${p.nick}" (${p.publicKey.substring(0, 16)}...)');
+      debugPrint('[RLINK][Relay]   → ${p.shortId} "${p.nick}" (${p.publicKey.substring(0, 16)}...)');
     }
     searchResults.value = peers;
   }
@@ -415,11 +417,11 @@ class RelayService {
     final x25519Key = msg['x25519'] as String?;
     if (x25519Key != null && x25519Key.isNotEmpty) {
       _peerX25519Keys[publicKey] = x25519Key;
-      // Also register in BleService so chat_screen can find it
       BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
-      debugPrint('[Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'} (x25519 key received)');
+      unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
+      debugPrint('[RLINK][Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'} (x25519 key received)');
     } else {
-      debugPrint('[Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'}');
+      debugPrint('[RLINK][Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'}');
     }
   }
 
@@ -436,11 +438,11 @@ class RelayService {
       final isSquare = (msg['sq'] as bool?) ?? false;
       final isFile = (msg['file'] as bool?) ?? false;
       final fileName = msg['fname'] as String?;
-      debugPrint('[Relay] Received blob ${bytes.length} bytes for $msgId');
+      debugPrint('[RLINK][Relay] Received blob ${bytes.length} bytes for $msgId');
       onBlobReceived?.call(from, msgId, Uint8List.fromList(bytes),
           isVoice, isVideo, isSquare, isFile, fileName);
     } catch (e) {
-      debugPrint('[Relay] Failed to decode blob: $e');
+      debugPrint('[RLINK][Relay] Failed to decode blob: $e');
     }
   }
 
@@ -448,7 +450,15 @@ class RelayService {
     final to = msg['to'] as String?;
     final status = msg['status'] as String?;
     if (to == null || status == null) return;
-    debugPrint('[Relay] Delivery to ${to.substring(0, 8)}: $status');
+    if (status == 'offline') {
+      _peerOnline[to] = false;
+      presenceVersion.value++;
+      debugPrint('[RLINK][Relay] Delivery FAILED → ${to.substring(0, 8)} is OFFLINE');
+    } else if (status == 'error') {
+      debugPrint('[RLINK][Relay] Delivery ERROR → ${to.substring(0, 8)}');
+    } else {
+      debugPrint('[RLINK][Relay] Delivery to ${to.substring(0, 8)}: $status');
+    }
   }
 }
 

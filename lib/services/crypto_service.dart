@@ -148,7 +148,7 @@ class CryptoService {
 
     final ephemeralPubKey = await ephemeralKeyPair.extractPublicKey();
 
-    debugPrint('[Crypto] Encrypted: nonce=${base64.encode(nonce)}, ct=${secretBox.cipherText.length}b, mac=${secretBox.mac.bytes.length}b');
+    debugPrint('[RLINK][Crypto] Encrypted: nonce=${base64.encode(nonce)}, ct=${secretBox.cipherText.length}b, mac=${secretBox.mac.bytes.length}b');
 
     return EncryptedMessage(
       senderPublicKey: publicKeyHex,
@@ -178,15 +178,15 @@ class CryptoService {
       final cipherText = base64.decode(msg.cipherText);
       final mac = Mac(base64.decode(msg.mac));
 
-      debugPrint('[Crypto] Decrypt: epk=${msg.ephemeralPublicKey.substring(0, 8)}, nonce=${nonce.length}b, ct=${cipherText.length}b, mac=${mac.bytes.length}b');
+      debugPrint('[RLINK][Crypto] Decrypt: epk=${msg.ephemeralPublicKey.substring(0, 8)}, nonce=${nonce.length}b, ct=${cipherText.length}b, mac=${mac.bytes.length}b');
 
       final secretBox = SecretBox(cipherText, nonce: nonce, mac: mac);
       final plainBytes = await _chacha.decrypt(secretBox, secretKey: derivedKey);
       final result = utf8.decode(plainBytes);
-      debugPrint('[Crypto] Decrypt OK: ${result.substring(0, result.length.clamp(0, 20))}');
+      debugPrint('[RLINK][Crypto] Decrypt OK: ${result.substring(0, result.length.clamp(0, 20))}');
       return result;
     } catch (e) {
-      debugPrint('[Crypto] Decrypt FAILED: $e');
+      debugPrint('[RLINK][Crypto] Decrypt FAILED: $e');
       return null;
     }
   }

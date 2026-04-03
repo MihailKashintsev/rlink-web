@@ -43,8 +43,9 @@ class ChatStorageService {
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 8,
+      version: 9,
       onCreate: (db, v) async {
+        await db.execute('PRAGMA journal_mode = WAL');
         await db.execute('''
           CREATE TABLE contacts (
             id                TEXT PRIMARY KEY,
@@ -52,6 +53,7 @@ class ChatStorageService {
             color             INTEGER NOT NULL,
             emoji             TEXT NOT NULL,
             avatar_img_path   TEXT,
+            x25519_key        TEXT,
             added_at          INTEGER NOT NULL,
             last_seen         INTEGER
           )
@@ -78,6 +80,9 @@ class ChatStorageService {
         ''');
         await db.execute(
             'CREATE INDEX idx_messages_peer ON messages(peer_id, timestamp)');
+      },
+      onOpen: (db) async {
+        await db.execute('PRAGMA journal_mode = WAL');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -139,9 +144,14 @@ class ChatStorageService {
             await db.execute('ALTER TABLE messages ADD COLUMN file_size INTEGER');
           } catch (_) {}
         }
+        if (oldVersion < 9) {
+          try {
+            await db.execute('ALTER TABLE contacts ADD COLUMN x25519_key TEXT');
+          } catch (_) {}
+        }
       },
     );
-    debugPrint('[DB] Initialized');
+    debugPrint('[RLINK][DB] Initialized');
   }
 
   // ── Контакты ─────────────────────────────────────────────────
@@ -186,6 +196,7 @@ class ChatStorageService {
         'color': contact.avatarColor,
         'emoji': contact.avatarEmoji,
         'avatar_img_path': contact.avatarImagePath,
+        'x25519_key': contact.x25519Key,
         'last_seen': DateTime.now().millisecondsSinceEpoch,
       },
       where: 'id = ?',
@@ -193,6 +204,16 @@ class ChatStorageService {
     );
     _contactsNotifier.value = await getContacts();
     unawaited(_writeContactsCache());
+  }
+
+  /// Persist X25519 key for a contact (for E2E encryption across restarts)
+  Future<void> updateContactX25519Key(String id, String x25519Key) async {
+    await _db?.update(
+      'contacts',
+      {'x25519_key': x25519Key},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   /// Записывает кэш имён контактов в файл для iOS-уведомлений.
@@ -204,7 +225,7 @@ class ChatStorageService {
       final map = {for (final c in contacts) c.publicKeyHex: c.nickname};
       await file.writeAsString(jsonEncode(map));
     } catch (e) {
-      debugPrint('[DB] contacts cache write failed: $e');
+      debugPrint('[RLINK][DB] contacts cache write failed: $e');
     }
   }
 

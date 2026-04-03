@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_web_socket/shelf_web_socket.dart';
@@ -143,9 +142,9 @@ void _handlePacket(_User sender, Map<String, dynamic> msg) {
       'from': sender.publicKey,
       'data': data,
     }));
-    print('[Relay] Packet: ${sender.shortId} → ${recipient.shortId} (${data.length} chars)');
+    print('[RLINK][Relay] Packet: ${sender.shortId} → ${recipient.shortId} (${data.length} chars)');
   } catch (e) {
-    print('[Relay] Packet forward failed: $e');
+    print('[RLINK][Relay] Packet forward failed: $e');
     sender.ws.sink.add(jsonEncode({
       'type': 'delivery_status',
       'to': to,
@@ -173,7 +172,7 @@ void _handleBroadcast(_User sender, Map<String, dynamic> msg) {
       sent++;
     } catch (_) {}
   }
-  print('[Relay] Broadcast from ${sender.shortId}: ${data.length} chars → $sent peers');
+  print('[RLINK][Relay] Broadcast from ${sender.shortId}: ${data.length} chars → $sent peers');
 }
 
 void _handleBlob(_User sender, Map<String, dynamic> msg) {
@@ -199,9 +198,9 @@ void _handleBlob(_User sender, Map<String, dynamic> msg) {
   try {
     recipient.ws.sink.add(jsonEncode(forwarded));
     final dataLen = (msg['data'] as String?)?.length ?? 0;
-    print('[Relay] Blob forwarded: ${sender.publicKey.substring(0, 8)} → ${to.substring(0, 8)} (${dataLen} chars)');
+    print('[RLINK][Relay] Blob forwarded: ${sender.publicKey.substring(0, 8)} → ${to.substring(0, 8)} (${dataLen} chars)');
   } catch (e) {
-    print('[Relay] Blob forward failed: $e');
+    print('[RLINK][Relay] Blob forward failed: $e');
     sender.ws.sink.add(jsonEncode({
       'type': 'delivery_status',
       'to': to,
@@ -237,7 +236,7 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
     'type': 'search_result',
     'results': results,
   }));
-  print('[Relay] Search "$query" by ${requester.publicKey.substring(0, 8)}: ${results.length} results');
+  print('[RLINK][Relay] Search "$query" by ${requester.publicKey.substring(0, 8)}: ${results.length} results');
 }
 
 // ── WebSocket handler ───────────────────────────────────────────

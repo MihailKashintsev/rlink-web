@@ -97,7 +97,7 @@ class BleService {
     _bleIdToPublicKey.clear();
     _publicKeyToBleId.clear();
     _x25519Keys.clear();
-    debugPrint('[BLE] Key mappings cleared');
+    debugPrint('[RLINK][BLE] Key mappings cleared');
     peerMappingsVersion.value++;
   }
 
@@ -146,7 +146,7 @@ class BleService {
       final upd = Set<String>.from(pendingProfiles.value)..add(bleId);
       pendingProfiles.value = upd;
       peerMappingsVersion.value++;
-      debugPrint('[BLE] Reset mapping for $peerId (BLE: $bleId)');
+      debugPrint('[RLINK][BLE] Reset mapping for $peerId (BLE: $bleId)');
     }
   }
 
@@ -169,7 +169,7 @@ class BleService {
     _retryTimers.remove(bleId);
     setExchangeState(bleId, 2); // profile_received
     setExchangeState(publicKey, 3); // complete
-    debugPrint('[BLE] Mapped $bleId → ${publicKey.substring(0, 16)}...');
+    debugPrint('[RLINK][BLE] Mapped $bleId → ${publicKey.substring(0, 16)}...');
 
     // Кросс-регистрация: одно физическое устройство появляется в двух ролях —
     // как peripheral (в _connectedPeers, BLE-сканирование) и как central
@@ -196,13 +196,13 @@ class BleService {
         final pid = unmapped.first.str;
         _bleIdToPublicKey[pid] = publicKey;
         markProfileReceived(pid);
-        debugPrint('[BLE] Cross-registered peripheral $pid → ${publicKey.substring(0, 16)}');
+        debugPrint('[RLINK][BLE] Cross-registered peripheral $pid → ${publicKey.substring(0, 16)}');
       } else if (unmapped.length > 1) {
         // Multiple unmapped — register the last one (most recently connected)
         final pid = unmapped.last.str;
         _bleIdToPublicKey[pid] = publicKey;
         markProfileReceived(pid);
-        debugPrint('[BLE] Cross-registered peripheral (last of ${unmapped.length}) $pid → ${publicKey.substring(0, 16)}');
+        debugPrint('[RLINK][BLE] Cross-registered peripheral (last of ${unmapped.length}) $pid → ${publicKey.substring(0, 16)}');
       }
     } else if (_connectedPeers.containsKey(DeviceIdentifier(bleId))) {
       // Profile came from peripheral side → register ALL unmapped centrals
@@ -213,13 +213,13 @@ class BleService {
         final cid = unmapped.first;
         _bleIdToPublicKey[cid] = publicKey;
         markProfileReceived(cid);
-        debugPrint('[BLE] Cross-registered central $cid → ${publicKey.substring(0, 16)}');
+        debugPrint('[RLINK][BLE] Cross-registered central $cid → ${publicKey.substring(0, 16)}');
       } else if (unmapped.length > 1) {
         // Multiple unmapped — register the last one (most recently connected)
         final cid = unmapped.last;
         _bleIdToPublicKey[cid] = publicKey;
         markProfileReceived(cid);
-        debugPrint('[BLE] Cross-registered central (last of ${unmapped.length}) $cid → ${publicKey.substring(0, 16)}');
+        debugPrint('[RLINK][BLE] Cross-registered central (last of ${unmapped.length}) $cid → ${publicKey.substring(0, 16)}');
       }
     }
   }
@@ -233,7 +233,7 @@ class BleService {
       if (!_bleIdToPublicKey.containsKey(id.str)) {
         _bleIdToPublicKey[id.str] = publicKey;
         markProfileReceived(id.str);
-        debugPrint('[BLE] registerPeerKeyForAllRoles: peripheral ${id.str} → ${publicKey.substring(0, 16)}');
+        debugPrint('[RLINK][BLE] registerPeerKeyForAllRoles: peripheral ${id.str} → ${publicKey.substring(0, 16)}');
       }
     }
     // Register all unmapped centrals
@@ -241,7 +241,7 @@ class BleService {
       if (!_bleIdToPublicKey.containsKey(id)) {
         _bleIdToPublicKey[id] = publicKey;
         markProfileReceived(id);
-        debugPrint('[BLE] registerPeerKeyForAllRoles: central $id → ${publicKey.substring(0, 16)}');
+        debugPrint('[RLINK][BLE] registerPeerKeyForAllRoles: central $id → ${publicKey.substring(0, 16)}');
       }
     }
     _updatePeersCount();
@@ -264,7 +264,7 @@ class BleService {
     }
     if (upd.length != pendingProfiles.value.length) {
       pendingProfiles.value = upd;
-      debugPrint('[BLE] Cleared pending for $publicKey (${pendingProfiles.value.length} remaining)');
+      debugPrint('[RLINK][BLE] Cleared pending for $publicKey (${pendingProfiles.value.length} remaining)');
     }
   }
 
@@ -346,7 +346,7 @@ class BleService {
 
     // BLE не поддерживается на Windows/Linux — работаем только на мобильных и macOS
     if (Platform.isWindows || Platform.isLinux) {
-      debugPrint('[BLE] BLE not supported on ${Platform.operatingSystem}, skipping');
+      debugPrint('[RLINK][BLE] BLE not supported on ${Platform.operatingSystem}, skipping');
       return;
     }
 
@@ -369,7 +369,7 @@ class BleService {
 
     _adapterSub = FlutterBluePlus.adapterState.listen((state) async {
       if (state == BluetoothAdapterState.on && _isRunning) {
-        debugPrint('[BLE] BT on — restarting');
+        debugPrint('[RLINK][BLE] BT on — restarting');
         await Future.delayed(const Duration(seconds: 2));
         _advertisingStarted = false;
         await _startAdvertising();
@@ -387,7 +387,7 @@ class BleService {
   }
 
   Future<void> rescan() async {
-    debugPrint('[BLE] Manual rescan');
+    debugPrint('[RLINK][BLE] Manual rescan');
     _startScan();
   }
 
@@ -397,7 +397,7 @@ class BleService {
     _scanRestartTimer?.cancel();
     _scanRestartTimer = Timer(const Duration(seconds: 60), () {
       if (_isRunning) {
-        debugPrint('[BLE] Auto-restarting scan');
+        debugPrint('[RLINK][BLE] Auto-restarting scan');
         _startScan();
         _scheduleScanRestart();
       }
@@ -410,7 +410,7 @@ class BleService {
     _keepAliveTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       if (!_isRunning) return;
       _updatePeersCount();
-      debugPrint('[BLE] Keep-alive: ${connectedPeerIds.length} peer(s)');
+      debugPrint('[RLINK][BLE] Keep-alive: ${connectedPeerIds.length} peer(s)');
     });
   }
 
@@ -419,9 +419,9 @@ class BleService {
     try {
       await _method.invokeMethod('startAdvertising');
       _advertisingStarted = true;
-      debugPrint('[BLE] Advertising started');
+      debugPrint('[RLINK][BLE] Advertising started');
     } catch (e) {
-      debugPrint('[BLE] Advertising not available: $e');
+      debugPrint('[RLINK][BLE] Advertising not available: $e');
     }
   }
 
@@ -482,7 +482,7 @@ class BleService {
         GossipRouter.instance.onPacketReceived(bytes, sourceId: device);
       }
     } else if (call.method == 'onAdvertisingStarted') {
-      debugPrint('[BLE] Native advertising confirmed (via dataChannel)');
+      debugPrint('[RLINK][BLE] Native advertising confirmed (via dataChannel)');
     } else if (call.method == 'onCentralSubscribed') {
       final centralId = call.arguments as String? ?? '';
       if (centralId.isNotEmpty) {
@@ -491,7 +491,7 @@ class BleService {
         pendingProfiles.value = newPending;
         _updatePeersCount();
         onPeerConnected?.call(centralId);
-        debugPrint('[BLE] Central subscribed (dataChannel): $centralId');
+        debugPrint('[RLINK][BLE] Central subscribed (dataChannel): $centralId');
       }
     } else if (call.method == 'onCentralUnsubscribed') {
       final centralId = call.arguments as String? ?? '';
@@ -522,14 +522,14 @@ class BleService {
                   ? asList.buffer.asUint8List()
                   : asList));
             } catch (e) {
-              debugPrint('[BLE] nativeEvent cannot convert data: $e');
+              debugPrint('[RLINK][BLE] nativeEvent cannot convert data: $e');
               return;
             }
           }
           GossipRouter.instance.onPacketReceived(bytes, sourceId: device);
         }
       } else if (type == 'advertising_started') {
-        debugPrint('[BLE] Native advertising confirmed');
+        debugPrint('[RLINK][BLE] Native advertising confirmed');
       } else if (type == 'central_subscribed') {
         final centralId = event['device'] as String? ?? '';
         if (centralId.isNotEmpty) {
@@ -538,7 +538,7 @@ class BleService {
           pendingProfiles.value = newPending;
           _updatePeersCount();
           onPeerConnected?.call(centralId);
-          debugPrint('[BLE] Central subscribed: $centralId');
+          debugPrint('[RLINK][BLE] Central subscribed: $centralId');
         }
       } else if (type == 'central_unsubscribed') {
         final centralId = event['device'] as String? ?? '';
@@ -547,7 +547,7 @@ class BleService {
           final newPending = Set<String>.from(pendingProfiles.value)..remove(centralId);
           pendingProfiles.value = newPending;
           _updatePeersCount();
-          debugPrint('[BLE] Central unsubscribed: $centralId');
+          debugPrint('[RLINK][BLE] Central unsubscribed: $centralId');
         }
       }
     } else if (event is Uint8List || event is List) {
@@ -568,7 +568,7 @@ class BleService {
         GossipRouter.instance.onPacketReceived(packet, sourceId: sourceId);
       }
     } else {
-      debugPrint('[BLE] nativeEvent UNKNOWN type=${event.runtimeType}');
+      debugPrint('[RLINK][BLE] nativeEvent UNKNOWN type=${event.runtimeType}');
     }
   }
 
@@ -583,7 +583,7 @@ class BleService {
             Platform.isAndroid ? AndroidScanMode.lowLatency : AndroidScanMode.balanced,
       );
     } catch (e) {
-      debugPrint('[BLE] Start scan error: $e');
+      debugPrint('[RLINK][BLE] Start scan error: $e');
     }
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
@@ -591,7 +591,7 @@ class BleService {
         _onDeviceFound(r.device);
       }
     });
-    debugPrint('[BLE] Scanning started');
+    debugPrint('[RLINK][BLE] Scanning started');
   }
 
   Future<void> _onDeviceFound(BluetoothDevice device) async {
@@ -614,12 +614,12 @@ class BleService {
       final newPending = Set<String>.from(pendingProfiles.value)
         ..add(device.remoteId.str);
       pendingProfiles.value = newPending;
-      debugPrint('[BLE] Connected to ${device.remoteId}');
+      debugPrint('[RLINK][BLE] Connected to ${device.remoteId}');
       setExchangeState(device.remoteId.str, 0); // connected
       // Уведомляем о новом подключении (без авто-обмена профилями)
       onPeerConnected?.call(device.remoteId.str);
     } catch (e) {
-      debugPrint('[BLE] Connect failed: $e');
+      debugPrint('[RLINK][BLE] Connect failed: $e');
       _connectedPeers.remove(device.remoteId);
       _updatePeersCount();
     } finally {
@@ -638,7 +638,7 @@ class BleService {
         _connectedPeers.remove(device.remoteId);
         _txChars.remove(device.remoteId);
         _updatePeersCount();
-        debugPrint('[BLE] Disconnected: $bleId');
+        debugPrint('[RLINK][BLE] Disconnected: $bleId');
         // Пробуем переподключиться через 1 секунду
         if (_isRunning) {
           Future.delayed(const Duration(seconds: 1), () {
@@ -668,7 +668,7 @@ class BleService {
           }
         });
         _txChars[device.remoteId] = char;
-        debugPrint('[BLE] GATT ready for $bleId');
+        debugPrint('[RLINK][BLE] GATT ready for $bleId');
       }
     }
   }
@@ -694,7 +694,7 @@ class BleService {
           await Future.delayed(const Duration(milliseconds: 10));
         }
       } catch (e) {
-        debugPrint('[BLE] Write failed at offset=$offset/${framed.length}: $e');
+        debugPrint('[RLINK][BLE] Write failed at offset=$offset/${framed.length}: $e');
         return; // Abort this write — retry at gossip level will resend
       }
     }
