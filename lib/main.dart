@@ -13,9 +13,11 @@ import 'package:google_fonts/google_fonts.dart';
 import 'models/chat_message.dart';
 import 'models/contact.dart';
 import 'services/app_settings.dart';
+import 'services/channel_service.dart';
 import 'services/ether_service.dart';
 import 'services/ble_service.dart';
 import 'services/chat_storage_service.dart';
+import 'services/group_service.dart';
 import 'services/crypto_service.dart';
 import 'services/gossip_router.dart';
 import 'services/image_service.dart';
@@ -164,6 +166,8 @@ Future<void> initServices() async {
     await CryptoService.instance.init();
     await ProfileService.instance.init();
     await ChatStorageService.instance.init();
+    await ChannelService.instance.init();
+    await GroupService.instance.init();
     await StoryService.instance.init();
 
     // Restore X25519 keys from contacts DB (survive app restarts)
@@ -299,10 +303,13 @@ Future<void> initServices() async {
         );
       },
       onForward: (packet) async {
-        // 1. BLE mesh broadcast
-        await BleService.instance.broadcastPacket(packet);
-        // 2. WiFi Direct (if running)
-        if (WifiDirectService.instance.isRunning) {
+        final mode = AppSettings.instance.connectionMode;
+        // 1. BLE mesh broadcast (skip in Internet-only mode)
+        if (mode != 1) {
+          await BleService.instance.broadcastPacket(packet);
+        }
+        // 2. WiFi Direct (if running, skip in Internet-only mode)
+        if (mode != 1 && WifiDirectService.instance.isRunning) {
           unawaited(WifiDirectService.instance.sendToAll(packet.encode()));
         }
         // 3. Relay (internet) — prefer directed send for private messages
@@ -612,12 +619,11 @@ Future<void> initServices() async {
       // publicKey — Ed25519 ключ из payload профиля
       // x25519Key — X25519 ключ base64 для E2E шифрования (пустая строка у старых версий)
       onProfile: (bleId, publicKey, nick, color, emoji, x25519Key) async {
-        // ВАЖНО: регистрируем маппинг BLE ID → publicKey ТОЛЬКО для прямых пиров.
-        // Если профиль пересылается через промежуточное устройство (gossip),
-        // bleId — это BLE ID пересыльщика, а не владельца профиля.
-        // Ошибочный маппинг создаёт "раздвоенное" подключение в UI.
+        // В Internet-only режиме игнорируем BLE профили — не нужны маппинги
+        final mode = AppSettings.instance.connectionMode;
+        // Регистрируем маппинг BLE ID → publicKey ТОЛЬКО для прямых пиров и НЕ в Internet-only.
         final isDirect = BleService.instance.isDirectBleId(bleId);
-        if (isDirect) {
+        if (isDirect && mode != 1) {
           BleService.instance.registerPeerKey(bleId, publicKey);
         }
         // X25519 ключ сохраняем для любого профиля (прямого или пересланного).
@@ -782,10 +788,15 @@ Future<void> initServices() async {
       debugPrint('[BLE] Peer connected: $peerId (no auto-profile, waiting for invite)');
     };
 
-    await BleService.instance.start();
+    // Start BLE only if not Internet-only mode
+    if (AppSettings.instance.connectionMode != 1) {
+      await BleService.instance.start();
+    } else {
+      debugPrint('[RLINK][Init] BLE skipped — Internet-only mode');
+    }
 
-    // Start WiFi Direct transport (Android only — longer range, higher bandwidth)
-    if (Platform.isAndroid) {
+    // Start WiFi Direct transport (Android only, skip in Internet-only mode)
+    if (Platform.isAndroid && AppSettings.instance.connectionMode != 1) {
       final myProfile = ProfileService.instance.profile;
       unawaited(WifiDirectService.instance.start(
         userName: myProfile?.nickname ?? 'Rlink',
@@ -793,7 +804,7 @@ Future<void> initServices() async {
     }
 
     // Start relay (internet) transport
-    if (AppSettings.instance.relayEnabled) {
+    if (AppSettings.instance.connectionMode >= 1) {
       RelayService.instance.onBlobReceived = _onBlobReceived;
       unawaited(RelayService.instance.connect());
     }
