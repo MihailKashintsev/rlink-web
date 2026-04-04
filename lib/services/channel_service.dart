@@ -269,6 +269,19 @@ class ChannelService {
     return posts.reversed.toList();
   }
 
+  Future<ChannelPost?> getLastPost(String channelId) async {
+    if (_db == null) return null;
+    final rows = await _db!.query(
+      'channel_posts',
+      where: 'channel_id = ?',
+      whereArgs: [channelId],
+      orderBy: 'timestamp DESC',
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return ChannelPost.fromMap(rows.first);
+  }
+
   Future<void> deletePost(String postId) async {
     await _db!.delete('channel_posts', where: 'id = ?', whereArgs: [postId]);
     await _db!.delete('channel_comments',

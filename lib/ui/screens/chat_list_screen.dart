@@ -4,15 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../main.dart';
+import '../../models/channel.dart';
 import '../../models/contact.dart';
+import '../../models/group.dart';
 import '../../services/ble_service.dart';
+import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/ether_service.dart';
+import '../../services/group_service.dart';
 import '../../models/user_profile.dart';
 import '../../services/profile_service.dart';
 import '../../l10n/app_l10n.dart';
 import '../../services/gossip_router.dart';
+import '../../services/relay_service.dart';
 import '../../services/story_service.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/mesh_radar_widget.dart';
@@ -50,7 +55,7 @@ class ChatListScreen extends StatefulWidget {
 }
 
 class _ChatListScreenState extends State<ChatListScreen> {
-  int _currentTab = 0;
+  int _currentTab = 0; // 0=Чаты, 1=Контакты, 2=Рядом, 3=Эфир
   bool _searchActive = false;
   final _searchController = TextEditingController();
 
@@ -79,22 +84,125 @@ class _ChatListScreenState extends State<ChatListScreen> {
     setState(() => _currentTab = 2);
   }
 
-  /// Кнопка поиска + обновления: переключает поиск и обновляет данные текущей вкладки
-  Future<void> _toggleSearch() async {
-    final wasActive = _searchActive;
+  void _toggleSearch() {
     setState(() {
       _searchActive = !_searchActive;
-      if (!_searchActive) _searchController.clear();
+      if (!_searchActive) {
+        _searchController.clear();
+        RelayService.instance.searchResults.value = [];
+      }
     });
-    // При открытии поиска — сразу обновляем данные
-    if (!wasActive) {
-      await ChatStorageService.instance.loadContacts();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Список обновлён'), duration: Duration(seconds: 1)),
-      );
-    }
+  }
+
+  void _createChannel() {
+    final nameCtrl = TextEditingController();
+    final descCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Новый канал'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: nameCtrl,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: 'Название канала'),
+            maxLength: 30,
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: descCtrl,
+            decoration: const InputDecoration(hintText: 'Описание (необязательно)'),
+            maxLength: 100,
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          FilledButton(
+            onPressed: () async {
+              final name = nameCtrl.text.trim();
+              if (name.isEmpty) return;
+              Navigator.pop(ctx);
+              try {
+                final myId = CryptoService.instance.publicKeyHex;
+                final ch = await ChannelService.instance.createChannel(
+                  name: name,
+                  adminId: myId,
+                  description: descCtrl.text.trim().isNotEmpty ? descCtrl.text.trim() : null,
+                );
+                GossipRouter.instance.broadcastChannelMeta(
+                  channelId: ch.id,
+                  name: ch.name,
+                  adminId: ch.adminId,
+                  avatarColor: ch.avatarColor,
+                  avatarEmoji: ch.avatarEmoji,
+                  description: ch.description,
+                  commentsEnabled: ch.commentsEnabled,
+                  createdAt: ch.createdAt,
+                );
+                if (mounted) {
+                  Navigator.push(context, slideRoute(
+                    ChannelViewScreen(channel: ch),
+                  ));
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Ошибка: $e')),
+                  );
+                }
+              }
+            },
+            child: const Text('Создать'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _createGroup() {
+    final nameCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Новая группа'),
+        content: TextField(
+          controller: nameCtrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Название группы'),
+          maxLength: 30,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          FilledButton(
+            onPressed: () async {
+              final name = nameCtrl.text.trim();
+              if (name.isEmpty) return;
+              Navigator.pop(ctx);
+              try {
+                final myId = CryptoService.instance.publicKeyHex;
+                final group = await GroupService.instance.createGroup(
+                  name: name,
+                  creatorId: myId,
+                  memberIds: [myId],
+                );
+                if (mounted) {
+                  Navigator.push(context, slideRoute(
+                    GroupChatScreen(group: group),
+                  ));
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Ошибка: $e')),
+                  );
+                }
+              }
+            },
+            child: const Text('Создать'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -110,10 +218,10 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 style: const TextStyle(fontSize: 16),
                 decoration: InputDecoration(
                   hintText: _currentTab == 0
-                      ? 'Поиск по чатам...'
+                      ? 'Поиск...'
                       : _currentTab == 1
-                          ? 'Поиск контактов...'
-                          : 'Поиск устройств...',
+                          ? 'Поиск контактов и людей...'
+                          : 'Поиск...',
                   hintStyle: TextStyle(color: Colors.grey.shade500),
                   border: InputBorder.none,
                 ),
@@ -124,16 +232,10 @@ class _ChatListScreenState extends State<ChatListScreen> {
         leading: _searchActive
             ? IconButton(
                 icon: const Icon(Icons.arrow_back),
-                onPressed: () {
-                  setState(() {
-                    _searchActive = false;
-                    _searchController.clear();
-                  });
-                },
+                onPressed: _toggleSearch,
               )
             : GestureDetector(
-                onTap: () => Navigator.push(context,
-                    slideRoute(const ProfileScreen())),
+                onTap: () => Navigator.push(context, slideRoute(const ProfileScreen())),
                 child: Padding(
                   padding: const EdgeInsets.all(10),
                   child: profile != null
@@ -151,51 +253,54 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 ),
               ),
         actions: [
-          if (!_searchActive) ...[
-            if (_currentTab == 2)
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                tooltip: 'Обновить список',
-                onPressed: _rescan,
-              ),
-          ],
-          // Единая кнопка поиска + обновления для вкладок чатов и контактов
-          if (_currentTab != 2 && _currentTab != 3)
+          if (_currentTab == 2 && !_searchActive)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Обновить',
+              onPressed: _rescan,
+            ),
+          if (_currentTab != 2)
             IconButton(
               icon: Icon(_searchActive ? Icons.close : Icons.search),
-              tooltip: _searchActive ? 'Закрыть поиск' : 'Поиск и обновление',
+              tooltip: _searchActive ? 'Закрыть' : 'Поиск',
               onPressed: _toggleSearch,
             ),
           if (!_searchActive)
-            IconButton(
-              icon: const Icon(Icons.settings_outlined),
-              tooltip: 'Настройки',
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  slideRoute(const SettingsScreen()),
-                );
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert),
+              onSelected: (v) {
+                switch (v) {
+                  case 'group': _createGroup();
+                  case 'channel': _createChannel();
+                  case 'settings': Navigator.push(context, slideRoute(const SettingsScreen()));
+                }
               },
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'group', child: ListTile(
+                  leading: Icon(Icons.group_add), title: Text('Новая группа'),
+                  dense: true, contentPadding: EdgeInsets.zero,
+                )),
+                const PopupMenuItem(value: 'channel', child: ListTile(
+                  leading: Icon(Icons.campaign), title: Text('Новый канал'),
+                  dense: true, contentPadding: EdgeInsets.zero,
+                )),
+                const PopupMenuDivider(),
+                const PopupMenuItem(value: 'settings', child: ListTile(
+                  leading: Icon(Icons.settings_outlined), title: Text('Настройки'),
+                  dense: true, contentPadding: EdgeInsets.zero,
+                )),
+              ],
             ),
         ],
       ),
-      body: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 250),
-        switchInCurve: Curves.easeOut,
-        switchOutCurve: Curves.easeIn,
-        child: IndexedStack(
-          key: ValueKey<int>(_currentTab),
-          index: _currentTab,
-          children: [
-            _ChatsTab(searchQuery: _searchActive ? _searchController.text : ''),
-            ContactsScreen(
-                searchQuery: _searchActive ? _searchController.text : ''),
-            _NearbyTab(),
-            ChannelsScreen(searchQuery: _searchActive ? _searchController.text : ''),
-            const GroupsScreen(),
-            const EtherScreen(),
-          ],
-        ),
+      body: IndexedStack(
+        index: _currentTab,
+        children: [
+          _UnifiedChatsTab(searchQuery: _searchActive ? _searchController.text : ''),
+          ContactsScreen(searchQuery: _searchActive ? _searchController.text : ''),
+          _NearbyTab(),
+          const EtherScreen(),
+        ],
       ),
       bottomNavigationBar: _AnimatedNavBar(
         selectedIndex: _currentTab,
@@ -204,15 +309,16 @@ class _ChatListScreenState extends State<ChatListScreen> {
           if (_searchActive) {
             _searchActive = false;
             _searchController.clear();
+            RelayService.instance.searchResults.value = [];
           }
-          if (i == 5) EtherService.instance.markRead();
+          if (i == 3) EtherService.instance.markRead();
         }),
       ),
     );
   }
 }
 
-// ── Animated bottom nav bar ─────────────────────────────────────
+// ── Animated bottom nav bar (4 tabs) ──────────────────────────────
 
 class _AnimatedNavBar extends StatelessWidget {
   final int selectedIndex;
@@ -264,16 +370,6 @@ class _AnimatedNavBar extends StatelessWidget {
           ),
           label: AppL10n.t('nav_nearby'),
         ),
-        const NavigationDestination(
-          icon: Icon(Icons.campaign_outlined),
-          selectedIcon: Icon(Icons.campaign),
-          label: 'Каналы',
-        ),
-        const NavigationDestination(
-          icon: Icon(Icons.group_outlined),
-          selectedIcon: Icon(Icons.group),
-          label: 'Группы',
-        ),
         NavigationDestination(
           icon: ValueListenableBuilder<int>(
             valueListenable: EtherService.instance.unreadCount,
@@ -291,76 +387,141 @@ class _AnimatedNavBar extends StatelessWidget {
   }
 }
 
-// ── Чаты ────────────────────────────────────────────────────────
+// ── Единый список: чаты + группы + каналы (Telegram-style) ──────
 
-class _ChatsTab extends StatefulWidget {
+enum _ChatItemType { personal, group, channel }
+
+class _UnifiedChatsTab extends StatefulWidget {
   final String searchQuery;
-  const _ChatsTab({this.searchQuery = ''});
+  const _UnifiedChatsTab({this.searchQuery = ''});
 
   @override
-  State<_ChatsTab> createState() => _ChatsTabState();
+  State<_UnifiedChatsTab> createState() => _UnifiedChatsTabState();
 }
 
-class _ChatsTabState extends State<_ChatsTab> with TickerProviderStateMixin {
+class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   List<_ChatItem> _items = [];
   StreamSubscription<IncomingMessage>? _sub;
   Timer? _loadDebounce;
-
-  // Animation state for staggered slide-in
-  bool _initialLoadDone = false;
+  VoidCallback? _groupListener;
+  VoidCallback? _channelListener;
 
   @override
   void initState() {
     super.initState();
     _load();
-    // Дебаунс 300мс — не перезагружаем весь список на каждое сообщение
     _sub = incomingMessageController.stream.listen((_) {
       _loadDebounce?.cancel();
       _loadDebounce = Timer(const Duration(milliseconds: 300), _load);
     });
+    _groupListener = () => _debouncedLoad();
+    _channelListener = () => _debouncedLoad();
+    GroupService.instance.version.addListener(_groupListener!);
+    ChannelService.instance.version.addListener(_channelListener!);
+  }
+
+  void _debouncedLoad() {
+    _loadDebounce?.cancel();
+    _loadDebounce = Timer(const Duration(milliseconds: 300), _load);
   }
 
   @override
   void dispose() {
     _loadDebounce?.cancel();
     _sub?.cancel();
+    if (_groupListener != null) GroupService.instance.version.removeListener(_groupListener!);
+    if (_channelListener != null) ChannelService.instance.version.removeListener(_channelListener!);
     super.dispose();
   }
 
-  /// Единый SQL JOIN вместо N+1 запросов — критично для производительности на iOS.
   Future<void> _load() async {
+    final items = <_ChatItem>[];
+
+    // 1) Личные чаты
     final summaries = await ChatStorageService.instance.getChatSummaries();
-    if (!mounted) return;
-    final wasEmpty = _items.isEmpty;
-    setState(() => _items = summaries.map((s) => _ChatItem(
-      peerId: s.peerId,
-      nickname: s.nickname ??
-          '${s.peerId.substring(0, s.peerId.length.clamp(0, 8))}...',
-      avatarColor: s.avatarColor ?? 0xFF607D8B,
-      avatarEmoji: s.avatarEmoji ?? '',
-      avatarImagePath: s.avatarImagePath,
-      lastMessage: s.displayText,
-      lastTime: s.timestamp,
-      isOnline: BleService.instance.isPeerConnected(s.peerId),
-    )).toList());
-    if (wasEmpty && _items.isNotEmpty && !_initialLoadDone) {
-      _initialLoadDone = true;
+    for (final s in summaries) {
+      items.add(_ChatItem(
+        type: _ChatItemType.personal,
+        id: s.peerId,
+        nickname: s.nickname ?? '${s.peerId.substring(0, s.peerId.length.clamp(0, 8))}...',
+        avatarColor: s.avatarColor ?? 0xFF607D8B,
+        avatarEmoji: s.avatarEmoji ?? '',
+        avatarImagePath: s.avatarImagePath,
+        lastMessage: s.displayText,
+        lastTime: s.timestamp,
+        isOnline: BleService.instance.isPeerConnected(s.peerId),
+      ));
     }
+
+    // 2) Группы
+    final groups = await GroupService.instance.getGroups();
+    for (final g in groups) {
+      final lastMsg = await GroupService.instance.getLastMessage(g.id);
+      items.add(_ChatItem(
+        type: _ChatItemType.group,
+        id: g.id,
+        nickname: g.name,
+        avatarColor: g.avatarColor,
+        avatarEmoji: g.avatarEmoji,
+        avatarImagePath: g.avatarImagePath,
+        lastMessage: lastMsg?.text ?? 'Группа создана',
+        lastTime: lastMsg != null
+            ? DateTime.fromMillisecondsSinceEpoch(lastMsg.timestamp)
+            : DateTime.fromMillisecondsSinceEpoch(g.createdAt),
+        isOnline: false,
+      ));
+    }
+
+    // 3) Каналы
+    final channels = await ChannelService.instance.getChannels();
+    for (final ch in channels) {
+      final lastPost = await ChannelService.instance.getLastPost(ch.id);
+      items.add(_ChatItem(
+        type: _ChatItemType.channel,
+        id: ch.id,
+        nickname: ch.name,
+        avatarColor: ch.avatarColor,
+        avatarEmoji: ch.avatarEmoji,
+        avatarImagePath: ch.avatarImagePath,
+        lastMessage: lastPost?.text ?? 'Канал создан',
+        lastTime: lastPost != null
+            ? DateTime.fromMillisecondsSinceEpoch(lastPost.timestamp)
+            : DateTime.fromMillisecondsSinceEpoch(ch.createdAt),
+        isOnline: false,
+      ));
+    }
+
+    // Сортируем по последнему сообщению (новые сверху)
+    items.sort((a, b) => b.lastTime.compareTo(a.lastTime));
+
+    if (!mounted) return;
+    setState(() => _items = items);
   }
 
-  void _navigateToChat(BuildContext context, _ChatItem item) {
-    Navigator.push(
-      context,
-      slideRoute(
-        ChatScreen(
-          peerId: item.peerId,
+  Future<void> _navigate(BuildContext context, _ChatItem item) async {
+    switch (item.type) {
+      case _ChatItemType.personal:
+        await Navigator.push(context, slideRoute(ChatScreen(
+          peerId: item.id,
           peerNickname: item.nickname,
           peerAvatarColor: item.avatarColor,
           peerAvatarEmoji: item.avatarEmoji,
           peerAvatarImagePath: item.avatarImagePath,
-        ),
-      ),
-    ).then((_) => _load());
+        )));
+      case _ChatItemType.group:
+        final group = await GroupService.instance.getGroup(item.id);
+        if (group == null || !context.mounted) return;
+        await Navigator.push(context, slideRoute(
+          GroupChatScreen(group: group),
+        ));
+      case _ChatItemType.channel:
+        final channel = await ChannelService.instance.getChannel(item.id);
+        if (channel == null || !context.mounted) return;
+        await Navigator.push(context, slideRoute(
+          ChannelViewScreen(channel: channel),
+        ));
+    }
+    _load();
   }
 
   @override
@@ -368,11 +529,9 @@ class _ChatsTabState extends State<_ChatsTab> with TickerProviderStateMixin {
     final q = widget.searchQuery.toLowerCase().trim();
     final visible = q.isEmpty
         ? _items
-        : _items
-            .where((item) =>
-                item.nickname.toLowerCase().contains(q) ||
-                item.lastMessage.toLowerCase().contains(q))
-            .toList();
+        : _items.where((item) =>
+            item.nickname.toLowerCase().contains(q) ||
+            item.lastMessage.toLowerCase().contains(q)).toList();
 
     if (_items.isEmpty) {
       return Column(children: [
@@ -380,7 +539,7 @@ class _ChatsTabState extends State<_ChatsTab> with TickerProviderStateMixin {
         const Expanded(child: _EmptyChatsState()),
       ]);
     }
-    if (visible.isEmpty) {
+    if (visible.isEmpty && q.isNotEmpty) {
       return Center(
         child: Text('Ничего не найдено',
             style: TextStyle(color: Colors.grey.shade500, fontSize: 15)),
@@ -396,7 +555,7 @@ class _ChatsTabState extends State<_ChatsTab> with TickerProviderStateMixin {
           return _AnimatedChatCard(
             index: i,
             item: item,
-            onTap: () => _navigateToChat(context, item),
+            onTap: () => _navigate(context, item),
             timeLabel: _fmtTime(item.lastTime),
           );
         },
@@ -494,15 +653,29 @@ class _AnimatedChatCard extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(
-                            item.nickname,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 15,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
+                          Row(children: [
+                            if (item.type == _ChatItemType.group)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 4),
+                                child: Icon(Icons.group, size: 16,
+                                    color: theme.colorScheme.primary.withValues(alpha: 0.7)),
+                              ),
+                            if (item.type == _ChatItemType.channel)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 4),
+                                child: Icon(Icons.campaign, size: 16,
+                                    color: theme.colorScheme.primary.withValues(alpha: 0.7)),
+                              ),
+                            Expanded(child: Text(
+                              item.nickname,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 15,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            )),
+                          ]),
                           const SizedBox(height: 3),
                           Text(
                             item.lastMessage,
@@ -613,13 +786,16 @@ class _EmptyChatsStateState extends State<_EmptyChatsState>
 }
 
 class _ChatItem {
-  final String peerId, nickname, lastMessage, avatarEmoji;
+  final _ChatItemType type;
+  final String id; // peerId for personal, groupId for group, channelId for channel
+  final String nickname, lastMessage, avatarEmoji;
   final int avatarColor;
   final String? avatarImagePath;
   final DateTime lastTime;
   final bool isOnline;
   const _ChatItem({
-    required this.peerId,
+    this.type = _ChatItemType.personal,
+    required this.id,
     required this.nickname,
     required this.avatarColor,
     required this.avatarEmoji,
@@ -628,6 +804,8 @@ class _ChatItem {
     required this.lastTime,
     required this.isOnline,
   });
+  // Backward compat
+  String get peerId => id;
 }
 
 // ── Сторис полоска ───────────────────────────────────────────────
