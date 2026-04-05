@@ -716,8 +716,8 @@ class GossipRouter {
         if (text != null) {
           final handler = onMessageReceived;
           if (handler != null) {
-            final lat = packet.payload['lat'] as double?;
-            final lng = packet.payload['lng'] as double?;
+            final lat = (packet.payload['lat'] as num?)?.toDouble();
+            final lng = (packet.payload['lng'] as num?)?.toDouble();
             await handler(
               from,
               EncryptedMessage(
@@ -827,8 +827,8 @@ class GossipRouter {
         }
         final handler = onMessageReceived;
         if (handler != null) {
-          final lat = packet.payload['lat'] as double?;
-          final lng = packet.payload['lng'] as double?;
+          final lat = (packet.payload['lat'] as num?)?.toDouble();
+          final lng = (packet.payload['lng'] as num?)?.toDouble();
           await handler(
             encrypted.senderPublicKey,
             encrypted,

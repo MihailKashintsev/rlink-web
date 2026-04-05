@@ -71,8 +71,7 @@ class _ChatScreenState extends State<ChatScreen> {
   double? _pendingLng;
   Timer? _typingDebounce;
 
-  /// Send media: relay blob for speed + gossip chunks for reliability.
-  /// Gossip chunks are forwarded via BOTH BLE and relay, so they always work.
+  /// Send media: relay blob over internet, BLE chunks for mesh.
   Future<void> _sendMedia({
     required Uint8List bytes,
     required String msgId,
@@ -84,8 +83,9 @@ class _ChatScreenState extends State<ChatScreen> {
     String? fileName,
   }) async {
     final mode = AppSettings.instance.connectionMode;
+    bool blobSent = false;
 
-    // 1. Try relay blob (instant delivery over internet)
+    // 1. Relay blob — fast, instant delivery over internet
     if (RelayService.instance.isConnected && mode >= 1) {
       try {
         final compressed = ImageService.instance.compress(bytes);
@@ -100,33 +100,35 @@ class _ChatScreenState extends State<ChatScreen> {
           isFile: isFile,
           fileName: fileName,
         );
-        debugPrint('[RLINK][Media] Sent blob ${compressed.length} bytes via relay');
+        blobSent = true;
+        debugPrint('[RLINK][Media] Blob sent: ${compressed.length} bytes');
       } catch (e) {
         debugPrint('[RLINK][Media] Relay blob failed: $e');
       }
     }
 
-    // 2. ALWAYS send via gossip chunks — they route through BLE AND relay.
-    // This ensures delivery even if the blob was silently dropped.
-    // On the receiver, blob arrives first (fast), chunks deduplicate automatically.
-    final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-    debugPrint('[RLINK][Media] Sending ${chunks.length} gossip chunks for $msgId');
-    await GossipRouter.instance.sendImgMeta(
-      msgId: msgId,
-      totalChunks: chunks.length,
-      fromId: myId,
-      recipientId: _resolvedPeerId,
-      isVoice: isVoice,
-      isVideo: isVideo,
-      isSquare: isSquare,
-      isFile: isFile,
-      fileName: fileName,
-    );
-    for (var i = 0; i < chunks.length; i++) {
-      await GossipRouter.instance.sendImgChunk(
-        msgId: msgId, index: i, base64Data: chunks[i],
-        fromId: myId, recipientId: _resolvedPeerId,
+    // 2. BLE gossip chunks — only when BLE is active (mode 0 or 2)
+    //    OR if blob failed and we need any delivery method
+    if (mode != 1 || !blobSent) {
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      debugPrint('[RLINK][Media] Sending ${chunks.length} gossip chunks');
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        recipientId: _resolvedPeerId,
+        isVoice: isVoice,
+        isVideo: isVideo,
+        isSquare: isSquare,
+        isFile: isFile,
+        fileName: fileName,
       );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId, index: i, base64Data: chunks[i],
+          fromId: myId, recipientId: _resolvedPeerId,
+        );
+      }
     }
   }
 
