@@ -451,15 +451,28 @@ class _VideoOverlayState extends State<_VideoOverlay>
     if (ctrl == null || !ctrl.value.isInitialized) {
       return Container(color: const Color(0xFF111111));
     }
-    // Fill the square — scale camera preview to cover the entire square area
+    // Cover-crop: fill the square, clip overflow (no stretching!)
     final previewAspect = ctrl.value.aspectRatio;
-    return Transform.scale(
-      scale: previewAspect > 1 ? previewAspect : 1.0 / previewAspect,
-      child: Center(
-        child: AspectRatio(
-          aspectRatio: previewAspect,
-          child: CameraPreview(ctrl),
-        ),
+    // aspectRatio = previewSize.width / previewSize.height
+    // Camera in portrait: aspect might be >1 (raw sensor) or <1 depending on platform.
+    // We scale so the SMALLER dimension matches the square, the larger overflows.
+    final double w, h;
+    if (previewAspect >= 1.0) {
+      // Landscape-ish: wider than tall → match height to square, width overflows
+      w = size * previewAspect;
+      h = size;
+    } else {
+      // Portrait-ish: taller than wide → match width to square, height overflows
+      w = size;
+      h = size / previewAspect;
+    }
+    return OverflowBox(
+      maxWidth: w,
+      maxHeight: h,
+      child: SizedBox(
+        width: w,
+        height: h,
+        child: CameraPreview(ctrl),
       ),
     );
   }

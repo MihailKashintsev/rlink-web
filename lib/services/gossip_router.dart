@@ -92,8 +92,10 @@ typedef OnMessageReceived = Future<void> Function(
   String fromId,
   EncryptedMessage msg,
   String messageId,
-  String? replyToMessageId,
-);
+  String? replyToMessageId, {
+  double? latitude,
+  double? longitude,
+});
 typedef OnAckReceived = void Function(String fromId, String messageId);
 typedef OnForwardPacket = Future<void> Function(GossipPacket packet);
 // bleId — BLE device ID источника (для маппинга), publicKey — Ed25519 ключ,
@@ -232,6 +234,8 @@ class GossipRouter {
     String? recipientId,
     String? messageId,
     String? replyToMessageId,
+    double? latitude,
+    double? longitude,
   }) async {
     // Безопасность: включаем 8-символьный префикс публичного ключа получателя
     // как поле 'r' в payload. Это позволяет другим узлам отфильтровать пакеты,
@@ -249,6 +253,8 @@ class GossipRouter {
       'text': text,
       'from': senderId,
       if (rid8 != null) 'r': rid8,
+      if (latitude != null) 'lat': latitude,
+      if (longitude != null) 'lng': longitude,
     };
 
     // Пробуем включить reply-контекст — пропускаем если пакет не уместится в MTU
@@ -287,12 +293,16 @@ class GossipRouter {
     required String senderId,
     required String recipientId,
     required String messageId,
+    double? latitude,
+    double? longitude,
   }) async {
     final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
 
     final payload = <String, dynamic>{
       ...encrypted.toJson(),
       if (rid8 != null) 'r': rid8,
+      if (latitude != null) 'lat': latitude,
+      if (longitude != null) 'lng': longitude,
     };
 
     final packet = GossipPacket(
@@ -706,6 +716,8 @@ class GossipRouter {
         if (text != null) {
           final handler = onMessageReceived;
           if (handler != null) {
+            final lat = packet.payload['lat'] as double?;
+            final lng = packet.payload['lng'] as double?;
             await handler(
               from,
               EncryptedMessage(
@@ -718,6 +730,8 @@ class GossipRouter {
               ),
               packet.id,
               replyToMessageId,
+              latitude: lat,
+              longitude: lng,
             );
           }
         }
@@ -813,11 +827,15 @@ class GossipRouter {
         }
         final handler = onMessageReceived;
         if (handler != null) {
+          final lat = packet.payload['lat'] as double?;
+          final lng = packet.payload['lng'] as double?;
           await handler(
             encrypted.senderPublicKey,
             encrypted,
             packet.id,
             null,
+            latitude: lat,
+            longitude: lng,
           );
         }
         return;

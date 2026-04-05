@@ -188,7 +188,8 @@ Future<void> initServices() async {
 
     GossipRouter.instance.init(
       myKey: CryptoService.instance.publicKeyHex,
-      onMessage: (fromId, encrypted, messageId, replyToMessageId) async {
+      onMessage: (fromId, encrypted, messageId, replyToMessageId,
+          {double? latitude, double? longitude}) async {
         debugPrint(
             '[Main] onMessage fromId=${fromId.substring(0, 16)} ephemeral=${encrypted.ephemeralPublicKey.isEmpty ? "empty" : "set"}');
 
@@ -243,6 +244,8 @@ Future<void> initServices() async {
           peerId: fromId,
           text: text,
           replyToMessageId: replyToMessageId,
+          latitude: latitude,
+          longitude: longitude,
           isOutgoing: false,
           timestamp: now,
           status: MessageStatus.delivered,

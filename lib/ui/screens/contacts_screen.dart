@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
 import '../../models/contact.dart';
 import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/crypto_service.dart';
+import '../../services/gossip_router.dart';
+import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
 import '../widgets/avatar_widget.dart';
 import 'chat_screen.dart';
@@ -184,7 +187,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     _RelayPeerTile(
                       peer: peer,
                       onTap: () {
-                        // Save as contact
+                        // Save as contact with nick from relay
                         final nick = peer.nick.isNotEmpty
                             ? peer.nick
                             : peer.shortId;
@@ -195,6 +198,17 @@ class _ContactsScreenState extends State<ContactsScreen> {
                           avatarEmoji: '',
                           addedAt: DateTime.now(),
                         ));
+                        // Send our profile via relay so the peer knows who we are
+                        final myProfile = ProfileService.instance.profile;
+                        if (myProfile != null) {
+                          GossipRouter.instance.broadcastProfile(
+                            id: myProfile.publicKeyHex,
+                            nick: myProfile.nickname,
+                            color: myProfile.avatarColor,
+                            emoji: myProfile.avatarEmoji,
+                            x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+                          );
+                        }
                         _openChat(context, peer.publicKey, nick,
                             0xFF607D8B, '', null);
                       },

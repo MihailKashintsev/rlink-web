@@ -71,7 +71,8 @@ class _ChatScreenState extends State<ChatScreen> {
   double? _pendingLng;
   Timer? _typingDebounce;
 
-  /// Send media: prefer relay blob if connected, fallback to BLE chunks
+  /// Send media: relay blob for speed + gossip chunks for reliability.
+  /// Gossip chunks are forwarded via BOTH BLE and relay, so they always work.
   Future<void> _sendMedia({
     required Uint8List bytes,
     required String msgId,
@@ -82,42 +83,50 @@ class _ChatScreenState extends State<ChatScreen> {
     bool isFile = false,
     String? fileName,
   }) async {
-    final compressed = ImageService.instance.compress(bytes);
-    // Try relay blob first (instant delivery)
-    if (RelayService.instance.isConnected &&
-        AppSettings.instance.connectionMode >= 1) {
-      await RelayService.instance.sendBlob(
-        recipientKey: _resolvedPeerId,
-        fromId: myId,
-        msgId: msgId,
-        compressedData: compressed,
-        isVoice: isVoice,
-        isVideo: isVideo,
-        isSquare: isSquare,
-        isFile: isFile,
-        fileName: fileName,
-      );
-    }
-    // Also send via BLE chunks for mesh delivery
-    if (AppSettings.instance.connectionMode != 1) {
-      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-      await GossipRouter.instance.sendImgMeta(
-        msgId: msgId,
-        totalChunks: chunks.length,
-        fromId: myId,
-        recipientId: _resolvedPeerId,
-        isVoice: isVoice,
-        isVideo: isVideo,
-        isSquare: isSquare,
-        isFile: isFile,
-        fileName: fileName,
-      );
-      for (var i = 0; i < chunks.length; i++) {
-        await GossipRouter.instance.sendImgChunk(
-          msgId: msgId, index: i, base64Data: chunks[i],
-          fromId: myId, recipientId: _resolvedPeerId,
+    final mode = AppSettings.instance.connectionMode;
+
+    // 1. Try relay blob (instant delivery over internet)
+    if (RelayService.instance.isConnected && mode >= 1) {
+      try {
+        final compressed = ImageService.instance.compress(bytes);
+        await RelayService.instance.sendBlob(
+          recipientKey: _resolvedPeerId,
+          fromId: myId,
+          msgId: msgId,
+          compressedData: compressed,
+          isVoice: isVoice,
+          isVideo: isVideo,
+          isSquare: isSquare,
+          isFile: isFile,
+          fileName: fileName,
         );
+        debugPrint('[RLINK][Media] Sent blob ${compressed.length} bytes via relay');
+      } catch (e) {
+        debugPrint('[RLINK][Media] Relay blob failed: $e');
       }
+    }
+
+    // 2. ALWAYS send via gossip chunks — they route through BLE AND relay.
+    // This ensures delivery even if the blob was silently dropped.
+    // On the receiver, blob arrives first (fast), chunks deduplicate automatically.
+    final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+    debugPrint('[RLINK][Media] Sending ${chunks.length} gossip chunks for $msgId');
+    await GossipRouter.instance.sendImgMeta(
+      msgId: msgId,
+      totalChunks: chunks.length,
+      fromId: myId,
+      recipientId: _resolvedPeerId,
+      isVoice: isVoice,
+      isVideo: isVideo,
+      isSquare: isSquare,
+      isFile: isFile,
+      fileName: fileName,
+    );
+    for (var i = 0; i < chunks.length; i++) {
+      await GossipRouter.instance.sendImgChunk(
+        msgId: msgId, index: i, base64Data: chunks[i],
+        fromId: myId, recipientId: _resolvedPeerId,
+      );
     }
   }
 
@@ -464,6 +473,8 @@ class _ChatScreenState extends State<ChatScreen> {
           senderId: myId,
           recipientId: targetPeerId,
           messageId: msgId,
+          latitude: lat,
+          longitude: lng,
         );
         debugPrint('[RLINK][Chat] Sent ENCRYPTED msg $msgId');
       } else {
@@ -474,6 +485,8 @@ class _ChatScreenState extends State<ChatScreen> {
           recipientId: targetPeerId,
           messageId: msgId,
           replyToMessageId: _replyToMessageId,
+          latitude: lat,
+          longitude: lng,
         );
         debugPrint('[RLINK][Chat] Sent RAW msg $msgId');
       }
