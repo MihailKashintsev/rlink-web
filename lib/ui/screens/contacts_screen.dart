@@ -20,6 +20,14 @@ class ContactsScreen extends StatefulWidget {
 class _ContactsScreenState extends State<ContactsScreen> {
   Timer? _debounce;
   String _lastQuery = '';
+  bool _isSearching = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Re-trigger search when relay connects (user may have typed while offline)
+    RelayService.instance.state.addListener(_onRelayStateChanged);
+  }
 
   @override
   void didUpdateWidget(ContactsScreen old) {
@@ -32,8 +40,20 @@ class _ContactsScreenState extends State<ContactsScreen> {
   @override
   void dispose() {
     _debounce?.cancel();
+    RelayService.instance.state.removeListener(_onRelayStateChanged);
     RelayService.instance.searchResults.value = [];
     super.dispose();
+  }
+
+  void _onRelayStateChanged() {
+    // When relay connects, retry the last pending query
+    if (RelayService.instance.isConnected) {
+      final q = widget.searchQuery.trim();
+      if (q.length >= 2) {
+        _lastQuery = ''; // allow retry
+        _onQueryChanged(widget.searchQuery);
+      }
+    }
   }
 
   void _onQueryChanged(String query) {
@@ -42,13 +62,23 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (q.isEmpty || q.length < 2) {
       RelayService.instance.searchResults.value = [];
       _lastQuery = '';
+      _isSearching = false;
+      if (mounted) setState(() {});
       return;
     }
     if (q == _lastQuery) return;
+    _isSearching = true;
+    if (mounted) setState(() {});
     _debounce = Timer(const Duration(milliseconds: 500), () {
       if (RelayService.instance.isConnected) {
         RelayService.instance.searchUsers(q);
         _lastQuery = q;
+        // Clear searching state after a short timeout
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) setState(() => _isSearching = false);
+        });
+      } else {
+        if (mounted) setState(() => _isSearching = false);
       }
     });
   }
@@ -86,7 +116,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     final q = widget.searchQuery.toLowerCase().trim();
 
     return ValueListenableBuilder<List<Contact>>(
@@ -172,8 +201,24 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     ),
                 ],
 
+                // ── Searching indicator ──
+                if (q.isNotEmpty && _isSearching && !hasRelay) ...[
+                  const SizedBox(height: 16),
+                  const Center(
+                    child: SizedBox(
+                      width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Center(
+                    child: Text('Поиск в сети...',
+                      style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
+                  ),
+                ],
+
                 // ── No results ──
-                if (q.isNotEmpty && !hasLocal && !hasRelay) ...[
+                if (q.isNotEmpty && !hasLocal && !hasRelay && !_isSearching) ...[
                   const SizedBox(height: 48),
                   Icon(Icons.person_search_rounded,
                       color: Colors.grey.shade600, size: 40),

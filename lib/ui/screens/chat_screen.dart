@@ -1023,7 +1023,8 @@ class _ChatScreenState extends State<ChatScreen> {
             emoji: widget.peerAvatarEmoji,
             imagePath: widget.peerAvatarImagePath,
             size: 38,
-            isOnline: BleService.instance.isPeerConnected(_resolvedPeerId),
+            isOnline: BleService.instance.isPeerConnected(_resolvedPeerId) ||
+                (RelayService.instance.isConnected && RelayService.instance.isPeerOnline(_resolvedPeerId)),
           ),
           const SizedBox(width: 10),
           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1043,16 +1044,21 @@ class _ChatScreenState extends State<ChatScreen> {
                 return ValueListenableBuilder<int>(
                   valueListenable: BleService.instance.peersCount,
                   builder: (_, __, ___) {
-                    final online = BleService.instance.isPeerConnected(_resolvedPeerId);
-                    final relayOnline = RelayService.instance.isConnected &&
-                        RelayService.instance.isPeerOnline(_resolvedPeerId);
-                    final isOnline = online || relayOnline;
-                    return Text(
-                      isOnline ? 'в сети' : 'не в сети',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: isOnline ? Colors.green : Colors.grey.shade500,
-                      ),
+                    return ValueListenableBuilder<int>(
+                      valueListenable: RelayService.instance.presenceVersion,
+                      builder: (_, __, ___) {
+                        final online = BleService.instance.isPeerConnected(_resolvedPeerId);
+                        final relayOnline = RelayService.instance.isConnected &&
+                            RelayService.instance.isPeerOnline(_resolvedPeerId);
+                        final isOnline = online || relayOnline;
+                        return Text(
+                          isOnline ? 'в сети' : '��е в сети',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isOnline ? Colors.green : Colors.grey.shade500,
+                          ),
+                        );
+                      },
                     );
                   },
                 );
@@ -1125,6 +1131,26 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
       body: Column(children: [
+        // Sending progress indicator
+        if (_isSending)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            color: Theme.of(context).colorScheme.primaryContainer,
+            child: Row(children: [
+              const SizedBox(
+                width: 14, height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 10),
+              Text('Отправка...',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.onPrimaryContainer,
+                ),
+              ),
+            ]),
+          ),
         Expanded(
           child: Stack(
             fit: StackFit.expand,

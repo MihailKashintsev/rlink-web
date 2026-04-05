@@ -806,6 +806,7 @@ Future<void> initServices() async {
     // Start relay (internet) transport
     if (AppSettings.instance.connectionMode >= 1) {
       RelayService.instance.onBlobReceived = _onBlobReceived;
+      RelayService.instance.onPeerOnline = _onRelayPeerOnline;
       unawaited(RelayService.instance.connect());
     }
 
@@ -837,6 +838,33 @@ Future<void> _updateEtherNameFilter() async {
     if (myProfile != null) names.add(myProfile.nickname);
     NameFilter.instance.updateDynamicNames(names);
   } catch (_) {}
+}
+
+/// When a relay peer comes online, send our avatar via relay blob (instant delivery).
+void _onRelayPeerOnline(String peerPublicKey) {
+  final myProfile = ProfileService.instance.profile;
+  if (myProfile == null) return;
+  final imagePath = ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
+  if (imagePath == null || !File(imagePath).existsSync()) return;
+
+  // Debounce: don't spam avatar sends
+  unawaited(Future.delayed(const Duration(seconds: 1), () async {
+    try {
+      final bytes = await File(imagePath).readAsBytes();
+      final compressed = ImageService.instance.compress(bytes);
+      final msgId = 'avatar_${myProfile.publicKeyHex.substring(0, 16)}';
+      await RelayService.instance.sendBlob(
+        recipientKey: peerPublicKey,
+        fromId: myProfile.publicKeyHex,
+        msgId: msgId,
+        compressedData: compressed,
+        isSquare: true,
+      );
+      debugPrint('[RLINK][Avatar] Sent avatar via relay blob to ${peerPublicKey.substring(0, 8)}');
+    } catch (e) {
+      debugPrint('[RLINK][Avatar] Relay avatar send failed: $e');
+    }
+  }));
 }
 
 /// Отправляет аватар-изображение по BLE (fire-and-forget, вызывается из onPeerConnected).
@@ -899,6 +927,21 @@ int _bestSignalLevel() {
 void _onBlobReceived(String fromId, String msgId, Uint8List data,
     bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName) async {
   debugPrint('[RLINK][Blob] Received ${data.length} bytes from ${fromId.substring(0, 8)} msgId=$msgId voice=$isVoice video=$isVideo file=$isFile');
+
+  // Handle avatar blob — save as contact avatar, not a chat message
+  if (msgId.startsWith('avatar_')) {
+    try {
+      final decompressed = ImageService.instance.decompress(data);
+      final avatarPath = await ImageService.instance.saveContactAvatar(
+        fromId, decompressed,
+      );
+      await ChatStorageService.instance.updateContactAvatarImage(fromId, avatarPath);
+      debugPrint('[RLINK][Avatar] Saved relay avatar for ${fromId.substring(0, 8)} → $avatarPath');
+    } catch (e) {
+      debugPrint('[RLINK][Avatar] Failed to save relay avatar: $e');
+    }
+    return;
+  }
 
   // Feed directly to ImageService as if all chunks arrived at once
   ImageService.instance.initAssembly(

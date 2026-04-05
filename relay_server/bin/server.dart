@@ -282,7 +282,21 @@ shelf.Handler _wsHandler() {
               'onlineCount': _users.length,
             }));
 
-            // Notify contacts about online status
+            // Send currently online peers to the new user
+            for (final other in _users.values) {
+              if (other.publicKey == publicKey) continue;
+              try {
+                ws.sink.add(jsonEncode({
+                  'type': 'presence',
+                  'publicKey': other.publicKey,
+                  'online': true,
+                  'nick': other.nick,
+                  if (other.x25519Key.isNotEmpty) 'x25519': other.x25519Key,
+                }));
+              } catch (_) {}
+            }
+
+            // Notify other users about this new user
             _broadcastPresence(publicKey, true);
 
             stdout.writeln('[+] ${nick.isEmpty ? shortId : nick} connected (${_users.length} online)');

@@ -63,11 +63,16 @@ class RelayService {
   void Function(String fromId, String msgId, Uint8List data,
       bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName)? onBlobReceived;
 
+  /// Callback when a new peer comes online (publicKey) — used for avatar sync
+  void Function(String publicKey)? onPeerOnline;
+
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
 
   /// Online presence of known peers
   final Map<String, bool> _peerOnline = {};
+  /// Peer nicks discovered via relay presence
+  final Map<String, String> _peerNicks = {};
   final ValueNotifier<int> presenceVersion = ValueNotifier(0);
 
   bool get isConnected => state.value == RelayState.connected;
@@ -419,9 +424,19 @@ class RelayService {
       _peerX25519Keys[publicKey] = x25519Key;
       BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
       unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
-      debugPrint('[RLINK][Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'} (x25519 key received)');
-    } else {
-      debugPrint('[RLINK][Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'}');
+    }
+
+    // Store nick from initial presence dump (server sends nick for online peers)
+    final nick = msg['nick'] as String?;
+    if (nick != null && nick.isNotEmpty) {
+      _peerNicks[publicKey] = nick;
+    }
+
+    debugPrint('[RLINK][Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'}');
+
+    // Notify about new peer online (for avatar sync, etc.)
+    if (online) {
+      onPeerOnline?.call(publicKey);
     }
   }
 

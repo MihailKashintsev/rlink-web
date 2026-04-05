@@ -108,7 +108,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
   Future<void> _setupController(int cameraIndex) async {
     final controller = CameraController(
       _cameras[cameraIndex],
-      ResolutionPreset.high,
+      ResolutionPreset.medium,
       enableAudio: true,
       imageFormatGroup: ImageFormatGroup.jpeg,
     );
