@@ -21,66 +21,82 @@ class ContactsScreen extends StatefulWidget {
 }
 
 class _ContactsScreenState extends State<ContactsScreen> {
+  final _localSearchController = TextEditingController();
   Timer? _debounce;
   String _lastQuery = '';
   bool _isSearching = false;
 
+  /// Effective query: local field takes priority, then parent widget query
+  String get _effectiveQuery {
+    final local = _localSearchController.text.trim();
+    if (local.isNotEmpty) return local;
+    return widget.searchQuery.trim();
+  }
+
   @override
   void initState() {
     super.initState();
-    // Re-trigger search when relay connects (user may have typed while offline)
     RelayService.instance.state.addListener(_onRelayStateChanged);
+    _localSearchController.addListener(_onLocalSearchChanged);
   }
 
   @override
   void didUpdateWidget(ContactsScreen old) {
     super.didUpdateWidget(old);
-    if (widget.searchQuery != old.searchQuery) {
-      _onQueryChanged(widget.searchQuery);
+    // Parent (global search bar) changed query — trigger search if local field is empty
+    if (widget.searchQuery != old.searchQuery &&
+        _localSearchController.text.isEmpty) {
+      _triggerSearch(_effectiveQuery);
     }
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
+    _localSearchController.dispose();
     RelayService.instance.state.removeListener(_onRelayStateChanged);
     RelayService.instance.searchResults.value = [];
     super.dispose();
   }
 
-  void _onRelayStateChanged() {
-    // When relay connects, retry the last pending query
-    if (RelayService.instance.isConnected) {
-      final q = widget.searchQuery.trim();
-      if (q.length >= 2) {
-        _lastQuery = ''; // allow retry
-        _onQueryChanged(widget.searchQuery);
-      }
-    }
+  void _onLocalSearchChanged() {
+    _triggerSearch(_effectiveQuery);
+    if (mounted) setState(() {});
   }
 
-  void _onQueryChanged(String query) {
+  void _onRelayStateChanged() {
+    if (RelayService.instance.isConnected) {
+      final q = _effectiveQuery;
+      if (q.length >= 2) {
+        _lastQuery = ''; // allow retry
+        _triggerSearch(q);
+      }
+    }
+    if (mounted) setState(() {}); // update relay status indicator
+  }
+
+  void _triggerSearch(String query) {
     _debounce?.cancel();
     final q = query.trim();
     if (q.isEmpty || q.length < 2) {
       RelayService.instance.searchResults.value = [];
       _lastQuery = '';
       _isSearching = false;
-      if (mounted) setState(() {});
       return;
     }
     if (q == _lastQuery) return;
     _isSearching = true;
     if (mounted) setState(() {});
-    _debounce = Timer(const Duration(milliseconds: 500), () {
+    _debounce = Timer(const Duration(milliseconds: 400), () {
       if (RelayService.instance.isConnected) {
+        debugPrint('[RLINK][Contacts] Sending search: "$q"');
         RelayService.instance.searchUsers(q);
         _lastQuery = q;
-        // Clear searching state after a short timeout
-        Future.delayed(const Duration(seconds: 2), () {
+        Future.delayed(const Duration(seconds: 3), () {
           if (mounted) setState(() => _isSearching = false);
         });
       } else {
+        debugPrint('[RLINK][Contacts] Relay not connected, skipping search');
         if (mounted) setState(() => _isSearching = false);
       }
     });
@@ -102,10 +118,32 @@ class _ContactsScreenState extends State<ContactsScreen> {
     );
   }
 
+  void _onTapRelayPeer(RelayPeer peer) {
+    final nick = peer.nick.isNotEmpty ? peer.nick : peer.shortId;
+    ChatStorageService.instance.saveContact(Contact(
+      publicKeyHex: peer.publicKey,
+      nickname: nick,
+      avatarColor: 0xFF607D8B,
+      avatarEmoji: '',
+      addedAt: DateTime.now(),
+    ));
+    // Send our profile so the peer knows who we are
+    final myProfile = ProfileService.instance.profile;
+    if (myProfile != null) {
+      GossipRouter.instance.broadcastProfile(
+        id: myProfile.publicKeyHex,
+        nick: myProfile.nickname,
+        color: myProfile.avatarColor,
+        emoji: myProfile.avatarEmoji,
+        x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+      );
+    }
+    _openChat(context, peer.publicKey, nick, 0xFF607D8B, '', null);
+  }
+
   void _openDirectByKey(BuildContext context) {
-    final key = widget.searchQuery.trim().toLowerCase();
+    final key = _effectiveQuery.toLowerCase();
     if (key.length < 8) return;
-    // Save as contact stub
     final nick = '${key.substring(0, 8)}...';
     ChatStorageService.instance.saveContact(Contact(
       publicKeyHex: key,
@@ -119,159 +157,200 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final q = widget.searchQuery.toLowerCase().trim();
+    final cs = Theme.of(context).colorScheme;
+    final q = _effectiveQuery.toLowerCase();
+    final relayConnected = RelayService.instance.isConnected;
 
-    return ValueListenableBuilder<List<Contact>>(
-      valueListenable: ChatStorageService.instance.contactsNotifier,
-      builder: (_, contacts, __) {
-        final localVisible = q.isEmpty
-            ? contacts
-            : contacts.where((c) =>
-                c.nickname.toLowerCase().contains(q) ||
-                c.publicKeyHex.toLowerCase().startsWith(q) ||
-                c.shortId.toLowerCase().contains(q)).toList();
+    return Column(children: [
+      // ── Search field ──
+      Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+        child: TextField(
+          controller: _localSearchController,
+          style: const TextStyle(fontSize: 15),
+          decoration: InputDecoration(
+            hintText: 'Поиск контактов и людей...',
+            hintStyle: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+            prefixIcon: Icon(Icons.search, color: Colors.grey.shade500, size: 20),
+            suffixIcon: _localSearchController.text.isNotEmpty
+                ? IconButton(
+                    icon: Icon(Icons.close, size: 18, color: Colors.grey.shade500),
+                    onPressed: () {
+                      _localSearchController.clear();
+                      RelayService.instance.searchResults.value = [];
+                      _lastQuery = '';
+                    },
+                  )
+                : null,
+            filled: true,
+            fillColor: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(24),
+              borderSide: BorderSide.none,
+            ),
+            contentPadding: const EdgeInsets.symmetric(vertical: 8),
+            isDense: true,
+          ),
+        ),
+      ),
 
-        return ValueListenableBuilder<List<RelayPeer>>(
-          valueListenable: RelayService.instance.searchResults,
-          builder: (_, relayResults, __) {
-            // Filter out relay results that are already in local contacts
-            final localKeys = contacts.map((c) => c.publicKeyHex).toSet();
-            final filteredRelay = relayResults
-                .where((r) => !localKeys.contains(r.publicKey))
-                .toList();
+      // ── Relay status ──
+      if (!relayConnected)
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          color: Colors.orange.shade100,
+          child: Row(children: [
+            Icon(Icons.wifi_off, size: 14, color: Colors.orange.shade800),
+            const SizedBox(width: 6),
+            Text('Relay не подключён — поиск людей недоступен',
+                style: TextStyle(fontSize: 11, color: Colors.orange.shade800)),
+          ]),
+        ),
 
-            final hasLocal = localVisible.isNotEmpty;
-            final hasRelay = filteredRelay.isNotEmpty && q.isNotEmpty;
-            final showDirectButton = q.length >= 8 && !hasLocal && !hasRelay;
+      // ── Content ──
+      Expanded(
+        child: ValueListenableBuilder<List<Contact>>(
+          valueListenable: ChatStorageService.instance.contactsNotifier,
+          builder: (_, contacts, __) {
+            final localVisible = q.isEmpty
+                ? contacts
+                : contacts.where((c) =>
+                    c.nickname.toLowerCase().contains(q) ||
+                    c.publicKeyHex.toLowerCase().startsWith(q) ||
+                    c.shortId.toLowerCase().contains(q)).toList();
 
-            if (contacts.isEmpty && q.isEmpty) {
-              return Center(
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.people_outline,
-                      size: 64, color: Colors.grey.shade700),
-                  const SizedBox(height: 16),
-                  Text('Нет контактов',
-                      style: TextStyle(
-                          color: Colors.grey.shade500, fontSize: 16)),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Используй поиск чтобы найти\nсобеседников в сети',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        color: Colors.grey.shade600, fontSize: 13),
-                  ),
-                ]),
-              );
-            }
+            return ValueListenableBuilder<List<RelayPeer>>(
+              valueListenable: RelayService.instance.searchResults,
+              builder: (_, relayResults, __) {
+                // Show ALL relay results — don't filter out existing contacts.
+                // Existing contacts appear in both sections — user expects to see search results.
+                final filteredRelay = q.isEmpty ? <RelayPeer>[] : relayResults;
 
-            return ListView(
-              children: [
-                // ── Local contacts ──
-                if (hasLocal) ...[
-                  if (q.isNotEmpty)
-                    _SectionHeader(
-                      title: 'Мои контакты',
-                      count: localVisible.length,
-                    ),
-                  for (final c in localVisible) _ContactTile(contact: c),
-                ],
+                final hasLocal = localVisible.isNotEmpty;
+                final hasRelay = filteredRelay.isNotEmpty;
+                final showDirectButton =
+                    q.length >= 8 && !hasLocal && !hasRelay;
 
-                // ── Relay results ──
-                if (hasRelay) ...[
-                  _SectionHeader(
-                    title: 'Найдены в сети',
-                    count: filteredRelay.length,
-                    icon: Icons.wifi,
-                  ),
-                  for (final peer in filteredRelay)
-                    _RelayPeerTile(
-                      peer: peer,
-                      onTap: () {
-                        // Save as contact with nick from relay
-                        final nick = peer.nick.isNotEmpty
-                            ? peer.nick
-                            : peer.shortId;
-                        ChatStorageService.instance.saveContact(Contact(
-                          publicKeyHex: peer.publicKey,
-                          nickname: nick,
-                          avatarColor: 0xFF607D8B,
-                          avatarEmoji: '',
-                          addedAt: DateTime.now(),
-                        ));
-                        // Send our profile via relay so the peer knows who we are
-                        final myProfile = ProfileService.instance.profile;
-                        if (myProfile != null) {
-                          GossipRouter.instance.broadcastProfile(
-                            id: myProfile.publicKeyHex,
-                            nick: myProfile.nickname,
-                            color: myProfile.avatarColor,
-                            emoji: myProfile.avatarEmoji,
-                            x25519Key: CryptoService.instance.x25519PublicKeyBase64,
-                          );
-                        }
-                        _openChat(context, peer.publicKey, nick,
-                            0xFF607D8B, '', null);
-                      },
-                    ),
-                ],
+                if (contacts.isEmpty && q.isEmpty) {
+                  return Center(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.people_outline,
+                          size: 64, color: Colors.grey.shade700),
+                      const SizedBox(height: 16),
+                      Text('Нет контактов',
+                          style: TextStyle(
+                              color: Colors.grey.shade500, fontSize: 16)),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Введи имя или ID в поле выше\nчтобы найти собеседников',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: Colors.grey.shade600, fontSize: 13),
+                      ),
+                    ]),
+                  );
+                }
 
-                // ── Searching indicator ──
-                if (q.isNotEmpty && _isSearching && !hasRelay) ...[
-                  const SizedBox(height: 16),
-                  const Center(
-                    child: SizedBox(
-                      width: 20, height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Center(
-                    child: Text('Поиск в сети...',
-                      style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
-                  ),
-                ],
+                return ListView(
+                  children: [
+                    // ── Relay results (top priority when searching) ──
+                    if (hasRelay) ...[
+                      _SectionHeader(
+                        title: 'Найдены в сети',
+                        count: filteredRelay.length,
+                        icon: Icons.wifi,
+                      ),
+                      for (final peer in filteredRelay)
+                        _RelayPeerTile(
+                          peer: peer,
+                          onTap: () => _onTapRelayPeer(peer),
+                        ),
+                    ],
 
-                // ── No results ──
-                if (q.isNotEmpty && !hasLocal && !hasRelay && !_isSearching) ...[
-                  const SizedBox(height: 48),
-                  Icon(Icons.person_search_rounded,
-                      color: Colors.grey.shade600, size: 40),
-                  const SizedBox(height: 12),
-                  Center(
-                    child: Text(
-                      RelayService.instance.isConnected
-                          ? 'Никого не найдено'
-                          : 'Relay не подключён — поиск в сети недоступен',
-                      style: TextStyle(
-                          color: Colors.grey.shade500, fontSize: 13),
-                    ),
-                  ),
-                ],
-
-                // ── Direct key button ──
-                if (showDirectButton && q.length >= 16) ...[
-                  const SizedBox(height: 16),
-                  Center(
-                    child: FilledButton.icon(
-                      onPressed: () => _openDirectByKey(context),
-                      icon: const Icon(Icons.chat_bubble_outline, size: 18),
-                      label: const Text('Открыть чат по ключу'),
-                      style: FilledButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                    // ── Searching indicator ──
+                    if (q.isNotEmpty && _isSearching && !hasRelay) ...[
+                      const SizedBox(height: 16),
+                      const Center(
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
                         ),
                       ),
-                    ),
-                  ),
-                ],
+                      const SizedBox(height: 8),
+                      Center(
+                        child: Text('Поиск в сети...',
+                            style: TextStyle(
+                                color: Colors.grey.shade500, fontSize: 13)),
+                      ),
+                    ],
 
-                const SizedBox(height: 80),
-              ],
+                    // ── No results from relay ──
+                    if (q.isNotEmpty &&
+                        !hasRelay &&
+                        !_isSearching &&
+                        relayConnected) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                        child: Row(children: [
+                          Icon(Icons.info_outline,
+                              size: 14, color: Colors.grey.shade500),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'Никого не найдено в сети. Убедись, что собеседник онлайн.',
+                              style: TextStyle(
+                                  color: Colors.grey.shade500, fontSize: 12),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              _lastQuery = '';
+                              _triggerSearch(_effectiveQuery);
+                            },
+                            child: const Text('Повторить', style: TextStyle(fontSize: 12)),
+                          ),
+                        ]),
+                      ),
+                    ],
+
+                    // ── Local contacts ──
+                    if (hasLocal) ...[
+                      _SectionHeader(
+                        title: q.isEmpty ? 'Контакты' : 'Мои контакты',
+                        count: localVisible.length,
+                      ),
+                      for (final c in localVisible) _ContactTile(contact: c),
+                    ],
+
+                    // ── Direct key button ──
+                    if (showDirectButton && q.length >= 16) ...[
+                      const SizedBox(height: 16),
+                      Center(
+                        child: FilledButton.icon(
+                          onPressed: () => _openDirectByKey(context),
+                          icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                          label: const Text('Открыть чат по ключу'),
+                          style: FilledButton.styleFrom(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+
+                    const SizedBox(height: 80),
+                  ],
+                );
+              },
             );
           },
-        );
-      },
-    );
+        ),
+      ),
+    ]);
   }
 }
 
@@ -348,8 +427,7 @@ class _RelayPeerTile extends StatelessWidget {
         ),
         const SizedBox(width: 4),
         Text('в сети',
-            style:
-                TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
       ]),
       onTap: onTap,
     );
