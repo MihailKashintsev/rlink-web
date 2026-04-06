@@ -14,19 +14,23 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 
-import '../../main.dart';
+import '../../main.dart' show IncomingMessage, incomingMessageController, broadcastMyAvatar;
 import '../../models/chat_message.dart';
+import '../../models/contact.dart';
 import '../../services/app_settings.dart';
 import '../../services/ble_service.dart';
+import '../../services/block_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
+import '../../services/profile_service.dart';
 import '../../services/voice_service.dart';
 import '../../services/story_service.dart';
 import '../../services/typing_service.dart';
 import '../../services/relay_service.dart';
 import '../widgets/avatar_widget.dart';
+import 'chat_list_screen.dart' show showBoomCelebration;
 import 'image_editor_screen.dart';
 import 'square_video_recorder_screen.dart';
 import 'story_viewer_screen.dart';
@@ -70,6 +74,7 @@ class _ChatScreenState extends State<ChatScreen> {
   double? _pendingLat;
   double? _pendingLng;
   Timer? _typingDebounce;
+  bool _strangerBannerDismissed = false;
 
   /// Send media: relay blob over internet, BLE chunks for mesh.
   Future<void> _sendMedia({
@@ -107,11 +112,12 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
-    // 2. BLE gossip chunks — only when BLE is active (mode 0 or 2)
-    //    OR if blob failed and we need any delivery method
-    if (mode != 1 || !blobSent) {
+    // 2. Gossip chunks — only when blob was NOT sent (BLE mode, or relay failed).
+    //    When blob succeeds, chunks are redundant and would flood the relay queue,
+    //    blocking text messages for minutes (hundreds of 90-byte chunks at 50ms each).
+    if (!blobSent) {
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-      debugPrint('[RLINK][Media] Sending ${chunks.length} gossip chunks');
+      debugPrint('[RLINK][Media] Sending ${chunks.length} gossip chunks (no blob)');
       await GossipRouter.instance.sendImgMeta(
         msgId: msgId,
         totalChunks: chunks.length,
@@ -123,13 +129,22 @@ class _ChatScreenState extends State<ChatScreen> {
         isFile: isFile,
         fileName: fileName,
       );
+      // Send chunks in background to avoid blocking text messages
+      _sendChunksInBackground(chunks, msgId, myId);
+    }
+  }
+
+  /// Send gossip chunks in background — does NOT block the UI or other sends.
+  void _sendChunksInBackground(List<String> chunks, String msgId, String myId) {
+    () async {
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
           msgId: msgId, index: i, base64Data: chunks[i],
           fromId: myId, recipientId: _resolvedPeerId,
         );
       }
-    }
+      debugPrint('[RLINK][Media] All ${chunks.length} gossip chunks sent for $msgId');
+    }();
   }
 
   // BLE ATT MTU ≈ 288 байт. Фиксированный overhead пакета ≈ 186 байт
@@ -139,6 +154,14 @@ class _ChatScreenState extends State<ChatScreen> {
   static final _publicKeyRegExp = RegExp(r'^[0-9a-fA-F]{64}$');
 
   bool _looksLikePublicKey(String id) => _publicKeyRegExp.hasMatch(id.trim());
+
+  /// True when the peer was auto-created (not manually added by user).
+  /// Auto-created contacts have nickname = first8hex + "..." pattern.
+  static final _autoNickRegExp = RegExp(r'^[0-9a-fA-F]{8}\.\.\.$');
+  bool get _isStrangerPeer {
+    final nick = widget.peerNickname.trim();
+    return _autoNickRegExp.hasMatch(nick);
+  }
 
   Future<bool> _waitForPeerPublicKey(
       {Duration timeout = const Duration(seconds: 6)}) async {
@@ -983,6 +1006,33 @@ class _ChatScreenState extends State<ChatScreen> {
     await AppSettings.instance.setChatBgForPeer(_resolvedPeerId, null);
   }
 
+  Future<String?> _askNickname(BuildContext context) async {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Имя контакта'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Введите имя...'),
+          textCapitalization: TextCapitalization.words,
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Добавить'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _openPeerProfile() {
     Navigator.push(
       context,
@@ -1162,6 +1212,98 @@ class _ChatScreenState extends State<ChatScreen> {
                 style: TextStyle(
                   fontSize: 12,
                   color: Theme.of(context).colorScheme.onPrimaryContainer,
+                ),
+              ),
+            ]),
+          ),
+        // ── Profile photo banner: shows peer's avatar image ──
+        _ProfileBanner(
+          peerId: _resolvedPeerId,
+          peerNickname: widget.peerNickname,
+          peerAvatarColor: widget.peerAvatarColor,
+          peerAvatarEmoji: widget.peerAvatarEmoji,
+          peerAvatarImagePath: widget.peerAvatarImagePath,
+        ),
+        // ── Stranger banner: block / add / dismiss for unknown contacts ──
+        if (_isStrangerPeer && !_strangerBannerDismissed)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              border: Border(
+                bottom: BorderSide(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                  width: 0.5,
+                ),
+              ),
+            ),
+            child: Row(children: [
+              Icon(Icons.person_outline, size: 18,
+                color: Theme.of(context).colorScheme.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Незнакомый контакт',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              _StrangerAction(
+                icon: Icons.block,
+                label: 'Блок',
+                color: Colors.red.shade400,
+                onTap: () async {
+                  await BlockService.instance.block(_resolvedPeerId);
+                  if (mounted) {
+                    Navigator.pop(context);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Пользователь заблокирован')),
+                    );
+                  }
+                },
+              ),
+              const SizedBox(width: 4),
+              _StrangerAction(
+                icon: Icons.person_add_outlined,
+                label: 'Добавить',
+                color: const Color(0xFF1DB954),
+                onTap: () async {
+                  final nick = widget.peerNickname;
+                  await ChatStorageService.instance.saveContact(Contact(
+                    publicKeyHex: _resolvedPeerId,
+                    nickname: nick,
+                    avatarColor: widget.peerAvatarColor,
+                    avatarEmoji: widget.peerAvatarEmoji,
+                    addedAt: DateTime.now(),
+                  ));
+                  final myProfile = ProfileService.instance.profile;
+                  if (myProfile != null) {
+                    GossipRouter.instance.broadcastProfile(
+                      id: myProfile.publicKeyHex,
+                      nick: myProfile.nickname,
+                      color: myProfile.avatarColor,
+                      emoji: myProfile.avatarEmoji,
+                      x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+                    );
+                    broadcastMyAvatar();
+                  }
+                  if (mounted) {
+                    setState(() => _strangerBannerDismissed = true);
+                    final myKey = CryptoService.instance.publicKeyHex;
+                    showBoomCelebration(context, nick, myKey, _resolvedPeerId);
+                  }
+                },
+              ),
+              const SizedBox(width: 4),
+              GestureDetector(
+                onTap: () => setState(() => _strangerBannerDismissed = true),
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(Icons.close, size: 18,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.5)),
                 ),
               ),
             ]),
@@ -2893,6 +3035,135 @@ class _LinkPreviewCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ── Stranger Banner Action Button ─────────────────────────────
+
+class _StrangerAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+  const _StrangerAction({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 18, color: color),
+            const SizedBox(height: 2),
+            Text(label,
+              style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w500)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Profile Photo Banner ──────────────────────────────────────
+
+/// Compact profile photo banner at the top of every chat.
+/// Shows the peer's avatar image (if available) as a wide banner,
+/// or a colored strip with emoji/initials if no photo.
+class _ProfileBanner extends StatelessWidget {
+  final String peerId;
+  final String peerNickname;
+  final int peerAvatarColor;
+  final String peerAvatarEmoji;
+  final String? peerAvatarImagePath;
+
+  const _ProfileBanner({
+    required this.peerId,
+    required this.peerNickname,
+    required this.peerAvatarColor,
+    required this.peerAvatarEmoji,
+    this.peerAvatarImagePath,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Listen for avatar updates from DB
+    return ValueListenableBuilder<List<Contact>>(
+      valueListenable: ChatStorageService.instance.contactsNotifier,
+      builder: (_, contacts, __) {
+        // Find latest avatar path from contacts
+        String? imagePath = peerAvatarImagePath;
+        for (final c in contacts) {
+          if (c.publicKeyHex == peerId && c.avatarImagePath != null) {
+            imagePath = c.avatarImagePath;
+            break;
+          }
+        }
+
+        final hasImage = imagePath != null && File(imagePath).existsSync();
+
+        return Container(
+          width: double.infinity,
+          height: 72,
+          decoration: BoxDecoration(
+            color: hasImage ? null : Color(peerAvatarColor).withValues(alpha: 0.15),
+            border: Border(
+              bottom: BorderSide(
+                color: Theme.of(context).colorScheme.outlineVariant.withValues(alpha: 0.3),
+                width: 0.5,
+              ),
+            ),
+          ),
+          child: hasImage
+              ? Image.file(
+                  File(imagePath!),
+                  fit: BoxFit.cover,
+                  width: double.infinity,
+                  height: 72,
+                  errorBuilder: (_, __, ___) => _fallback(context),
+                )
+              : _fallback(context),
+        );
+      },
+    );
+  }
+
+  Widget _fallback(BuildContext context) {
+    return Center(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (peerAvatarEmoji.isNotEmpty)
+            Text(peerAvatarEmoji, style: const TextStyle(fontSize: 28))
+          else
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: Color(peerAvatarColor),
+              child: Text(
+                peerNickname.isNotEmpty ? peerNickname[0].toUpperCase() : '?',
+                style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+            ),
+          const SizedBox(width: 10),
+          Text(
+            peerNickname,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w500,
+              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+            ),
+          ),
+        ],
       ),
     );
   }

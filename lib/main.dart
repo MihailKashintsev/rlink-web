@@ -487,6 +487,13 @@ Future<void> initServices() async {
         );
         if (!ImageService.instance.isComplete(msgId)) return;
 
+        // Dedup: if blob already delivered this media, skip chunk assembly
+        if (ImageService.instance.wasAlreadyCompleted(msgId)) {
+          ImageService.instance.cancelAssembly(msgId);
+          debugPrint('[RLINK][Chunks] msgId=$msgId already completed via blob, skipping');
+          return;
+        }
+
         final isAvatar = ImageService.instance.isAvatarAssembly(msgId);
         final isVoice = ImageService.instance.isVoiceAssembly(msgId);
         final isVideo = ImageService.instance.isVideoAssembly(msgId);
@@ -516,12 +523,14 @@ Future<void> initServices() async {
             forContactKey: senderKey,
           );
           if (path != null) {
+            ImageService.instance.markCompleted(msgId);
             await ChatStorageService.instance
                 .updateContactAvatarImage(senderKey, path);
           }
         } else if (isVoice) {
           final path = await ImageService.instance.assembleAndSaveVoice(msgId);
           if (path == null) return;
+          ImageService.instance.markCompleted(msgId);
           await ensureContact();
           final msg = ChatMessage(
             id: msgId,
@@ -543,6 +552,7 @@ Future<void> initServices() async {
           final origName = ImageService.instance.assemblyFileName(msgId);
           final path = await ImageService.instance.assembleAndSaveFile(msgId);
           if (path == null) return;
+          ImageService.instance.markCompleted(msgId);
           await ensureContact();
           final fileLabel = '📎 ${origName ?? 'Файл'}';
           final fileBytes = await File(path).length();
@@ -568,6 +578,7 @@ Future<void> initServices() async {
           final isSquare = ImageService.instance.isSquareAssembly(msgId);
           final path = await ImageService.instance.assembleAndSaveVideo(msgId, isSquare: isSquare);
           if (path == null) return;
+          ImageService.instance.markCompleted(msgId);
           await ensureContact();
           final label = isSquare ? '⬛ Видео' : '📹 Видео';
           final msg = ChatMessage(
@@ -589,6 +600,7 @@ Future<void> initServices() async {
         } else {
           final path = await ImageService.instance.assembleAndSave(msgId);
           if (path == null) return;
+          ImageService.instance.markCompleted(msgId);
 
           // Check if this image belongs to a story (msgId == storyId)
           final existingStory = StoryService.instance.findStory(msgId);
@@ -931,6 +943,12 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
     bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName) async {
   debugPrint('[RLINK][Blob] Received ${data.length} bytes from ${fromId.substring(0, 8)} msgId=$msgId voice=$isVoice video=$isVideo file=$isFile');
 
+  // Dedup: if this msgId was already assembled via gossip chunks, skip
+  if (ImageService.instance.wasAlreadyCompleted(msgId)) {
+    debugPrint('[RLINK][Blob] msgId=$msgId already completed via chunks, skipping');
+    return;
+  }
+
   // Handle avatar blob — save as contact avatar, not a chat message
   if (msgId.startsWith('avatar_')) {
     try {
@@ -983,6 +1001,7 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
   if (isVoice) {
     final path = await ImageService.instance.assembleAndSaveVoice(msgId);
     if (path == null) { debugPrint('[RLINK][Blob] Voice assemble failed'); return; }
+    ImageService.instance.markCompleted(msgId);
     await ensureContact();
     final msg = ChatMessage(
       id: msgId,
@@ -1005,6 +1024,7 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
     final origName = fileName ?? ImageService.instance.assemblyFileName(msgId);
     final path = await ImageService.instance.assembleAndSaveFile(msgId);
     if (path == null) { debugPrint('[RLINK][Blob] File assemble failed'); return; }
+    ImageService.instance.markCompleted(msgId);
     await ensureContact();
     final fileLabel = '📎 ${origName ?? 'Файл'}';
     final fileBytes = await File(path).length();
@@ -1030,6 +1050,7 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
   } else if (isVideo) {
     final path = await ImageService.instance.assembleAndSaveVideo(msgId, isSquare: isSquare);
     if (path == null) { debugPrint('[RLINK][Blob] Video assemble failed'); return; }
+    ImageService.instance.markCompleted(msgId);
     await ensureContact();
     final label = isSquare ? '⬛ Видео' : '📹 Видео';
     final msg = ChatMessage(
@@ -1053,6 +1074,7 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
     // Image
     final path = await ImageService.instance.assembleAndSave(msgId);
     if (path == null) { debugPrint('[RLINK][Blob] Image assemble failed'); return; }
+    ImageService.instance.markCompleted(msgId);
 
     // Check if this image belongs to a story
     final existingStory = StoryService.instance.findStory(msgId);

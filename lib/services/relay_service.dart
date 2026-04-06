@@ -56,6 +56,9 @@ class RelayService {
   // A 257-chunk photo takes ~13 s — acceptable for mesh transfer.
   static const _chunkInterval = Duration(milliseconds: 50);
 
+  /// Last search query (for local fallback when server returns 0)
+  String _lastSearchQuery = '';
+
   /// Search results
   final ValueNotifier<List<RelayPeer>> searchResults = ValueNotifier([]);
 
@@ -300,17 +303,79 @@ class RelayService {
     sendProgress.value = progress;
   }
 
-  /// Search for users by nickname or ID
+  /// Search for users by nickname or ID.
+  /// Searches local presence cache first, then queries server.
   Future<void> searchUsers(String query) async {
-    if (!isConnected || query.trim().isEmpty) {
+    final q = query.trim();
+    if (q.isEmpty) {
       searchResults.value = [];
       return;
     }
-    debugPrint('[RLINK][Relay] Searching for: "${query.trim()}"');
-    _channel?.sink.add(jsonEncode({
-      'type': 'search',
-      'query': query.trim(),
-    }));
+    _lastSearchQuery = q;
+    debugPrint('[RLINK][Relay] Searching for: "$q" (known online: ${knownOnlinePeers.length})');
+
+    // Immediately search local presence cache (instant results)
+    final localResults = _searchLocalPeers(q);
+    if (localResults.isNotEmpty) {
+      debugPrint('[RLINK][Relay] Local presence match: ${localResults.length}');
+      searchResults.value = localResults;
+    }
+
+    // Also query server for authoritative results
+    if (isConnected) {
+      _channel?.sink.add(jsonEncode({
+        'type': 'search',
+        'query': q,
+      }));
+    }
+  }
+
+  /// Search known online peers from local presence cache
+  List<RelayPeer> _searchLocalPeers(String query) {
+    final q = query.toLowerCase().trim();
+    if (q.isEmpty) return [];
+
+    final myKey = CryptoService.instance.publicKeyHex;
+    final results = <RelayPeer>[];
+
+    for (final entry in _peerOnline.entries) {
+      if (!entry.value) continue;
+      if (entry.key == myKey) continue;
+
+      final publicKey = entry.key;
+      final shortId = publicKey.length > 8 ? publicKey.substring(0, 8) : publicKey;
+      final nick = _peerNicks[publicKey] ?? '';
+
+      if (nick.toLowerCase().contains(q) ||
+          shortId.toLowerCase().contains(q) ||
+          publicKey.toLowerCase().startsWith(q)) {
+        results.add(RelayPeer(
+          publicKey: publicKey,
+          nick: nick,
+          shortId: shortId,
+          online: true,
+          x25519Key: _peerX25519Keys[publicKey] ?? '',
+        ));
+      }
+    }
+    return results;
+  }
+
+  /// All known online peers (from presence data)
+  List<RelayPeer> get knownOnlinePeers {
+    final myKey = CryptoService.instance.publicKeyHex;
+    return _peerOnline.entries
+        .where((e) => e.value && e.key != myKey)
+        .map((e) {
+          final pk = e.key;
+          return RelayPeer(
+            publicKey: pk,
+            nick: _peerNicks[pk] ?? '',
+            shortId: pk.length > 8 ? pk.substring(0, 8) : pk,
+            online: true,
+            x25519Key: _peerX25519Keys[pk] ?? '',
+          );
+        }).toList();
   }
 
   // ── Receive ──────────────────────────────────────────────────
@@ -382,7 +447,7 @@ class RelayService {
 
   void _handleSearchResult(Map<String, dynamic> msg) {
     final results = msg['results'] as List? ?? [];
-    final peers = results.map((r) {
+    final serverPeers = results.map((r) {
       final m = r as Map<String, dynamic>;
       final peer = RelayPeer(
         publicKey: m['publicKey'] as String? ?? '',
@@ -391,23 +456,45 @@ class RelayService {
         online: m['online'] as bool? ?? false,
         x25519Key: m['x25519'] as String? ?? '',
       );
-      // Store X25519 key from search results
       if (peer.x25519Key.isNotEmpty && peer.publicKey.isNotEmpty) {
         _peerX25519Keys[peer.publicKey] = peer.x25519Key;
         BleService.instance.registerPeerX25519Key(peer.publicKey, peer.x25519Key);
         unawaited(ChatStorageService.instance.updateContactX25519Key(peer.publicKey, peer.x25519Key));
       }
-      // Track as online
       if (peer.publicKey.isNotEmpty) {
         _peerOnline[peer.publicKey] = peer.online;
       }
       return peer;
     }).toList();
-    debugPrint('[RLINK][Relay] Search results: ${peers.length} peers found');
-    for (final p in peers) {
-      debugPrint('[RLINK][Relay]   → ${p.shortId} "${p.nick}" (${p.publicKey.substring(0, 16)}...)');
+
+    debugPrint('[RLINK][Relay] Server search: ${serverPeers.length} results');
+
+    if (serverPeers.isNotEmpty) {
+      // Merge server + local (server wins for duplicates)
+      final merged = <String, RelayPeer>{};
+      for (final p in serverPeers) { merged[p.publicKey] = p; }
+      final local = _searchLocalPeers(_lastSearchQuery);
+      for (final p in local) { merged.putIfAbsent(p.publicKey, () => p); }
+      searchResults.value = merged.values.toList();
+    } else if (_lastSearchQuery.isNotEmpty) {
+      // Server returned 0 — fall back to local presence cache
+      final local = _searchLocalPeers(_lastSearchQuery);
+      if (local.isNotEmpty) {
+        debugPrint('[RLINK][Relay] Server 0 → local fallback: ${local.length} matches');
+        searchResults.value = local;
+      } else {
+        searchResults.value = [];
+        final online = knownOnlinePeers;
+        debugPrint('[RLINK][Relay] No match. Online peers (${online.length}): '
+            '${online.map((p) => '${p.shortId}("${p.nick}")').join(', ')}');
+      }
+    } else {
+      searchResults.value = serverPeers;
     }
-    searchResults.value = peers;
+
+    for (final p in searchResults.value) {
+      debugPrint('[RLINK][Relay]   → ${p.shortId} "${p.nick}"');
+    }
   }
 
   void _handlePresence(Map<String, dynamic> msg) {

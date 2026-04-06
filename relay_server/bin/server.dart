@@ -324,13 +324,14 @@ shelf.Handler _wsHandler() {
 }
 
 void _broadcastPresence(String publicKey, bool online) {
-  // Include X25519 key when user comes online (for E2E encryption)
   final sourceUser = _users[publicKey];
   final x25519Key = sourceUser?.x25519Key ?? '';
+  final nick = sourceUser?.nick ?? '';
   final msg = jsonEncode({
     'type': 'presence',
     'publicKey': publicKey,
     'online': online,
+    if (nick.isNotEmpty) 'nick': nick,
     if (x25519Key.isNotEmpty) 'x25519': x25519Key,
   });
   for (final user in _users.values) {
@@ -345,10 +346,16 @@ void _broadcastPresence(String publicKey, bool online) {
 
 shelf.Response _infoHandler(shelf.Request request) {
   if (request.url.path == 'health') {
+    final peers = _users.values.map((u) => {
+      'shortId': u.shortId,
+      'nick': u.nick,
+      'connectedAt': u.connectedAt.toIso8601String(),
+    }).toList();
     return shelf.Response.ok(
       jsonEncode({
         'status': 'ok',
         'online': _users.length,
+        'peers': peers,
         'uptime': DateTime.now().toIso8601String(),
       }),
       headers: {'content-type': 'application/json'},

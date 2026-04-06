@@ -44,6 +44,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
   bool _isInitializing = true;
   bool _isSwitching = false;
   String? _initError;
+  bool _needSettings = false; // true when permission is permanently denied
 
   late AnimationController _pulseController;
 
@@ -71,13 +72,39 @@ class _VideoOverlayState extends State<_VideoOverlay>
     setState(() {
       _isInitializing = true;
       _initError = null;
+      _needSettings = false;
     });
     try {
-      final camStatus = await Permission.camera.request();
-      final micStatus = await Permission.microphone.request();
-      if (!camStatus.isGranted || !micStatus.isGranted) {
+      // Camera permission — handle permanentlyDenied (iOS: user must open Settings)
+      var camStatus = await Permission.camera.request();
+      if (camStatus.isPermanentlyDenied || camStatus.isRestricted) {
         setState(() {
-          _initError = 'Нет доступа к камере или микрофону';
+          _initError = 'Доступ к камере запрещён.\nОткройте Настройки и разрешите доступ.';
+          _needSettings = true;
+          _isInitializing = false;
+        });
+        return;
+      }
+      if (!camStatus.isGranted) {
+        setState(() {
+          _initError = 'Нет доступа к камере';
+          _isInitializing = false;
+        });
+        return;
+      }
+      // Microphone permission — separate check for clear error message
+      var micStatus = await Permission.microphone.request();
+      if (micStatus.isPermanentlyDenied || micStatus.isRestricted) {
+        setState(() {
+          _initError = 'Доступ к микрофону запрещён.\nОткройте Настройки и разрешите доступ.';
+          _needSettings = true;
+          _isInitializing = false;
+        });
+        return;
+      }
+      if (!micStatus.isGranted) {
+        setState(() {
+          _initError = 'Нет доступа к микрофону';
           _isInitializing = false;
         });
         return;
@@ -441,6 +468,26 @@ class _VideoOverlayState extends State<_VideoOverlay>
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white54, fontSize: 13),
                 ),
+                if (_needSettings) ...[
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      await openAppSettings();
+                    },
+                    icon: const Icon(Icons.settings, size: 16),
+                    label: const Text('Открыть Настройки'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white70,
+                      side: const BorderSide(color: Colors.white24),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: _initCamera,
+                    child: const Text('Повторить',
+                      style: TextStyle(color: Colors.white38, fontSize: 12)),
+                  ),
+                ],
               ],
             ),
           ),

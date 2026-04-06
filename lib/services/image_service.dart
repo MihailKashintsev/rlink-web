@@ -21,6 +21,10 @@ class ImageService {
 
   final _uuid = const Uuid();
   final Map<String, _ImageAssembly> _assemblies = {};
+  /// Track completed assemblies to prevent duplicate processing
+  /// when both blob and gossip chunks deliver the same msgId.
+  final Set<String> _completedMsgIds = {};
+  static const _kMaxCompletedTracked = 500;
 
   /// Cached documents directory path — set during init().
   /// Used by resolveStoredPath() to fix stale iOS sandbox paths after rebuild.
@@ -218,6 +222,19 @@ class ImageService {
     return path;
   }
 
+  /// Check if a msgId was already fully assembled (blob or chunks completed).
+  /// Prevents duplicate processing when both delivery paths succeed.
+  bool wasAlreadyCompleted(String msgId) => _completedMsgIds.contains(msgId);
+
+  /// Mark a msgId as completed after successful assembly.
+  void markCompleted(String msgId) {
+    _completedMsgIds.add(msgId);
+    // Evict old entries to prevent unbounded growth
+    if (_completedMsgIds.length > _kMaxCompletedTracked) {
+      _completedMsgIds.remove(_completedMsgIds.first);
+    }
+  }
+
   /// Инициализирует сборку до прихода первого чанка (вызывается из onImgMeta).
   void initAssembly(String msgId, int totalChunks,
       {bool isAvatar = false,
@@ -229,6 +246,8 @@ class ImageService {
       String? fileName,
       String? storyId,
       String fromId = ''}) {
+    // Skip if this msgId was already fully assembled via another delivery path
+    if (_completedMsgIds.contains(msgId)) return;
     _assemblies.putIfAbsent(
       msgId,
       () => _ImageAssembly(

@@ -21,31 +21,23 @@ class ContactsScreen extends StatefulWidget {
 }
 
 class _ContactsScreenState extends State<ContactsScreen> {
-  final _localSearchController = TextEditingController();
   Timer? _debounce;
   String _lastQuery = '';
   bool _isSearching = false;
 
-  /// Effective query: local field takes priority, then parent widget query
-  String get _effectiveQuery {
-    final local = _localSearchController.text.trim();
-    if (local.isNotEmpty) return local;
-    return widget.searchQuery.trim();
-  }
+  /// Query comes from parent AppBar search field
+  String get _effectiveQuery => widget.searchQuery.trim();
 
   @override
   void initState() {
     super.initState();
     RelayService.instance.state.addListener(_onRelayStateChanged);
-    _localSearchController.addListener(_onLocalSearchChanged);
   }
 
   @override
   void didUpdateWidget(ContactsScreen old) {
     super.didUpdateWidget(old);
-    // Parent (global search bar) changed query — trigger search if local field is empty
-    if (widget.searchQuery != old.searchQuery &&
-        _localSearchController.text.isEmpty) {
+    if (widget.searchQuery != old.searchQuery) {
       _triggerSearch(_effectiveQuery);
     }
   }
@@ -53,15 +45,16 @@ class _ContactsScreenState extends State<ContactsScreen> {
   @override
   void dispose() {
     _debounce?.cancel();
-    _localSearchController.dispose();
     RelayService.instance.state.removeListener(_onRelayStateChanged);
     RelayService.instance.searchResults.value = [];
     super.dispose();
   }
 
-  void _onLocalSearchChanged() {
-    _triggerSearch(_effectiveQuery);
-    if (mounted) setState(() {});
+  bool _isSelfSearch(String query) {
+    final myKey = CryptoService.instance.publicKeyHex;
+    if (myKey.isEmpty || query.isEmpty) return false;
+    final myShortId = myKey.length > 8 ? myKey.substring(0, 8) : myKey;
+    return myShortId.toLowerCase().contains(query.toLowerCase());
   }
 
   void _onRelayStateChanged() {
@@ -157,42 +150,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     final q = _effectiveQuery.toLowerCase();
     final relayConnected = RelayService.instance.isConnected;
 
     return Column(children: [
-      // ── Search field ──
-      Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-        child: TextField(
-          controller: _localSearchController,
-          style: const TextStyle(fontSize: 15),
-          decoration: InputDecoration(
-            hintText: 'Поиск контактов и людей...',
-            hintStyle: TextStyle(color: Colors.grey.shade500, fontSize: 14),
-            prefixIcon: Icon(Icons.search, color: Colors.grey.shade500, size: 20),
-            suffixIcon: _localSearchController.text.isNotEmpty
-                ? IconButton(
-                    icon: Icon(Icons.close, size: 18, color: Colors.grey.shade500),
-                    onPressed: () {
-                      _localSearchController.clear();
-                      RelayService.instance.searchResults.value = [];
-                      _lastQuery = '';
-                    },
-                  )
-                : null,
-            filled: true,
-            fillColor: cs.surfaceContainerHighest.withValues(alpha: 0.5),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(24),
-              borderSide: BorderSide.none,
-            ),
-            contentPadding: const EdgeInsets.symmetric(vertical: 8),
-            isDense: true,
-          ),
-        ),
-      ),
+      // Search is handled by the parent AppBar — no local field needed.
 
       // ── Relay status ──
       if (!relayConnected)
@@ -294,25 +256,60 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       Padding(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 16, vertical: 8),
-                        child: Row(children: [
-                          Icon(Icons.info_outline,
-                              size: 14, color: Colors.grey.shade500),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              'Никого не найдено в сети. Убедись, что собеседник онлайн.',
-                              style: TextStyle(
-                                  color: Colors.grey.shade500, fontSize: 12),
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () {
-                              _lastQuery = '';
-                              _triggerSearch(_effectiveQuery);
-                            },
-                            child: const Text('Повторить', style: TextStyle(fontSize: 12)),
-                          ),
-                        ]),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(children: [
+                              Icon(Icons.info_outline,
+                                  size: 14,
+                                  color: _isSelfSearch(q)
+                                      ? Colors.orange.shade700
+                                      : Colors.grey.shade500),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  _isSelfSearch(q)
+                                      ? 'Это ваш код! Введите код собеседника.'
+                                      : 'Никого не найдено по "$q".',
+                                  style: TextStyle(
+                                    color: _isSelfSearch(q)
+                                        ? Colors.orange.shade700
+                                        : Colors.grey.shade500,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: () {
+                                  _lastQuery = '';
+                                  _triggerSearch(_effectiveQuery);
+                                },
+                                child: const Text('Повторить',
+                                    style: TextStyle(fontSize: 12)),
+                              ),
+                            ]),
+                            Builder(builder: (_) {
+                              final peers =
+                                  RelayService.instance.knownOnlinePeers;
+                              if (peers.isEmpty) return const SizedBox.shrink();
+                              final hint = peers
+                                  .map((p) => p.nick.isNotEmpty
+                                      ? '${p.nick} (${p.shortId})'
+                                      : p.shortId)
+                                  .join(', ');
+                              return Padding(
+                                padding:
+                                    const EdgeInsets.only(left: 20, top: 2),
+                                child: Text(
+                                  'В сети: $hint',
+                                  style: TextStyle(
+                                      color: Colors.grey.shade600,
+                                      fontSize: 11),
+                                ),
+                              );
+                            }),
+                          ],
+                        ),
                       ),
                     ],
 
