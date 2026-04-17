@@ -7,6 +7,7 @@ class Activity {
   static const int typing = 1;
   static const int recordingVideo = 2;
   static const int recordingVoice = 3;
+  static const int sendingFile = 4;
 }
 
 /// Tracks remote peer typing/recording state.
@@ -46,6 +47,7 @@ class TypingService {
       case Activity.typing: return 'печатает...';
       case Activity.recordingVideo: return 'записывает видео...';
       case Activity.recordingVoice: return 'записывает голосовое...';
+      case Activity.sendingFile: return 'отправляет файл...';
       default: return '';
     }
   }

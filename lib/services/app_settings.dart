@@ -26,6 +26,11 @@ class AppSettings extends ChangeNotifier {
   static const _keyRelayServerUrl    = 'relay_server_url';
   static const _keyConnectionMode    = 'connection_mode';   // 0=BLE, 1=Internet, 2=Both
   static const _keyMediaPriority     = 'media_priority';    // 0=BLE, 1=Internet
+  static const _keyAdminPasswordHash = 'admin_password_hash';
+  static const _keyBubbleStyle       = 'bubble_style';       // 0=rounded,1=square,2=minimal
+  static const _keyClockFormat       = 'clock_format';       // 0=24h,1=12h
+  static const _keyMessageDensity    = 'message_density';    // 0=comfortable,1=cozy,2=compact
+  static const _keyShowReactionsQuickBar = 'show_reactions_quickbar';
 
   late SharedPreferences _prefs;
 
@@ -48,6 +53,10 @@ class AppSettings extends ChangeNotifier {
   String _relayServerUrl = '';
   int _connectionMode = 2;   // 0=BLE only, 1=Internet only, 2=Both
   int _mediaPriority = 1;    // 0=BLE first, 1=Internet first
+  int _bubbleStyle = 0;      // 0=rounded, 1=square, 2=minimal
+  int _clockFormat = 0;      // 0=24h, 1=12h
+  int _messageDensity = 1;   // 0=comfortable, 1=cozy, 2=compact
+  bool _showReactionsQuickBar = true;
 
   ThemeMode get themeMode => _themeMode;
   int get accentColorIndex => _accentColorIndex;
@@ -68,6 +77,52 @@ class AppSettings extends ChangeNotifier {
   String get relayServerUrl => _relayServerUrl;
   int get connectionMode => _connectionMode;
   int get mediaPriority => _mediaPriority;
+  int get bubbleStyle => _bubbleStyle;
+  int get clockFormat => _clockFormat;
+  int get messageDensity => _messageDensity;
+  bool get showReactionsQuickBar => _showReactionsQuickBar;
+
+  /// Форматирует время по настройке часового формата.
+  String formatTime(DateTime dt) {
+    if (_clockFormat == 1) {
+      final h12 = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+      final ampm = dt.hour < 12 ? 'AM' : 'PM';
+      return '$h12:${dt.minute.toString().padLeft(2, '0')} $ampm';
+    }
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  /// BorderRadius для сообщения/карточки в соответствии с выбранным стилем.
+  /// [isMe] меняет «хвост» пузыря.
+  BorderRadius bubbleRadius({bool isMe = false}) {
+    switch (_bubbleStyle) {
+      case 1: // square
+        return BorderRadius.circular(6);
+      case 2: // minimal
+        return BorderRadius.circular(10);
+      case 0: // rounded (default)
+      default:
+        return BorderRadius.only(
+          topLeft: const Radius.circular(18),
+          topRight: const Radius.circular(18),
+          bottomLeft: Radius.circular(isMe ? 18 : 4),
+          bottomRight: Radius.circular(isMe ? 4 : 18),
+        );
+    }
+  }
+
+  /// Вертикальный padding для сообщения с учётом плотности.
+  double get messageVerticalPadding {
+    switch (_messageDensity) {
+      case 0:
+        return 10;
+      case 2:
+        return 4;
+      case 1:
+      default:
+        return 7;
+    }
+  }
 
   /// Цвет статуса: 0=зелёный(онлайн), 1=жёлтый(DND), 2=красный(занят), 3=серый(офлайн — авто)
   Color get onlineStatusColor => const [
@@ -84,7 +139,7 @@ class AppSettings extends ChangeNotifier {
     'Не в сети',
   ][_onlineStatusMode.clamp(0, 3)];
 
-  /// Шесть акцентных цветов на выбор пользователя.
+  /// Расширенная палитра акцентных цветов (16 оттенков).
   static const List<Color> accentColors = [
     Color(0xFF1DB954), // Зелёный (по умолчанию)
     Color(0xFF2196F3), // Синий
@@ -94,6 +149,14 @@ class AppSettings extends ChangeNotifier {
     Color(0xFF00BCD4), // Голубой
     Color(0xFFE91E63), // Розовый
     Color(0xFF4CAF50), // Светло-зелёный
+    Color(0xFFFFC107), // Янтарный
+    Color(0xFF673AB7), // Индиго
+    Color(0xFF009688), // Бирюзовый
+    Color(0xFFFF9800), // Оранж
+    Color(0xFF795548), // Коричневый
+    Color(0xFF607D8B), // Сталь
+    Color(0xFF8BC34A), // Лайм
+    Color(0xFF00E5FF), // Неон-голубой
   ];
 
   Color get accentColor => accentColors[_accentColorIndex];
@@ -132,6 +195,34 @@ class AppSettings extends ChangeNotifier {
     _relayServerUrl = _prefs.getString(_keyRelayServerUrl) ?? '';
     _connectionMode = (_prefs.getInt(_keyConnectionMode) ?? 2).clamp(0, 2);
     _mediaPriority = (_prefs.getInt(_keyMediaPriority) ?? 1).clamp(0, 1);
+    _bubbleStyle = (_prefs.getInt(_keyBubbleStyle) ?? 0).clamp(0, 2);
+    _clockFormat = (_prefs.getInt(_keyClockFormat) ?? 0).clamp(0, 1);
+    _messageDensity = (_prefs.getInt(_keyMessageDensity) ?? 1).clamp(0, 2);
+    _showReactionsQuickBar = _prefs.getBool(_keyShowReactionsQuickBar) ?? true;
+  }
+
+  Future<void> setBubbleStyle(int style) async {
+    _bubbleStyle = style.clamp(0, 2);
+    await _prefs.setInt(_keyBubbleStyle, _bubbleStyle);
+    notifyListeners();
+  }
+
+  Future<void> setClockFormat(int fmt) async {
+    _clockFormat = fmt.clamp(0, 1);
+    await _prefs.setInt(_keyClockFormat, _clockFormat);
+    notifyListeners();
+  }
+
+  Future<void> setMessageDensity(int d) async {
+    _messageDensity = d.clamp(0, 2);
+    await _prefs.setInt(_keyMessageDensity, _messageDensity);
+    notifyListeners();
+  }
+
+  Future<void> setShowReactionsQuickBar(bool value) async {
+    _showReactionsQuickBar = value;
+    await _prefs.setBool(_keyShowReactionsQuickBar, value);
+    notifyListeners();
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {
@@ -254,5 +345,16 @@ class AppSettings extends ChangeNotifier {
     _mediaPriority = priority.clamp(0, 1);
     await _prefs.setInt(_keyMediaPriority, _mediaPriority);
     notifyListeners();
+  }
+
+  // ── Admin password (SHA-256 hash) ─────────────────────────────
+  // Default password: "1234"
+  static const _defaultAdminHash = '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4';
+
+  String get adminPasswordHash =>
+      _prefs.getString(_keyAdminPasswordHash) ?? _defaultAdminHash;
+
+  Future<void> setAdminPasswordHash(String hash) async {
+    await _prefs.setString(_keyAdminPasswordHash, hash);
   }
 }

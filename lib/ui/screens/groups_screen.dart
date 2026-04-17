@@ -12,6 +12,7 @@ import '../../services/chat_storage_service.dart';
 import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
 import '../widgets/avatar_widget.dart';
+import '../widgets/reactions.dart';
 
 class GroupsScreen extends StatefulWidget {
   const GroupsScreen({super.key});
@@ -227,10 +228,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   void _load() async {
     final msgs = await GroupService.instance.getMessages(_group.id);
     final grp = await GroupService.instance.getGroup(_group.id);
-    if (mounted) setState(() {
-      _messages = msgs;
-      if (grp != null) { _group = grp; }
-    });
+    if (mounted) {
+      setState(() {
+        _messages = msgs;
+        if (grp != null) { _group = grp; }
+      });
+    }
   }
 
   void _scrollToBottom() {
@@ -438,53 +441,77 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   void _editGroup() {
     final nameCtrl = TextEditingController(text: _group.name);
     final emojiCtrl = TextEditingController(text: _group.avatarEmoji);
+    String? pickedImagePath = _group.avatarImagePath;
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Редактировать группу'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameCtrl,
-              maxLength: 30,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'Название группы',
-                labelText: 'Название',
-                border: OutlineInputBorder(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Редактировать группу'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Avatar image picker
+              GestureDetector(
+                onTap: () async {
+                  final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+                  if (picked == null) return;
+                  final saved = await ImageService.instance.compressAndSave(
+                    picked.path, isAvatar: true,
+                  );
+                  setDialogState(() => pickedImagePath = saved);
+                },
+                child: CircleAvatar(
+                  radius: 36,
+                  backgroundImage: pickedImagePath != null && File(pickedImagePath!).existsSync()
+                      ? FileImage(File(pickedImagePath!)) : null,
+                  child: pickedImagePath == null || !File(pickedImagePath!).existsSync()
+                      ? const Icon(Icons.add_a_photo, size: 28)
+                      : null,
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: emojiCtrl,
-              maxLength: 2,
-              decoration: const InputDecoration(
-                hintText: '👥',
-                labelText: 'Эмодзи-аватар',
-                border: OutlineInputBorder(),
+              const SizedBox(height: 12),
+              TextField(
+                controller: nameCtrl,
+                maxLength: 30,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: 'Название группы',
+                  labelText: 'Название',
+                  border: OutlineInputBorder(),
+                ),
               ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: emojiCtrl,
+                maxLength: 2,
+                decoration: const InputDecoration(
+                  hintText: '👥',
+                  labelText: 'Эмодзи-аватар',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+            FilledButton(
+              onPressed: () async {
+                final name = nameCtrl.text.trim();
+                if (name.isEmpty) return;
+                Navigator.pop(ctx);
+                final updated = _group.copyWith(
+                  name: name,
+                  avatarEmoji: emojiCtrl.text.trim().isEmpty ? _group.avatarEmoji : emojiCtrl.text.trim(),
+                  avatarImagePath: pickedImagePath,
+                );
+                await GroupService.instance.updateGroup(updated);
+                if (mounted) setState(() => _group = updated);
+              },
+              child: const Text('Сохранить'),
             ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
-          FilledButton(
-            onPressed: () async {
-              final name = nameCtrl.text.trim();
-              if (name.isEmpty) return;
-              Navigator.pop(ctx);
-              final updated = _group.copyWith(
-                name: name,
-                avatarEmoji: emojiCtrl.text.trim().isEmpty ? _group.avatarEmoji : emojiCtrl.text.trim(),
-              );
-              await GroupService.instance.updateGroup(updated);
-              if (mounted) setState(() => _group = updated);
-            },
-            child: const Text('Сохранить'),
-          ),
-        ],
       ),
     );
   }
@@ -740,6 +767,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                         msg: msg,
                         senderNick: _nickFor(msg.senderId),
                         cs: cs,
+                        groupId: widget.group.id,
                       );
                     },
                   ),
@@ -815,64 +843,99 @@ class _GroupBubble extends StatelessWidget {
   final GroupMessage msg;
   final String senderNick;
   final ColorScheme cs;
+  final String groupId;
   const _GroupBubble(
-      {required this.msg, required this.senderNick, required this.cs});
+      {required this.msg,
+      required this.senderNick,
+      required this.cs,
+      required this.groupId});
+
+  Future<void> _toggle(BuildContext context, String emoji) async {
+    final myId = CryptoService.instance.publicKeyHex;
+    await GroupService.instance.toggleMessageReaction(msg.id, emoji, myId);
+    await GossipRouter.instance.sendReactionExt(
+      kind: 'group_message',
+      targetId: msg.id,
+      emoji: emoji,
+      fromId: myId,
+    );
+  }
+
+  Future<void> _openPicker(BuildContext context) async {
+    final emoji = await showReactionPickerSheet(context);
+    if (emoji == null) return;
+    if (!context.mounted) return;
+    await _toggle(context, emoji);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final myId = CryptoService.instance.publicKeyHex;
     return Align(
       alignment: msg.isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.75,
-        ),
-        decoration: BoxDecoration(
-          color: msg.isOutgoing ? cs.primary : cs.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(18).copyWith(
-            bottomRight: msg.isOutgoing ? const Radius.circular(4) : null,
-            bottomLeft: msg.isOutgoing ? null : const Radius.circular(4),
+      child: GestureDetector(
+        onLongPress: () => _openPicker(context),
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.75,
           ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!msg.isOutgoing)
-              Text(senderNick,
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: cs.primary,
-                      fontWeight: FontWeight.bold)),
-            if (msg.imagePath != null && msg.imagePath!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.file(
-                    File(msg.imagePath!),
-                    width: 200,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          decoration: BoxDecoration(
+            color: msg.isOutgoing ? cs.primary : cs.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(18).copyWith(
+              bottomRight: msg.isOutgoing ? const Radius.circular(4) : null,
+              bottomLeft: msg.isOutgoing ? null : const Radius.circular(4),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!msg.isOutgoing)
+                Text(senderNick,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: cs.primary,
+                        fontWeight: FontWeight.bold)),
+              if (msg.imagePath != null && msg.imagePath!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.file(
+                      File(msg.imagePath!),
+                      width: 200,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                    ),
                   ),
                 ),
+              SelectableText(
+                msg.text,
+                style: TextStyle(
+                  color: msg.isOutgoing ? cs.onPrimary : cs.onSurface,
+                ),
               ),
-            SelectableText(
-              msg.text,
-              style: TextStyle(
-                color: msg.isOutgoing ? cs.onPrimary : cs.onSurface,
+              const SizedBox(height: 2),
+              Text(
+                _fmt(DateTime.fromMillisecondsSinceEpoch(msg.timestamp)),
+                style: TextStyle(
+                  fontSize: 10,
+                  color: (msg.isOutgoing ? cs.onPrimary : cs.onSurface)
+                      .withValues(alpha: 0.5),
+                ),
               ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              _fmt(DateTime.fromMillisecondsSinceEpoch(msg.timestamp)),
-              style: TextStyle(
-                fontSize: 10,
-                color: (msg.isOutgoing ? cs.onPrimary : cs.onSurface)
-                    .withValues(alpha: 0.5),
-              ),
-            ),
-          ],
+              if (msg.reactions.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                ReactionsBar(
+                  reactions: msg.reactions,
+                  myId: myId,
+                  onTap: (e) => _toggle(context, e),
+                  compact: true,
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );

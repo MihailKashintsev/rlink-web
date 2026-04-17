@@ -164,8 +164,9 @@ class UpdateService {
             ? '_macos.zip'
             : '_linux.tar.gz';
     for (final a in assets) {
-      if ((a['name'] as String).endsWith(suffix))
+      if ((a['name'] as String).endsWith(suffix)) {
         return a as Map<String, dynamic>;
+      }
     }
     return null;
   }

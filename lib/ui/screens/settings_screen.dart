@@ -8,7 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart';
+import 'package:path/path.dart' as p;
 
 import '../../l10n/app_l10n.dart';
 import '../../models/contact.dart';
@@ -22,6 +22,7 @@ import '../../services/relay_service.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/chat_screen.dart';
 import '../screens/about_screen.dart';
+import '../screens/admin_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -31,6 +32,10 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  // Hidden admin panel — 15 taps on version text → password dialog
+  int _versionTapCount = 0;
+  DateTime _lastTapAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   @override
   void initState() {
     super.initState();
@@ -174,6 +179,97 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
             value: settings.compactMode,
             onChanged: (v) => settings.setCompactMode(v),
+          ),
+
+          // Bubble style
+          ListTile(
+            leading: Icon(Icons.chat_bubble_outline, color: cs.primary),
+            title: const Text('Стиль сообщений'),
+            subtitle: Text(
+              ['Скруглённый', 'Квадратный', 'Минимальный'][settings.bubbleStyle],
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
+            trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+              for (var i = 0; i < 3; i++) ...[
+                GestureDetector(
+                  onTap: () => settings.setBubbleStyle(i),
+                  child: Container(
+                    width: 28,
+                    height: 20,
+                    margin: const EdgeInsets.only(left: 4),
+                    decoration: BoxDecoration(
+                      color: cs.primary.withValues(
+                          alpha: settings.bubbleStyle == i ? 0.85 : 0.25),
+                      borderRadius: i == 0
+                          ? BorderRadius.circular(10)
+                          : i == 1
+                              ? BorderRadius.circular(3)
+                              : BorderRadius.circular(6),
+                    ),
+                  ),
+                ),
+              ],
+            ]),
+          ),
+
+          // Message density
+          ListTile(
+            leading: Icon(Icons.density_medium, color: cs.primary),
+            title: const Text('Плотность сообщений'),
+            subtitle: Text(
+              ['Свободная', 'Обычная', 'Компактная'][settings.messageDensity],
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
+            trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+              for (var i = 0; i < 3; i++) ...[
+                _SizeChip(
+                  label: ['≋', '≡', '-'][i],
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700),
+                  selected: settings.messageDensity == i,
+                  onTap: () => settings.setMessageDensity(i),
+                ),
+                const SizedBox(width: 4),
+              ],
+            ]),
+          ),
+
+          // Clock format
+          ListTile(
+            leading: Icon(Icons.schedule, color: cs.primary),
+            title: const Text('Формат времени'),
+            subtitle: Text(
+              settings.clockFormat == 0 ? '24-часовой' : '12-часовой (AM/PM)',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
+            trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+              _SizeChip(
+                label: '24',
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w700),
+                selected: settings.clockFormat == 0,
+                onTap: () => settings.setClockFormat(0),
+              ),
+              const SizedBox(width: 6),
+              _SizeChip(
+                label: '12',
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w700),
+                selected: settings.clockFormat == 1,
+                onTap: () => settings.setClockFormat(1),
+              ),
+            ]),
+          ),
+
+          // Reaction quick bar toggle
+          SwitchListTile(
+            secondary: Icon(Icons.emoji_emotions_outlined, color: cs.primary),
+            title: const Text('Быстрая панель реакций'),
+            subtitle: Text(
+                'Показывать 6 эмодзи по долгому нажатию вместо полного списка',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+            value: settings.showReactionsQuickBar,
+            onChanged: (v) => settings.setShowReactionsQuickBar(v),
           ),
 
           // Chat background
@@ -418,11 +514,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       connected ? 'Онлайн: $count пользователей' : 'Нет соединения с ретранслятором',
                       style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                     ),
-                    trailing: connected
-                        ? null
+                    trailing: connecting
+                        ? const SizedBox(
+                            width: 20, height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
                         : IconButton(
                             icon: const Icon(Icons.refresh, size: 20),
-                            onPressed: () => RelayService.instance.connect(),
+                            tooltip: connected ? 'Переподключиться' : 'Подключиться',
+                            onPressed: () => RelayService.instance.reconnect(),
                           ),
                   ),
                 );
@@ -517,14 +617,87 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 32),
 
           Center(
-            child: Text(
-              'Rlink v0.0.2 • BLE mesh messenger',
-              style: TextStyle(color: Theme.of(context).hintColor, fontSize: 12),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _handleVersionTap,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 24),
+                child: Text(
+                  'Rlink v0.0.2 • BLE mesh messenger',
+                  style: TextStyle(
+                      color: Theme.of(context).hintColor, fontSize: 12),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 16),
         ],
       ),
+    );
+  }
+
+  // ── Hidden admin panel ───────────────────────────────────────
+  void _handleVersionTap() {
+    final now = DateTime.now();
+    // Reset counter if gap between taps > 2s
+    if (now.difference(_lastTapAt).inMilliseconds > 2000) {
+      _versionTapCount = 0;
+    }
+    _lastTapAt = now;
+    _versionTapCount++;
+
+    // Quiet hints at 10+ taps so nothing leaks to non-admins
+    if (_versionTapCount >= 15) {
+      _versionTapCount = 0;
+      _promptAdminPassword();
+    }
+  }
+
+  void _promptAdminPassword() {
+    final ctrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Доступ'),
+        content: TextField(
+          controller: ctrl,
+          obscureText: true,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Пароль',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => _checkAdminPassword(ctx, ctrl.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => _checkAdminPassword(ctx, ctrl.text),
+            child: const Text('Войти'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _checkAdminPassword(BuildContext dialogCtx, String input) {
+    final hash = sha256Hex(input);
+    if (hash != AppSettings.instance.adminPasswordHash) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Неверный пароль'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+    Navigator.pop(dialogCtx);
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const AdminScreen()),
     );
   }
 
@@ -625,7 +798,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<Database> _getDb() async {
     final dir = await getApplicationDocumentsDirectory();
-    return openDatabase(join(dir.path, 'rlink.db'));
+    return openDatabase(p.join(dir.path, 'rlink.db'));
   }
 
   Future<void> _fullReset(BuildContext context) async {
@@ -824,7 +997,7 @@ class _ChatBgTile extends StatelessWidget {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
     if (picked == null) return;
     final appDir = await getApplicationDocumentsDirectory();
-    final dest = File(join(appDir.path,
+    final dest = File(p.join(appDir.path,
         'chat_bg_${DateTime.now().millisecondsSinceEpoch}.jpg'));
     await File(picked.path).copy(dest.path);
     await settings.setChatBgForPeer('__global__', dest.path);
@@ -947,7 +1120,8 @@ class _PermissionsSection extends StatefulWidget {
   State<_PermissionsSection> createState() => _PermissionsSectionState();
 }
 
-class _PermissionsSectionState extends State<_PermissionsSection> {
+class _PermissionsSectionState extends State<_PermissionsSection>
+    with WidgetsBindingObserver {
   final Map<Permission, PermissionStatus> _statuses = {};
   bool _loading = true;
 
@@ -971,19 +1145,56 @@ class _PermissionsSectionState extends State<_PermissionsSection> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadStatuses();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Когда пользователь вернулся из системных настроек — перечитываем статусы.
+    // Задержка 600 мс нужна на iOS: ОС не сразу обновляет кэш permission_handler.
+    if (state == AppLifecycleState.resumed && mounted) {
+      Future.delayed(const Duration(milliseconds: 600), () {
+        if (mounted) _loadStatuses();
+      });
+    }
   }
 
   Future<void> _loadStatuses() async {
     final results = <Permission, PermissionStatus>{};
     for (final (perm, _, _) in _permissions) {
       try {
+        // Используем actual текущий статус от ОС (без кеша).
         results[perm] = await perm.status;
       } catch (_) {
-        // Some permissions may not be available on this platform
+        // Некоторые разрешения могут быть недоступны на платформе — пропускаем.
       }
     }
-    if (mounted) setState(() { _statuses.addAll(results); _loading = false; });
+    if (!mounted) return;
+    setState(() {
+      // Полностью заменяем — чтобы устаревшие записи не остались.
+      _statuses
+        ..clear()
+        ..addAll(results);
+      _loading = false;
+    });
+  }
+
+  /// Единая классификация статуса разрешения.
+  /// Возвращает одно из: 'granted', 'limited', 'denied', 'permanent', 'restricted'.
+  String _classify(PermissionStatus s) {
+    // isProvisional (iOS тихие уведомления) считаем как выданное.
+    if (s.isGranted || s.isProvisional) return 'granted';
+    if (s.isLimited) return 'limited';
+    if (s.isRestricted) return 'restricted';
+    if (s.isPermanentlyDenied) return 'permanent';
+    return 'denied';
   }
 
   @override
@@ -1000,42 +1211,65 @@ class _PermissionsSectionState extends State<_PermissionsSection> {
 
     for (final (perm, label, icon) in _permissions) {
       final status = _statuses[perm];
-      if (status == null) continue; // Not available on this platform
+      if (status == null) continue; // недоступно на этой платформе
 
-      final granted = status.isGranted || status.isLimited;
-      final permanent = status.isPermanentlyDenied;
-      final denied = status.isDenied;
+      final kind = _classify(status);
+      final allowed = kind == 'granted' || kind == 'limited';
+
+      final String subtitleText;
+      final Color subtitleColor;
+      switch (kind) {
+        case 'granted':
+          subtitleText = 'Разрешено';
+          subtitleColor = Colors.green;
+          break;
+        case 'limited':
+          subtitleText = 'Разрешено частично';
+          subtitleColor = Colors.green;
+          break;
+        case 'permanent':
+          subtitleText = 'Запрещено — откройте настройки';
+          subtitleColor = Colors.redAccent;
+          break;
+        case 'restricted':
+          subtitleText = 'Недоступно (ограничено системой)';
+          subtitleColor = Colors.grey;
+          break;
+        default:
+          subtitleText = 'Не разрешено';
+          subtitleColor = Colors.orange;
+      }
 
       items.add(ListTile(
-        leading: Icon(icon, color: granted ? cs.primary : Colors.grey),
+        leading: Icon(icon, color: allowed ? cs.primary : Colors.grey),
         title: Text(label),
         subtitle: Text(
-          granted
-              ? 'Разрешено'
-              : permanent
-                  ? 'Запрещено (настройки)'
-                  : 'Не разрешено',
-          style: TextStyle(
-            fontSize: 12,
-            color: granted ? Colors.green : Colors.orange,
-          ),
+          subtitleText,
+          style: TextStyle(fontSize: 12, color: subtitleColor),
         ),
-        trailing: granted
+        trailing: allowed
             ? const Icon(Icons.check_circle, color: Colors.green, size: 20)
-            : TextButton(
-                onPressed: () async {
-                  if (permanent) {
-                    await openAppSettings();
-                  } else if (denied) {
-                    final result = await perm.request();
-                    if (mounted) {
-                      setState(() => _statuses[perm] = result);
-                    }
-                  }
-                },
-                child: Text(permanent ? 'Открыть' : 'Разрешить',
-                    style: const TextStyle(fontSize: 12)),
-              ),
+            : kind == 'restricted'
+                ? const Icon(Icons.block, color: Colors.grey, size: 20)
+                : TextButton(
+                    onPressed: () async {
+                      // На iOS после первого denied повторный request() ничего не делает —
+                      // единственный путь это openAppSettings(). Так же для permanent.
+                      if (kind == 'permanent' ||
+                          (Platform.isIOS && kind == 'denied')) {
+                        await openAppSettings();
+                        return;
+                      }
+                      final result = await perm.request();
+                      if (mounted) {
+                        setState(() => _statuses[perm] = result);
+                      }
+                    },
+                    child: Text(
+                      kind == 'permanent' ? 'Открыть' : 'Разрешить',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
         dense: true,
       ));
     }
@@ -1048,10 +1282,7 @@ class _PermissionsSectionState extends State<_PermissionsSection> {
         child: Row(children: [
           Expanded(
             child: OutlinedButton.icon(
-              onPressed: () {
-                setState(() => _loading = true);
-                _loadStatuses();
-              },
+              onPressed: _loadStatuses,
               icon: const Icon(Icons.refresh, size: 18),
               label: const Text('Проверить разрешения'),
               style: OutlinedButton.styleFrom(

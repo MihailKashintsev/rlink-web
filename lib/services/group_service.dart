@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -24,7 +26,7 @@ class GroupService {
     final path = p.join(dir.path, 'groups.db');
     _db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE groups (
@@ -49,7 +51,8 @@ class GroupService {
             video_path TEXT,
             voice_path TEXT,
             is_outgoing INTEGER DEFAULT 0,
-            timestamp INTEGER NOT NULL
+            timestamp INTEGER NOT NULL,
+            reactions TEXT
           )
         ''');
         await db.execute(
@@ -58,6 +61,9 @@ class GroupService {
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
           await db.execute("ALTER TABLE groups ADD COLUMN moderators TEXT DEFAULT ''");
+        }
+        if (oldVersion < 3) {
+          await db.execute('ALTER TABLE group_messages ADD COLUMN reactions TEXT');
         }
       },
     );
@@ -230,6 +236,56 @@ class GroupService {
       offset: offset,
     );
     return rows.reversed.map((r) => GroupMessage.fromMap(r)).toList();
+  }
+
+  Future<GroupMessage?> getMessage(String messageId) async {
+    if (_db == null) return null;
+    final rows = await _db!
+        .query('group_messages', where: 'id = ?', whereArgs: [messageId]);
+    if (rows.isEmpty) return null;
+    return GroupMessage.fromMap(rows.first);
+  }
+
+  /// Toggle [emoji] reaction from [reactorId] on [messageId].
+  /// Returns the updated message (or null if not found).
+  Future<GroupMessage?> toggleMessageReaction(
+      String messageId, String emoji, String reactorId) async {
+    if (_db == null) return null;
+    final msg = await getMessage(messageId);
+    if (msg == null) return null;
+    final updated = Map<String, List<String>>.from(
+      msg.reactions.map((k, v) => MapEntry(k, List<String>.from(v))),
+    );
+    final list = List<String>.from(updated[emoji] ?? const <String>[]);
+    if (list.contains(reactorId)) {
+      list.remove(reactorId);
+    } else {
+      list.add(reactorId);
+    }
+    if (list.isEmpty) {
+      updated.remove(emoji);
+    } else {
+      updated[emoji] = list;
+    }
+    await _db!.update(
+      'group_messages',
+      {'reactions': updated.isEmpty ? null : jsonEncode(updated)},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    version.value++;
+    return GroupMessage(
+      id: msg.id,
+      groupId: msg.groupId,
+      senderId: msg.senderId,
+      text: msg.text,
+      imagePath: msg.imagePath,
+      videoPath: msg.videoPath,
+      voicePath: msg.voicePath,
+      isOutgoing: msg.isOutgoing,
+      timestamp: msg.timestamp,
+      reactions: updated,
+    );
   }
 
   Future<GroupMessage?> getLastMessage(String groupId) async {

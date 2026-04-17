@@ -10,8 +10,10 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'models/channel.dart';
 import 'models/chat_message.dart';
 import 'models/contact.dart';
+import 'models/group.dart';
 import 'services/app_settings.dart';
 import 'services/channel_service.dart';
 import 'services/ether_service.dart';
@@ -23,6 +25,7 @@ import 'services/gossip_router.dart';
 import 'services/image_service.dart';
 import 'services/name_filter.dart';
 import 'services/profile_service.dart';
+import 'services/media_upload_queue.dart';
 import 'services/story_service.dart';
 import 'services/relay_service.dart';
 import 'services/typing_service.dart';
@@ -44,6 +47,79 @@ Future<void> broadcastMyAvatar() async {
   final imagePath = ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
   if (imagePath != null) {
     await _broadcastAvatar(myProfile.publicKeyHex, imagePath);
+  }
+}
+
+/// Broadcast my banner to all peers (callable from anywhere).
+Future<void> broadcastMyBanner() async {
+  final myProfile = ProfileService.instance.profile;
+  if (myProfile == null) return;
+  final bannerPath = ImageService.instance.resolveStoredPath(myProfile.bannerImagePath);
+  if (bannerPath != null) {
+    await _broadcastBanner(myProfile.publicKeyHex, bannerPath);
+  }
+}
+
+/// Повторная отправка всех исходящих сообщений, которые застряли в статусе
+/// sending/failed (нет соединения). Вызывается при переподключении relay.
+/// Порядок сохранён: сортируем по времени создания.
+bool _outboxFlushing = false;
+Future<void> flushOutbox() async {
+  if (_outboxFlushing) return;
+  _outboxFlushing = true;
+  try {
+    final pending = await ChatStorageService.instance.getPendingOutgoingMessages();
+    if (pending.isEmpty) return;
+    debugPrint('[RLINK][Outbox] Flushing ${pending.length} pending messages');
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) return;
+    for (final m in pending) {
+      if (!RelayService.instance.isConnected) break;
+      // Только текстовые сообщения — медиа требуют отдельной повторной загрузки.
+      if (m.imagePath != null || m.videoPath != null ||
+          m.voicePath != null || m.filePath != null) {
+        continue;
+      }
+      try {
+        final x = RelayService.instance.getPeerX25519Key(m.peerId) ??
+            BleService.instance.getPeerX25519Key(m.peerId);
+        if (x != null && x.isNotEmpty) {
+          final enc = await CryptoService.instance.encryptMessage(
+            plaintext: m.text,
+            recipientX25519KeyBase64: x,
+          );
+          await GossipRouter.instance.sendEncryptedMessage(
+            encrypted: enc,
+            senderId: myId,
+            recipientId: m.peerId,
+            messageId: m.id,
+            latitude: m.latitude,
+            longitude: m.longitude,
+          );
+        } else {
+          await GossipRouter.instance.sendRawMessage(
+            text: m.text,
+            senderId: myId,
+            recipientId: m.peerId,
+            messageId: m.id,
+            replyToMessageId: m.replyToMessageId,
+            latitude: m.latitude,
+            longitude: m.longitude,
+          );
+        }
+        await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
+          m.id,
+          MessageStatus.sent,
+        );
+        // Небольшая пауза между сообщениями — не душим канал.
+        await Future.delayed(const Duration(milliseconds: 150));
+      } catch (e) {
+        debugPrint('[RLINK][Outbox] Retry failed for ${m.id}: $e');
+        // Оставляем статус failed — следующий реконнект попробует снова.
+      }
+    }
+  } finally {
+    _outboxFlushing = false;
   }
 }
 
@@ -169,6 +245,8 @@ Future<void> initServices() async {
     await ChannelService.instance.init();
     await GroupService.instance.init();
     await StoryService.instance.init();
+    await MediaUploadQueue.instance.init();
+    await MediaUploadQueue.instance.cleanUp();
 
     // Restore X25519 keys from contacts DB (survive app restarts)
     try {
@@ -219,26 +297,8 @@ Future<void> initServices() async {
         final now = DateTime.now();
         final msgId = messageId;
 
-        // Если незнакомец — автоматически создаём временный контакт
-        final existing = await ChatStorageService.instance.getContact(fromId);
-        if (existing == null) {
-          final btName = BleService.instance.getDeviceName(fromId);
-          final displayName = btName.isNotEmpty &&
-                  btName !=
-                      fromId.substring(0, btName.length.clamp(0, fromId.length))
-              ? btName
-              : '${fromId.substring(0, 8)}...';
-          await ChatStorageService.instance.saveContact(Contact(
-            publicKeyHex: fromId,
-            nickname: displayName,
-            avatarColor: 0xFF607D8B,
-            avatarEmoji: '',
-            addedAt: now,
-          ));
-          debugPrint('[RLINK][Main] Auto-created stranger contact: $displayName');
-        }
-
-        // Сохраняем сообщение в БД немедленно (peerId = fromId = public key)
+        // Сохраняем сообщение в БД (peerId = fromId = public key).
+        // Контакт НЕ создаётся автоматически — только через pair_req/pair_acc.
         await ChatStorageService.instance.saveMessage(ChatMessage(
           id: msgId,
           peerId: fromId,
@@ -376,7 +436,7 @@ Future<void> initServices() async {
           senderNick: senderNick,
         ));
       },
-      onStory: (storyId, authorId, text, bgColor) {
+      onStory: (storyId, authorId, text, bgColor, textX, textY, textSize) {
         debugPrint('[RLINK][Main] onStory: author=${authorId.substring(0, 16)} text=${text.substring(0, text.length.clamp(0, 20))}');
         StoryService.instance.addStory(StoryItem(
           id: storyId,
@@ -384,21 +444,29 @@ Future<void> initServices() async {
           text: text,
           bgColor: bgColor,
           createdAt: DateTime.now(),
+          textX: textX,
+          textY: textY,
+          textSize: textSize,
         ));
       },
-      onPairReq: (bleId, publicKey, nick, color, emoji, x25519Key) {
+      onPairReq: (bleId, publicKey, nick, username, color, emoji, x25519Key, tags) {
         debugPrint('[RLINK][Main] Pair request from $nick ($bleId)');
-        // Store x25519 key if provided
+        // Store x25519 key and username
         if (x25519Key.isNotEmpty) {
           BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
           unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
         }
+        if (username.isNotEmpty) {
+          RelayService.instance.registerPeerUsername(publicKey, username);
+        }
         final info = <String, dynamic>{
           'publicKey': publicKey,
           'nick': nick,
+          'username': username,
           'color': color,
           'emoji': emoji,
           'x25519Key': x25519Key,
+          'tags': tags,
         };
         BleService.instance.addPairRequest(bleId, info);
         // Бумшшшш! + открываем полноэкранный баннер
@@ -423,7 +491,7 @@ Future<void> initServices() async {
         }
         tryShowScreen(0);
       },
-      onPairAcc: (bleId, publicKey, nick, color, emoji, x25519Key) async {
+      onPairAcc: (bleId, publicKey, nick, username, color, emoji, x25519Key, tags) async {
         debugPrint('[RLINK][Main] Pair accepted by $nick ($bleId)');
         BleService.instance.removePairRequest(bleId);
         // Register peer key — always register, even if bleId isn't recognized as direct.
@@ -436,34 +504,46 @@ Future<void> initServices() async {
           BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
           unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
         }
+        if (username.isNotEmpty) {
+          RelayService.instance.registerPeerUsername(publicKey, username);
+        }
         BleService.instance.setExchangeState(publicKey, 3); // complete
         // Force-clear all pending entries for this device
         BleService.instance.clearPendingForPublicKey(publicKey);
         try {
+          // Preserve existing contact if present, but prefer the received nick
+          // unless the existing nickname was manually set (not an auto-generated hex stub).
+          final existing = await ChatStorageService.instance.getContact(publicKey);
+          final isStub = existing != null &&
+              RegExp(r'^[0-9a-fA-F]{8}\.\.\.').hasMatch(existing.nickname);
           await ChatStorageService.instance.saveContact(Contact(
             publicKeyHex: publicKey,
-            nickname: nick,
+            nickname: (existing != null && !isStub) ? existing.nickname : nick,
+            username: username.isNotEmpty ? username : (existing?.username ?? ''),
             avatarColor: color,
             avatarEmoji: emoji,
-            addedAt: DateTime.now(),
+            avatarImagePath: existing?.avatarImagePath,
+            x25519Key: x25519Key.isNotEmpty ? x25519Key : existing?.x25519Key,
+            addedAt: existing?.addedAt ?? DateTime.now(),
+            tags: tags.isNotEmpty ? tags : (existing?.tags ?? const []),
           ));
           unawaited(_updateEtherNameFilter());
         } catch (_) {}
-        // Send our profile back
+        // Send our full profile (profile + avatar + banner) directly to the peer
         final myProfile = ProfileService.instance.profile;
         if (myProfile != null) {
+          // Directed relay send (guaranteed delivery)
+          unawaited(_sendFullProfileToPeer(publicKey));
+          // Also broadcast via gossip for BLE peers
           await GossipRouter.instance.broadcastProfile(
             id: myProfile.publicKeyHex,
             nick: myProfile.nickname,
+            username: myProfile.username,
             color: myProfile.avatarColor,
             emoji: myProfile.avatarEmoji,
             x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+            tags: myProfile.tags,
           );
-          // Also send avatar
-          final imagePath = ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
-          if (imagePath != null) {
-            unawaited(_broadcastAvatar(myProfile.publicKeyHex, imagePath));
-          }
           // Show celebration screen on sender side
           final myKey = CryptoService.instance.publicKeyHex;
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -498,26 +578,27 @@ Future<void> initServices() async {
         final isVoice = ImageService.instance.isVoiceAssembly(msgId);
         final isVideo = ImageService.instance.isVideoAssembly(msgId);
         final isFile = ImageService.instance.isFileAssembly(msgId);
+        final isBanner = msgId.startsWith('banner_');
         final senderKey = ImageService.instance.assemblyFromId(msgId).isNotEmpty
             ? ImageService.instance.assemblyFromId(msgId)
             : fromId;
 
-        // Helper: ensure contact exists
-        Future<void> ensureContact() async {
-          final existing =
-              await ChatStorageService.instance.getContact(senderKey);
-          if (existing == null) {
-            await ChatStorageService.instance.saveContact(Contact(
-              publicKeyHex: senderKey,
-              nickname: '${senderKey.substring(0, 8)}...',
-              avatarColor: 0xFF607D8B,
-              avatarEmoji: '',
-              addedAt: DateTime.now(),
-            ));
+        if (isBanner) {
+          // Banner image via BLE chunks — save as contact banner
+          final path = await ImageService.instance.assembleAndSave(
+            msgId,
+            forContactKey: '${senderKey}_banner',
+          );
+          if (path != null) {
+            ImageService.instance.markCompleted(msgId);
+            final existing = await ChatStorageService.instance.getContact(senderKey);
+            if (existing != null) {
+              await ChatStorageService.instance.saveContact(
+                existing.copyWith(bannerImagePath: path));
+              debugPrint('[RLINK][Banner] Saved BLE banner for ${senderKey.substring(0, 8)}');
+            }
           }
-        }
-
-        if (isAvatar) {
+        } else if (isAvatar) {
           final path = await ImageService.instance.assembleAndSave(
             msgId,
             forContactKey: senderKey,
@@ -531,7 +612,6 @@ Future<void> initServices() async {
           final path = await ImageService.instance.assembleAndSaveVoice(msgId);
           if (path == null) return;
           ImageService.instance.markCompleted(msgId);
-          await ensureContact();
           final msg = ChatMessage(
             id: msgId,
             peerId: senderKey,
@@ -548,12 +628,16 @@ Future<void> initServices() async {
             timestamp: msg.timestamp,
             msgId: msgId,
           ));
+          final myK = CryptoService.instance.publicKeyHex;
+          if (myK.isNotEmpty) {
+            unawaited(GossipRouter.instance.sendAck(
+              messageId: msgId, senderId: myK, recipientId: senderKey));
+          }
         } else if (isFile) {
           final origName = ImageService.instance.assemblyFileName(msgId);
           final path = await ImageService.instance.assembleAndSaveFile(msgId);
           if (path == null) return;
           ImageService.instance.markCompleted(msgId);
-          await ensureContact();
           final fileLabel = '📎 ${origName ?? 'Файл'}';
           final fileBytes = await File(path).length();
           final msg = ChatMessage(
@@ -574,12 +658,16 @@ Future<void> initServices() async {
             timestamp: msg.timestamp,
             msgId: msgId,
           ));
+          final myK2 = CryptoService.instance.publicKeyHex;
+          if (myK2.isNotEmpty) {
+            unawaited(GossipRouter.instance.sendAck(
+              messageId: msgId, senderId: myK2, recipientId: senderKey));
+          }
         } else if (isVideo) {
           final isSquare = ImageService.instance.isSquareAssembly(msgId);
           final path = await ImageService.instance.assembleAndSaveVideo(msgId, isSquare: isSquare);
           if (path == null) return;
           ImageService.instance.markCompleted(msgId);
-          await ensureContact();
           final label = isSquare ? '⬛ Видео' : '📹 Видео';
           final msg = ChatMessage(
             id: msgId,
@@ -597,6 +685,11 @@ Future<void> initServices() async {
             timestamp: msg.timestamp,
             msgId: msgId,
           ));
+          final myK3 = CryptoService.instance.publicKeyHex;
+          if (myK3.isNotEmpty) {
+            unawaited(GossipRouter.instance.sendAck(
+              messageId: msgId, senderId: myK3, recipientId: senderKey));
+          }
         } else {
           final path = await ImageService.instance.assembleAndSave(msgId);
           if (path == null) return;
@@ -611,7 +704,12 @@ Future<void> initServices() async {
             return;
           }
 
-          await ensureContact();
+          // Story gossip packet may arrive after image chunks — cache the image
+          // so addStory() can attach it when the story packet arrives.
+          // Also proceed to save as a chat message (dedup: if it IS a story image
+          // StoryService.addStory will pick it up from the pending cache).
+          StoryService.instance.cachePendingImage(msgId, path);
+
           final msg = ChatMessage(
             id: msgId,
             peerId: senderKey,
@@ -628,12 +726,17 @@ Future<void> initServices() async {
             timestamp: msg.timestamp,
             msgId: msgId,
           ));
+          final myK4 = CryptoService.instance.publicKeyHex;
+          if (myK4.isNotEmpty) {
+            unawaited(GossipRouter.instance.sendAck(
+              messageId: msgId, senderId: myK4, recipientId: senderKey));
+          }
         }
       },
       // bleId — BLE device ID источника пакета (для маппинга)
       // publicKey — Ed25519 ключ из payload профиля
       // x25519Key — X25519 ключ base64 для E2E шифрования (пустая строка у старых версий)
-      onProfile: (bleId, publicKey, nick, color, emoji, x25519Key) async {
+      onProfile: (bleId, publicKey, nick, username, color, emoji, x25519Key, tags) async {
         // В Internet-only режиме игнорируем BLE профили — не нужны маппинги
         final mode = AppSettings.instance.connectionMode;
         // Регистрируем маппинг BLE ID → publicKey ТОЛЬКО для прямых пиров и НЕ в Internet-only.
@@ -645,6 +748,10 @@ Future<void> initServices() async {
         if (x25519Key.isNotEmpty) {
           BleService.instance.registerPeerX25519Key(publicKey, x25519Key);
           unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
+        }
+        // Запоминаем username в relay-кеше для поиска
+        if (username.isNotEmpty) {
+          RelayService.instance.registerPeerUsername(publicKey, username);
         }
 
         // Контакт сохраняем в БД при любом профиле (прямом или пересланном).
@@ -698,33 +805,34 @@ Future<void> initServices() async {
               await ChatStorageService.instance.saveContact(Contact(
                 publicKeyHex: publicKey,
                 nickname: nick,
+                username: username.isNotEmpty ? username : oldContact.username,
                 avatarColor: color,
                 avatarEmoji: emoji,
                 avatarImagePath: oldContact.avatarImagePath,
                 addedAt: oldContact.addedAt,
+                tags: tags.isNotEmpty ? tags : oldContact.tags,
+                bannerImagePath: oldContact.bannerImagePath,
               ));
               await ChatStorageService.instance
                   .deleteContact(oldContact.publicKeyHex);
             } else {
-              await ChatStorageService.instance.saveContact(Contact(
-                publicKeyHex: publicKey,
-                nickname: nick,
-                avatarColor: color,
-                avatarEmoji: emoji,
-                addedAt: DateTime.now(),
-              ));
+              // No existing contact and no stub — skip auto-creation.
+              // Contacts are only created via explicit user action (pair_acc / Add button).
               debugPrint(
-                  '[Profile] Auto-saved contact: $nick (key: ${publicKey.substring(0, 8)}...) direct=$isDirect');
+                  '[Profile] Skipped auto-save for unknown peer: $nick (key: ${publicKey.substring(0, 8)}...) isDirect=$isDirect');
             }
           } else {
             // Обновляем существующий контакт
             await ChatStorageService.instance.updateContact(Contact(
               publicKeyHex: publicKey,
               nickname: nick,
+              username: username.isNotEmpty ? username : existing.username,
               avatarColor: color,
               avatarEmoji: emoji,
               avatarImagePath: existing.avatarImagePath,
               addedAt: existing.addedAt,
+              tags: tags.isNotEmpty ? tags : existing.tags,
+              bannerImagePath: existing.bannerImagePath,
             ));
             // Если нашли ник-дубликат или стаб с другим ключом — переносим историю и удаляем
             if (oldContact != null) {
@@ -770,6 +878,20 @@ Future<void> initServices() async {
               }
             }
           }
+
+          // BLE UUID thread migration: if the user sent messages before profile
+          // exchange, those messages are stored under the BLE device UUID (not
+          // the public key). Migrate them so they merge into a single thread.
+          if (isDirect && bleId != publicKey && allPeerIds.contains(bleId)) {
+            debugPrint(
+                '[Profile] Migrating BLE UUID thread $bleId → ${publicKey.substring(0, 8)}');
+            await ChatStorageService.instance.migrateMessages(bleId, publicKey);
+            final bleContact =
+                await ChatStorageService.instance.getContact(bleId);
+            if (bleContact != null) {
+              await ChatStorageService.instance.deleteContact(bleId);
+            }
+          }
         } catch (e) {
           debugPrint('[Profile] DB error saving contact: $e');
         } finally {
@@ -797,10 +919,321 @@ Future<void> initServices() async {
       },
     );
 
-    // При подключении нового пира — НЕ отправляем профиль автоматически.
-    // Обмен профилями происходит только по приглашению (pair_req → pair_acc).
+    // ── Channel/Group packet handlers ──────────────────────────────
+    GossipRouter.instance.onChannelMeta = (payload) {
+      final channelId = payload['channelId'] as String?;
+      final name = payload['name'] as String?;
+      final adminId = payload['adminId'] as String?;
+      if (channelId == null || name == null || adminId == null) return;
+      final subs = (payload['subscriberIds'] as List<dynamic>?)?.cast<String>() ?? [adminId];
+      final mods = (payload['moderatorIds'] as List<dynamic>?)?.cast<String>() ?? [];
+      final ch = Channel(
+        id: channelId,
+        name: name,
+        adminId: adminId,
+        subscriberIds: subs,
+        moderatorIds: mods,
+        avatarColor: payload['avatarColor'] as int? ?? 0xFF42A5F5,
+        avatarEmoji: payload['avatarEmoji'] as String? ?? '📢',
+        description: payload['description'] as String?,
+        commentsEnabled: payload['commentsEnabled'] as bool? ?? true,
+        createdAt: payload['createdAt'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+        verified: payload['verified'] as bool? ?? false,
+        verifiedBy: payload['verifiedBy'] as String?,
+        username: payload['username'] as String? ?? '',
+        universalCode: payload['universalCode'] as String? ?? '',
+        isPublic: payload['isPublic'] as bool? ?? true,
+      );
+      ChannelService.instance.saveChannelFromBroadcast(ch);
+    };
+    GossipRouter.instance.onChannelPost = (payload) {
+      final channelId = payload['channelId'] as String?;
+      final postId = payload['postId'] as String?;
+      final authorId = payload['authorId'] as String?;
+      if (channelId == null || postId == null || authorId == null) return;
+      ChannelService.instance.savePost(ChannelPost(
+        id: postId,
+        channelId: channelId,
+        authorId: authorId,
+        text: payload['text'] as String? ?? '',
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ));
+    };
+    GossipRouter.instance.onChannelDeletePost = (payload) {
+      final postId = payload['postId'] as String?;
+      if (postId != null) {
+        ChannelService.instance.deletePost(postId);
+      }
+    };
+    GossipRouter.instance.onChannelSubscribe = (payload) {
+      final channelId = payload['channelId'] as String?;
+      final userId = payload['userId'] as String?;
+      final unsub = payload['unsubscribe'] as bool? ?? false;
+      if (channelId == null || userId == null) return;
+      if (unsub) {
+        ChannelService.instance.removeSubscriber(channelId, userId);
+      } else {
+        ChannelService.instance.subscribe(channelId, userId);
+      }
+    };
+    GossipRouter.instance.onChannelInvite = (payload) {
+      final channelId = payload['channelId'] as String?;
+      final channelName = payload['channelName'] as String?;
+      final adminId = payload['adminId'] as String?;
+      final inviterId = payload['inviterId'] as String?;
+      final inviterNick = payload['inviterNick'] as String?;
+      if (channelId == null || channelName == null || adminId == null ||
+          inviterId == null || inviterNick == null) { return; }
+      debugPrint('[RLINK] Channel invite: $channelName from $inviterNick');
+      ChannelService.instance.addChannelInvite(ChannelInvite(
+        channelId: channelId,
+        channelName: channelName,
+        adminId: adminId,
+        inviterId: inviterId,
+        inviterNick: inviterNick,
+        avatarColor: payload['avatarColor'] as int? ?? 0xFF42A5F5,
+        avatarEmoji: payload['avatarEmoji'] as String? ?? '📢',
+        description: payload['description'] as String?,
+        createdAt: payload['createdAt'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+      ));
+    };
+    GossipRouter.instance.onChannelHistoryReq = (payload) async {
+      final channelId = payload['channelId'] as String?;
+      final requesterId = payload['requesterId'] as String?;
+      final sinceTs = (payload['sinceTs'] as int?) ?? 0;
+      if (channelId == null || requesterId == null) return;
+      final me = CryptoService.instance.publicKeyHex;
+      if (me.isEmpty || me == requesterId) return;
+      // Отвечают только те, у кого есть посты: обычно это админ,
+      // но подойдут и старые подписчики.
+      final ch = await ChannelService.instance.getChannel(channelId);
+      if (ch == null) return;
+      final posts = await ChannelService.instance.getPosts(channelId, limit: 50);
+      for (final post in posts) {
+        if (post.timestamp <= sinceTs) continue;
+        await GossipRouter.instance.sendChannelPost(
+          channelId: channelId,
+          postId: post.id,
+          authorId: post.authorId,
+          text: post.text,
+        );
+        await Future.delayed(const Duration(milliseconds: 50));
+      }
+      debugPrint('[RLINK][Channel] Replied to history request for $channelId'
+          ' with ${posts.length} posts');
+    };
+    GossipRouter.instance.onChannelComment = (payload) {
+      final postId = payload['postId'] as String?;
+      final commentId = payload['commentId'] as String?;
+      final authorId = payload['authorId'] as String?;
+      final text = payload['text'] as String?;
+      if (postId == null || commentId == null || authorId == null || text == null) return;
+      ChannelService.instance.saveComment(ChannelComment(
+        id: commentId,
+        postId: postId,
+        authorId: authorId,
+        text: text,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ));
+    };
+    // Универсальный обработчик реакций для историй/постов/комментов/групп.
+    GossipRouter.instance.onReactionExt = (payload) async {
+      final kind = payload['kind'] as String?;
+      final targetId = payload['targetId'] as String?;
+      final emoji = payload['emoji'] as String?;
+      final from = payload['from'] as String?;
+      if (kind == null || targetId == null || emoji == null || from == null) return;
+      switch (kind) {
+        case 'story':
+          StoryService.instance.applyIncomingReaction(targetId, emoji, from);
+          break;
+        case 'channel_post':
+          await ChannelService.instance.togglePostReaction(targetId, emoji, from);
+          break;
+        case 'channel_comment':
+          await ChannelService.instance.toggleCommentReaction(targetId, emoji, from);
+          break;
+        case 'group_message':
+          await GroupService.instance.toggleMessageReaction(targetId, emoji, from);
+          break;
+      }
+    };
+    // Удаляет историю при получении story_del от автора
+    GossipRouter.instance.onStoryDelete = (storyId, authorId) {
+      debugPrint('[RLINK][Stories] story_del: $storyId from ${authorId.substring(0, authorId.length.clamp(0, 8))}');
+      StoryService.instance.deleteStory(storyId, authorId);
+    };
+
+    // Регистрирует просмотр истории (приходит от зрителя, обрабатывается у автора)
+    GossipRouter.instance.onStoryView = (storyId, viewerId) {
+      debugPrint('[RLINK][Stories] story_view: $storyId from ${viewerId.substring(0, viewerId.length.clamp(0, 8))}');
+      StoryService.instance.addViewer(storyId, viewerId);
+    };
+
+    // Отвечает на story_req: переотправляет свои активные истории и их картинки
+    GossipRouter.instance.onStoryRequest = (fromId) async {
+      final myKey = CryptoService.instance.publicKeyHex;
+      if (myKey.isEmpty) return;
+      final myStories = StoryService.instance.storiesFor(myKey);
+      if (myStories.isEmpty) return;
+      debugPrint('[RLINK][Stories] story_req from ${fromId.substring(0, 8)}, re-sending ${myStories.length} stories');
+      for (final story in myStories) {
+        try {
+          await GossipRouter.instance.sendStory(
+            storyId: story.id,
+            authorId: story.authorId,
+            text: story.text,
+            bgColor: story.bgColor,
+            textX: story.textX,
+            textY: story.textY,
+            textSize: story.textSize,
+          );
+          // Re-send image to the requester via relay
+          if (story.imagePath != null && RelayService.instance.isConnected) {
+            final file = File(story.imagePath!);
+            if (file.existsSync()) {
+              final bytes = await file.readAsBytes();
+              final compressed = ImageService.instance.compress(bytes);
+              await RelayService.instance.sendBlob(
+                recipientKey: fromId,
+                fromId: myKey,
+                msgId: 'story_${story.id}',
+                compressedData: compressed,
+              );
+            }
+          }
+        } catch (e) {
+          debugPrint('[RLINK][Stories] Re-send story failed: $e');
+        }
+        await Future.delayed(const Duration(milliseconds: 150));
+      }
+    };
+
+    // Синхронизация хэша пароля от другого устройства администратора
+    GossipRouter.instance.onAdminConfig = (payload) async {
+      final hash = payload['hash'] as String?;
+      if (hash != null && hash.isNotEmpty) {
+        await AppSettings.instance.setAdminPasswordHash(hash);
+        debugPrint('[RLINK][Admin] Admin password hash updated from peer');
+      }
+    };
+    GossipRouter.instance.onGroupMessage = (payload) {
+      final groupId = payload['groupId'] as String?;
+      final senderId = payload['senderId'] as String?;
+      final text = payload['text'] as String?;
+      final messageId = payload['messageId'] as String?;
+      if (groupId == null || senderId == null || text == null || messageId == null) return;
+      final myKey = CryptoService.instance.publicKeyHex;
+      GroupService.instance.saveMessage(GroupMessage(
+        id: messageId,
+        groupId: groupId,
+        senderId: senderId,
+        text: text,
+        isOutgoing: senderId == myKey,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ));
+    };
+    GossipRouter.instance.onGroupInvite = (payload) {
+      final groupId = payload['groupId'] as String?;
+      final groupName = payload['groupName'] as String?;
+      final inviterId = payload['inviterId'] as String?;
+      final inviterNick = payload['inviterNick'] as String?;
+      final creatorId = payload['creatorId'] as String?;
+      final memberIds = (payload['memberIds'] as List<dynamic>?)?.cast<String>() ?? [];
+      if (groupId == null || groupName == null || inviterId == null ||
+          inviterNick == null || creatorId == null) { return; }
+      debugPrint('[RLINK] Group invite: $groupName from $inviterNick');
+      GroupService.instance.addInvite(GroupInvite(
+        groupId: groupId,
+        groupName: groupName,
+        inviterId: inviterId,
+        inviterNick: inviterNick,
+        creatorId: creatorId,
+        memberIds: memberIds,
+        avatarColor: payload['avatarColor'] as int? ?? 0xFF5C6BC0,
+        avatarEmoji: payload['avatarEmoji'] as String? ?? '👥',
+        createdAt: payload['createdAt'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+      ));
+    };
+    GossipRouter.instance.onGroupAccept = (payload) {
+      final groupId = payload['groupId'] as String?;
+      final accepterId = payload['accepterId'] as String?;
+      if (groupId == null || accepterId == null) return;
+      GroupService.instance.addMember(groupId, accepterId);
+    };
+    GossipRouter.instance.onVerifyRequest = (payload) {
+      final channelId = payload['channelId'] as String?;
+      final channelName = payload['channelName'] as String?;
+      final adminId = payload['adminId'] as String?;
+      if (channelId == null || channelName == null || adminId == null) return;
+      debugPrint('[RLINK] Verification request: $channelName');
+      ChannelService.instance.addVerificationRequest(VerificationRequest(
+        channelId: channelId,
+        channelName: channelName,
+        adminId: adminId,
+        subscriberCount: payload['subCount'] as int? ?? 0,
+        avatarEmoji: payload['emoji'] as String? ?? '📢',
+        description: payload['desc'] as String?,
+        requestedAt: DateTime.now().millisecondsSinceEpoch,
+      ));
+    };
+    GossipRouter.instance.onVerifyApproval = (payload) {
+      final channelId = payload['channelId'] as String?;
+      final verifiedBy = payload['verifiedBy'] as String?;
+      if (channelId == null || verifiedBy == null) return;
+      debugPrint('[RLINK] Channel verified: $channelId by $verifiedBy');
+      ChannelService.instance.verifyChannel(channelId, verifiedBy);
+    };
+    GossipRouter.instance.onChannelForeignAgent = (payload) {
+      final channelId = payload['channelId'] as String?;
+      final value = payload['value'] as bool? ?? true;
+      if (channelId == null) return;
+      debugPrint('[RLINK] Channel $channelId foreign agent = $value');
+      ChannelService.instance.applyAdminAction(
+          channelId: channelId, foreignAgent: value);
+    };
+    GossipRouter.instance.onChannelBlock = (payload) {
+      final channelId = payload['channelId'] as String?;
+      final value = payload['value'] as bool? ?? true;
+      if (channelId == null) return;
+      debugPrint('[RLINK] Channel $channelId blocked = $value');
+      ChannelService.instance.applyAdminAction(
+          channelId: channelId, blocked: value);
+    };
+    GossipRouter.instance.onChannelAdminDelete = (payload) {
+      final channelId = payload['channelId'] as String?;
+      if (channelId == null) return;
+      debugPrint('[RLINK] Channel $channelId deleted by admin');
+      ChannelService.instance.applyAdminAction(
+          channelId: channelId, delete: true);
+    };
+
+    // При подключении BLE-пира — автоматически рассылаем свой профиль.
+    // Это позволяет контактам обновить наш ник/аватар без ручного переприглашения.
+    // Пакет 'profile' с TTL≥1 — не показывает диалог, только обновляет контакт.
     BleService.instance.onPeerConnected = (peerId) async {
-      debugPrint('[BLE] Peer connected: $peerId (no auto-profile, waiting for invite)');
+      debugPrint('[BLE] Peer connected: $peerId — broadcasting profile + requesting stories');
+      final myProfile = ProfileService.instance.profile;
+      if (myProfile != null) {
+        await GossipRouter.instance.broadcastProfile(
+          id: myProfile.publicKeyHex,
+          nick: myProfile.nickname,
+          username: myProfile.username,
+          color: myProfile.avatarColor,
+          emoji: myProfile.avatarEmoji,
+          x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+          tags: myProfile.tags,
+        );
+      }
+      // Request stories from newly connected BLE peer
+      final myKey = CryptoService.instance.publicKeyHex;
+      if (myKey.isNotEmpty) {
+        Future.delayed(const Duration(seconds: 2), () async {
+          try {
+            await GossipRouter.instance.sendStoryRequest(fromId: myKey);
+          } catch (_) {}
+        });
+      }
     };
 
     // Start BLE only if not Internet-only mode
@@ -822,6 +1255,19 @@ Future<void> initServices() async {
     if (AppSettings.instance.connectionMode >= 1) {
       RelayService.instance.onBlobReceived = _onBlobReceived;
       RelayService.instance.onPeerOnline = _onRelayPeerOnline;
+      // When relay connects, send profile to all online peers so they get our username
+      RelayService.instance.state.addListener(() {
+        if (RelayService.instance.isConnected) {
+          // Small delay to let presence data arrive from server
+          Future.delayed(const Duration(seconds: 2), _sendProfileToOnlinePeers);
+          // Попробовать досылать зависшие исходящие сообщения.
+          Future.delayed(const Duration(seconds: 3), flushOutbox);
+          // Request stories from online peers so we see them even after reconnect.
+          Future.delayed(const Duration(seconds: 4), _requestStoriesFromPeers);
+          // Resume any pending background uploads.
+          Future.delayed(const Duration(seconds: 5), MediaUploadQueue.instance.processQueue);
+        }
+      });
       unawaited(RelayService.instance.connect());
     }
 
@@ -855,35 +1301,131 @@ Future<void> _updateEtherNameFilter() async {
   } catch (_) {}
 }
 
-/// When a relay peer comes online, send our avatar via relay blob (instant delivery).
-void _onRelayPeerOnline(String peerPublicKey) {
+/// Send our profile DIRECTLY to a specific peer via relay (not broadcast).
+/// This ensures the profile reaches the peer even if relay doesn't support broadcast.
+Future<void> _sendProfileDirectToPeer(String peerKey) async {
+  final myProfile = ProfileService.instance.profile;
+  if (myProfile == null || !RelayService.instance.isConnected) return;
+
+  final packet = GossipPacket(
+    id: const Uuid().v4(),
+    type: 'profile',
+    ttl: 1,
+    timestamp: DateTime.now().millisecondsSinceEpoch,
+    payload: <String, dynamic>{
+      'id': myProfile.publicKeyHex,
+      'nick': myProfile.nickname,
+      if (myProfile.username.isNotEmpty) 'u': myProfile.username,
+      'color': myProfile.avatarColor,
+      'emoji': myProfile.avatarEmoji,
+      'x': CryptoService.instance.x25519PublicKeyBase64,
+      if (myProfile.tags.isNotEmpty) 'tags': myProfile.tags,
+    },
+  );
+  try {
+    await RelayService.instance.sendPacket(packet, recipientKey: peerKey);
+    debugPrint('[RLINK][Profile] Sent DIRECTED profile to ${peerKey.substring(0, 8)}');
+  } catch (e) {
+    debugPrint('[RLINK][Profile] Direct profile send failed: $e');
+  }
+}
+
+/// Send profile + avatar + banner to a specific peer via relay.
+Future<void> _sendFullProfileToPeer(String peerKey) async {
+  await _sendProfileDirectToPeer(peerKey);
+
   final myProfile = ProfileService.instance.profile;
   if (myProfile == null) return;
-  final imagePath = ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
-  if (imagePath == null || !File(imagePath).existsSync()) return;
 
-  // Debounce: don't spam avatar sends
-  unawaited(Future.delayed(const Duration(seconds: 1), () async {
+  // Send avatar blob
+  final imagePath = ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
+  if (imagePath != null && File(imagePath).existsSync()) {
     try {
+      await Future.delayed(const Duration(milliseconds: 500));
       final bytes = await File(imagePath).readAsBytes();
       final compressed = ImageService.instance.compress(bytes);
-      final msgId = 'avatar_${myProfile.publicKeyHex.substring(0, 16)}';
+      // Уникальный msgId на каждую отправку (обход дедупа приёмника).
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final msgId = 'avatar_${myProfile.publicKeyHex.substring(0, 16)}_$ts';
       await RelayService.instance.sendBlob(
-        recipientKey: peerPublicKey,
+        recipientKey: peerKey,
         fromId: myProfile.publicKeyHex,
         msgId: msgId,
         compressedData: compressed,
         isSquare: true,
       );
-      debugPrint('[RLINK][Avatar] Sent avatar via relay blob to ${peerPublicKey.substring(0, 8)}');
+      debugPrint('[RLINK][Avatar] Sent avatar blob to ${peerKey.substring(0, 8)}');
     } catch (e) {
-      debugPrint('[RLINK][Avatar] Relay avatar send failed: $e');
+      debugPrint('[RLINK][Avatar] Avatar blob to ${peerKey.substring(0, 8)} failed: $e');
     }
-  }));
+  }
+
+  // Send banner blob
+  final bannerPath = ImageService.instance.resolveStoredPath(myProfile.bannerImagePath);
+  if (bannerPath != null && File(bannerPath).existsSync()) {
+    try {
+      await Future.delayed(const Duration(milliseconds: 500));
+      final bytes = await File(bannerPath).readAsBytes();
+      final compressed = ImageService.instance.compress(bytes);
+      // Уникальный msgId на каждую отправку, иначе дедуп на приёмнике
+      // (wasAlreadyCompleted) молча отбрасывает все последующие обновления баннера.
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final msgId = 'banner_${myProfile.publicKeyHex.substring(0, 16)}_$ts';
+      await RelayService.instance.sendBlob(
+        recipientKey: peerKey,
+        fromId: myProfile.publicKeyHex,
+        msgId: msgId,
+        compressedData: compressed,
+      );
+      debugPrint('[RLINK][Banner] Sent banner blob to ${peerKey.substring(0, 8)}');
+    } catch (e) {
+      debugPrint('[RLINK][Banner] Banner blob to ${peerKey.substring(0, 8)} failed: $e');
+    }
+  }
 }
 
-/// Отправляет аватар-изображение по BLE (fire-and-forget, вызывается из onPeerConnected).
-/// Аватар ~ 8–15 KB → ~120 чанков → ~6 секунд передачи (с задержками для BLE стека).
+/// Send profile to ALL contacts via relay (after profile edit).
+Future<void> sendProfileToAllContacts() async {
+  if (!RelayService.instance.isConnected) return;
+  final contacts = await ChatStorageService.instance.getContacts();
+  for (final c in contacts) {
+    unawaited(_sendFullProfileToPeer(c.publicKeyHex));
+  }
+  debugPrint('[RLINK][Profile] Sent profile update to ${contacts.length} contacts');
+}
+
+/// Request active stories from all connected peers (called on relay connect / BLE peer connect).
+Future<void> _requestStoriesFromPeers() async {
+  final myKey = CryptoService.instance.publicKeyHex;
+  if (myKey.isEmpty) return;
+  try {
+    await GossipRouter.instance.sendStoryRequest(fromId: myKey);
+    debugPrint('[RLINK][Stories] Sent story_req broadcast');
+  } catch (e) {
+    debugPrint('[RLINK][Stories] story_req failed: $e');
+  }
+}
+
+/// Send profile to ALL known online peers via relay (on connect).
+Future<void> _sendProfileToOnlinePeers() async {
+  if (!RelayService.instance.isConnected) return;
+  final peers = RelayService.instance.knownOnlinePeers;
+  for (final p in peers) {
+    unawaited(_sendProfileDirectToPeer(p.publicKey));
+  }
+  if (peers.isNotEmpty) {
+    debugPrint('[RLINK][Profile] Sent profile to ${peers.length} online peers');
+  }
+}
+
+/// When a relay peer comes online, send our profile + avatar + banner.
+void _onRelayPeerOnline(String peerPublicKey) {
+  final myProfile = ProfileService.instance.profile;
+  if (myProfile == null) return;
+  unawaited(_sendFullProfileToPeer(peerPublicKey));
+}
+
+/// Отправляет аватар-изображение по BLE + relay (fire-and-forget).
 Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
   try {
     // Wait for profile packets and BLE stack to settle after pair exchange.
@@ -895,31 +1437,112 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
       return;
     }
     final bytes = await File(resolvedPath).readAsBytes();
-    final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-    final msgId = const Uuid().v4();
-    debugPrint('[RLINK][Avatar] Starting broadcast: ${chunks.length} chunks, ${bytes.length} bytes');
-    await GossipRouter.instance.sendImgMeta(
-      msgId: msgId,
-      totalChunks: chunks.length,
-      fromId: myPublicKey,
-      isAvatar: true,
-    );
-    // Small delay after meta to let receiver initialize assembly
-    await Future.delayed(const Duration(milliseconds: 200));
-    for (var i = 0; i < chunks.length; i++) {
-      await GossipRouter.instance.sendImgChunk(
-        msgId: msgId,
-        index: i,
-        base64Data: chunks[i],
-        fromId: myPublicKey,
-      );
-      if (i % 5 == 4) {
-        await Future.delayed(const Duration(milliseconds: 30));
+
+    // Relay blob path — send to all contacts (instant delivery)
+    if (RelayService.instance.isConnected) {
+      try {
+        final compressed = ImageService.instance.compress(bytes);
+        // Уникальный msgId — иначе приёмник дедупит по wasAlreadyCompleted.
+        final ts = DateTime.now().millisecondsSinceEpoch;
+        final blobMsgId = 'avatar_${myPublicKey.substring(0, 16)}_$ts';
+        final contacts = await ChatStorageService.instance.getContacts();
+        for (final c in contacts) {
+          try {
+            await RelayService.instance.sendBlob(
+              recipientKey: c.publicKeyHex,
+              fromId: myPublicKey,
+              msgId: blobMsgId,
+              compressedData: compressed,
+              isSquare: true,
+            );
+          } catch (_) {}
+        }
+        debugPrint('[RLINK][Avatar] Sent relay blob to ${contacts.length} contacts');
+      } catch (e) {
+        debugPrint('[RLINK][Avatar] Relay blob failed: $e');
       }
     }
-    debugPrint('[RLINK][Avatar] Sent ${chunks.length} chunks via BLE+relay');
+
+    // BLE chunk path — only in modes that use BLE (0=BLE only, 2=Both)
+    if (AppSettings.instance.connectionMode != 1) {
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final msgId = const Uuid().v4();
+      debugPrint('[RLINK][Avatar] Starting BLE broadcast: ${chunks.length} chunks, ${bytes.length} bytes');
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myPublicKey,
+        isAvatar: true,
+      );
+      await Future.delayed(const Duration(milliseconds: 200));
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myPublicKey,
+        );
+        if (i % 5 == 4) {
+          await Future.delayed(const Duration(milliseconds: 30));
+        }
+      }
+      debugPrint('[RLINK][Avatar] Sent ${chunks.length} chunks via BLE');
+    }
   } catch (e) {
     debugPrint('[RLINK][Avatar] Send failed: $e');
+  }
+}
+
+/// Отправляет баннер профиля по BLE+relay после обмена контактами.
+Future<void> _broadcastBanner(String myPublicKey, String bannerPath) async {
+  try {
+    // Небольшая пауза, чтобы не забивать канал если сразу после аватара.
+    await Future.delayed(const Duration(milliseconds: 800));
+    final resolvedPath = ImageService.instance.resolveStoredPath(bannerPath);
+    if (resolvedPath == null || !File(resolvedPath).existsSync()) return;
+    final bytes = await File(resolvedPath).readAsBytes();
+    // Relay path — instant delivery
+    if (RelayService.instance.isConnected) {
+      final compressed = ImageService.instance.compress(bytes);
+      // Уникальный msgId — обход дедупа приёмника.
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final msgId = 'banner_${myPublicKey.substring(0, 16)}_$ts';
+      // Relay: send to all online contacts
+      final contacts = await ChatStorageService.instance.getContacts();
+      for (final c in contacts) {
+        try {
+          await RelayService.instance.sendBlob(
+            recipientKey: c.publicKeyHex,
+            fromId: myPublicKey,
+            msgId: msgId,
+            compressedData: compressed,
+            isSquare: true,
+          );
+        } catch (_) {}
+      }
+      debugPrint('[RLINK][Banner] Sent banner via relay to ${contacts.length} contacts');
+    }
+    // BLE chunks — only in modes that use BLE (0=BLE only, 2=Both)
+    if (AppSettings.instance.connectionMode != 1) {
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final bleMsgId = 'banner_${myPublicKey.substring(0, 16)}_${const Uuid().v4().substring(0, 8)}';
+      await GossipRouter.instance.sendImgMeta(
+        msgId: bleMsgId,
+        totalChunks: chunks.length,
+        fromId: myPublicKey,
+        isAvatar: false,
+      );
+      await Future.delayed(const Duration(milliseconds: 200));
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: bleMsgId, index: i, base64Data: chunks[i], fromId: myPublicKey,
+        );
+        if (i % 5 == 4) await Future.delayed(const Duration(milliseconds: 30));
+      }
+      debugPrint('[RLINK][Banner] Sent banner via BLE chunks');
+    }
+  } catch (e) {
+    debugPrint('[RLINK][Banner] Send failed: $e');
   }
 }
 
@@ -964,6 +1587,67 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
     return;
   }
 
+  // Handle banner blob — save as contact banner image
+  if (msgId.startsWith('banner_')) {
+    try {
+      final decompressed = ImageService.instance.decompress(data);
+      // Use dedicated saveBannerImage to avoid overwriting avatar (different filename prefix).
+      final bannerPath = await ImageService.instance.saveBannerImage(fromId, decompressed);
+      final existing = await ChatStorageService.instance.getContact(fromId);
+      if (existing != null) {
+        // saveContact fires contactsNotifier, so UI auto-refreshes.
+        await ChatStorageService.instance.saveContact(existing.copyWith(bannerImagePath: bannerPath));
+        debugPrint('[RLINK][Banner] Saved relay banner for ${fromId.substring(0, 8)} → $bannerPath');
+      }
+    } catch (e) {
+      debugPrint('[RLINK][Banner] Failed to save relay banner: $e');
+    }
+    return;
+  }
+
+  // Handle story VIDEO blob — msgId format: 'story_vid_<storyId>'
+  if (msgId.startsWith('story_vid_')) {
+    try {
+      final storyId = msgId.substring('story_vid_'.length);
+      final decompressed = ImageService.instance.decompress(data);
+      final videoPath = await ImageService.instance.saveStoryVideo(storyId, decompressed);
+      final story = StoryService.instance.findStory(storyId);
+      if (story != null) {
+        story.videoPath = videoPath;
+        StoryService.instance.notifyUpdate();
+        debugPrint('[RLINK][Story] Attached relay video to story ${storyId.substring(0, storyId.length.clamp(0, 8))}');
+      }
+    } catch (e) {
+      debugPrint('[RLINK][Story] Failed to save relay story video: $e');
+    }
+    return;
+  }
+
+  // Handle story blob — attach image to the matching story.
+  // msgId format: 'story_<storyId>'
+  if (msgId.startsWith('story_')) {
+    try {
+      final storyId = msgId.substring('story_'.length);
+      final decompressed = ImageService.instance.decompress(data);
+      final imagePath = await ImageService.instance.saveContactAvatar(
+        'story_$storyId', decompressed,
+      );
+      final story = StoryService.instance.findStory(storyId);
+      if (story != null) {
+        story.imagePath = imagePath;
+        StoryService.instance.notifyUpdate();
+        debugPrint('[RLINK][Story] Attached relay image to story ${storyId.substring(0, 8)}');
+      } else {
+        // История ещё не пришла — кэшируем картинку и прикрепим при появлении.
+        StoryService.instance.cachePendingImage(storyId, imagePath);
+        debugPrint('[RLINK][Story] Cached pending image for ${storyId.substring(0, 8)}');
+      }
+    } catch (e) {
+      debugPrint('[RLINK][Story] Failed to save relay story image: $e');
+    }
+    return;
+  }
+
   // Feed directly to ImageService as if all chunks arrived at once
   ImageService.instance.initAssembly(
     msgId, 1,
@@ -984,25 +1668,13 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
 
   final senderKey = fromId;
 
-  // Ensure contact exists
-  Future<void> ensureContact() async {
-    final existing = await ChatStorageService.instance.getContact(senderKey);
-    if (existing == null) {
-      await ChatStorageService.instance.saveContact(Contact(
-        publicKeyHex: senderKey,
-        nickname: '${senderKey.substring(0, 8)}...',
-        avatarColor: 0xFF607D8B,
-        avatarEmoji: '',
-        addedAt: DateTime.now(),
-      ));
-    }
-  }
+  final myKey = CryptoService.instance.publicKeyHex;
 
   if (isVoice) {
     final path = await ImageService.instance.assembleAndSaveVoice(msgId);
     if (path == null) { debugPrint('[RLINK][Blob] Voice assemble failed'); return; }
     ImageService.instance.markCompleted(msgId);
-    await ensureContact();
+
     final msg = ChatMessage(
       id: msgId,
       peerId: senderKey,
@@ -1019,13 +1691,17 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
       timestamp: msg.timestamp,
       msgId: msgId,
     ));
+    if (myKey.isNotEmpty) {
+      unawaited(GossipRouter.instance.sendAck(
+        messageId: msgId, senderId: myKey, recipientId: fromId));
+    }
     debugPrint('[RLINK][Blob] Voice saved: $path');
   } else if (isFile) {
     final origName = fileName ?? ImageService.instance.assemblyFileName(msgId);
     final path = await ImageService.instance.assembleAndSaveFile(msgId);
     if (path == null) { debugPrint('[RLINK][Blob] File assemble failed'); return; }
     ImageService.instance.markCompleted(msgId);
-    await ensureContact();
+
     final fileLabel = '📎 ${origName ?? 'Файл'}';
     final fileBytes = await File(path).length();
     final msg = ChatMessage(
@@ -1046,12 +1722,16 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
       timestamp: msg.timestamp,
       msgId: msgId,
     ));
+    if (myKey.isNotEmpty) {
+      unawaited(GossipRouter.instance.sendAck(
+        messageId: msgId, senderId: myKey, recipientId: fromId));
+    }
     debugPrint('[RLINK][Blob] File saved: $path ($origName)');
   } else if (isVideo) {
     final path = await ImageService.instance.assembleAndSaveVideo(msgId, isSquare: isSquare);
     if (path == null) { debugPrint('[RLINK][Blob] Video assemble failed'); return; }
     ImageService.instance.markCompleted(msgId);
-    await ensureContact();
+
     final label = isSquare ? '⬛ Видео' : '📹 Видео';
     final msg = ChatMessage(
       id: msgId,
@@ -1069,6 +1749,10 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
       timestamp: msg.timestamp,
       msgId: msgId,
     ));
+    if (myKey.isNotEmpty) {
+      unawaited(GossipRouter.instance.sendAck(
+        messageId: msgId, senderId: myKey, recipientId: fromId));
+    }
     debugPrint('[RLINK][Blob] Video saved: $path (square=$isSquare)');
   } else {
     // Image
@@ -1085,7 +1769,6 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
       return;
     }
 
-    await ensureContact();
     final msg = ChatMessage(
       id: msgId,
       peerId: senderKey,
@@ -1102,6 +1785,10 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
       timestamp: msg.timestamp,
       msgId: msgId,
     ));
+    if (myKey.isNotEmpty) {
+      unawaited(GossipRouter.instance.sendAck(
+        messageId: msgId, senderId: myKey, recipientId: fromId));
+    }
     debugPrint('[RLINK][Blob] Image saved: $path');
   }
 }
@@ -1140,12 +1827,6 @@ void _updateLiveActivity() {
       'message': '',
       'signal': _bestSignalLevel(),
     });
-  } catch (_) {}
-}
-
-Future<void> _stopLiveActivity() async {
-  try {
-    await _kBleChannel.invokeMethod('stopLiveActivity');
   } catch (_) {}
 }
 

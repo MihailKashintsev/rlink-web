@@ -5,6 +5,7 @@ import '../services/image_service.dart';
 class UserProfile {
   final String publicKeyHex;
   final String nickname;
+  final String username;         // уникальный юзернейм (как в Telegram)
   final int avatarColor;
   final String avatarEmoji;
   final String? avatarImagePath; // локальный путь к фото аватара
@@ -14,6 +15,7 @@ class UserProfile {
   const UserProfile({
     required this.publicKeyHex,
     required this.nickname,
+    this.username = '',
     required this.avatarColor,
     required this.avatarEmoji,
     this.avatarImagePath,
@@ -33,6 +35,7 @@ class UserProfile {
   Map<String, dynamic> toJson() => {
         'id': publicKeyHex,
         'nick': nickname,
+        if (username.isNotEmpty) 'u': username,
         'color': avatarColor,
         'emoji': avatarEmoji,
         if (avatarImagePath != null) 'imgPath': avatarImagePath,
@@ -43,6 +46,7 @@ class UserProfile {
   factory UserProfile.fromJson(Map<String, dynamic> j) => UserProfile(
         publicKeyHex: j['id'] as String,
         nickname: j['nick'] as String,
+        username: j['u'] as String? ?? '',
         avatarColor: j['color'] as int,
         avatarEmoji: j['emoji'] as String,
         avatarImagePath: ImageService.instance.resolveStoredPath(

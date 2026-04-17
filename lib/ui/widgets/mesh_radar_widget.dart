@@ -320,7 +320,7 @@ class _RadarPainter extends CustomPainter {
     );
 
     // Sweep gradient trail
-    final trailAngle = math.pi / 3; // 60° trail
+    const trailAngle = math.pi / 3; // 60° trail
     canvas.save();
     canvas.clipPath(
         Path()..addOval(Rect.fromCircle(center: center, radius: radius)));

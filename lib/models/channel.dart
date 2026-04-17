@@ -15,6 +15,11 @@ class Channel {
   final int createdAt;
   final bool verified; // канал верифицирован
   final String? verifiedBy; // кто верифицировал: 'auto' или publicKey админа
+  final bool foreignAgent; // помечен как ИНОАГЕНТ
+  final bool blocked;      // заблокирован админом сети
+  final String username;       // уникальный юзернейм канала (как у пользователей)
+  final String universalCode;  // публичный «универсальный код» канала, пригодный для поиска
+  final bool isPublic;         // true = найдётся в поиске; false = скрытый (only admin-invited)
 
   const Channel({
     required this.id,
@@ -30,6 +35,11 @@ class Channel {
     required this.createdAt,
     this.verified = false,
     this.verifiedBy,
+    this.foreignAgent = false,
+    this.blocked = false,
+    this.username = '',
+    this.universalCode = '',
+    this.isPublic = true,
   });
 
   bool get isAdmin => false; // checked externally via adminId
@@ -51,6 +61,11 @@ class Channel {
         'ts': createdAt,
         'verified': verified,
         if (verifiedBy != null) 'verifiedBy': verifiedBy,
+        if (foreignAgent) 'foreignAgent': true,
+        if (blocked) 'blocked': true,
+        if (username.isNotEmpty) 'u': username,
+        if (universalCode.isNotEmpty) 'uc': universalCode,
+        'pub': isPublic,
       };
 
   factory Channel.fromJson(Map<String, dynamic> j) => Channel(
@@ -69,6 +84,11 @@ class Channel {
         createdAt: j['ts'] as int? ?? 0,
         verified: j['verified'] as bool? ?? false,
         verifiedBy: j['verifiedBy'] as String?,
+        foreignAgent: j['foreignAgent'] as bool? ?? false,
+        blocked: j['blocked'] as bool? ?? false,
+        username: j['u'] as String? ?? '',
+        universalCode: j['uc'] as String? ?? '',
+        isPublic: j['pub'] as bool? ?? true,
       );
 
   String encode() => jsonEncode(toJson());
@@ -92,6 +112,11 @@ class Channel {
     bool? commentsEnabled,
     bool? verified,
     String? verifiedBy,
+    bool? foreignAgent,
+    bool? blocked,
+    String? username,
+    String? universalCode,
+    bool? isPublic,
   }) =>
       Channel(
         id: id,
@@ -107,6 +132,11 @@ class Channel {
         createdAt: createdAt,
         verified: verified ?? this.verified,
         verifiedBy: verifiedBy ?? this.verifiedBy,
+        foreignAgent: foreignAgent ?? this.foreignAgent,
+        blocked: blocked ?? this.blocked,
+        username: username ?? this.username,
+        universalCode: universalCode ?? this.universalCode,
+        isPublic: isPublic ?? this.isPublic,
       );
 }
 
@@ -120,6 +150,7 @@ class ChannelPost {
   final String? videoPath;
   final int timestamp;
   final List<ChannelComment> comments;
+  final Map<String, List<String>> reactions;
 
   const ChannelPost({
     required this.id,
@@ -130,7 +161,16 @@ class ChannelPost {
     this.videoPath,
     required this.timestamp,
     this.comments = const [],
+    this.reactions = const {},
   });
+
+  int get totalReactions {
+    var n = 0;
+    for (final list in reactions.values) {
+      n += list.length;
+    }
+    return n;
+  }
 
   Map<String, dynamic> toMap() => {
         'id': id,
@@ -140,20 +180,32 @@ class ChannelPost {
         'image_path': imagePath,
         'video_path': videoPath,
         'timestamp': timestamp,
+        'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
       };
 
   factory ChannelPost.fromMap(Map<String, dynamic> m,
-          {List<ChannelComment> comments = const []}) =>
-      ChannelPost(
-        id: m['id'] as String,
-        channelId: m['channel_id'] as String,
-        authorId: m['author_id'] as String,
-        text: m['text'] as String? ?? '',
-        imagePath: m['image_path'] as String?,
-        videoPath: m['video_path'] as String?,
-        timestamp: m['timestamp'] as int,
-        comments: comments,
-      );
+      {List<ChannelComment> comments = const []}) {
+    Map<String, List<String>> reactions = const {};
+    final raw = m['reactions'] as String?;
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw) as Map<String, dynamic>;
+        reactions =
+            decoded.map((k, v) => MapEntry(k, (v as List).cast<String>()));
+      } catch (_) {}
+    }
+    return ChannelPost(
+      id: m['id'] as String,
+      channelId: m['channel_id'] as String,
+      authorId: m['author_id'] as String,
+      text: m['text'] as String? ?? '',
+      imagePath: m['image_path'] as String?,
+      videoPath: m['video_path'] as String?,
+      timestamp: m['timestamp'] as int,
+      comments: comments,
+      reactions: reactions,
+    );
+  }
 }
 
 /// Комментарий к посту.
@@ -163,6 +215,7 @@ class ChannelComment {
   final String authorId;
   final String text;
   final int timestamp;
+  final Map<String, List<String>> reactions;
 
   const ChannelComment({
     required this.id,
@@ -170,7 +223,16 @@ class ChannelComment {
     required this.authorId,
     required this.text,
     required this.timestamp,
+    this.reactions = const {},
   });
+
+  int get totalReactions {
+    var n = 0;
+    for (final list in reactions.values) {
+      n += list.length;
+    }
+    return n;
+  }
 
   Map<String, dynamic> toMap() => {
         'id': id,
@@ -178,13 +240,26 @@ class ChannelComment {
         'author_id': authorId,
         'text': text,
         'timestamp': timestamp,
+        'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
       };
 
-  factory ChannelComment.fromMap(Map<String, dynamic> m) => ChannelComment(
-        id: m['id'] as String,
-        postId: m['post_id'] as String,
-        authorId: m['author_id'] as String,
-        text: m['text'] as String? ?? '',
-        timestamp: m['timestamp'] as int,
-      );
+  factory ChannelComment.fromMap(Map<String, dynamic> m) {
+    Map<String, List<String>> reactions = const {};
+    final raw = m['reactions'] as String?;
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw) as Map<String, dynamic>;
+        reactions =
+            decoded.map((k, v) => MapEntry(k, (v as List).cast<String>()));
+      } catch (_) {}
+    }
+    return ChannelComment(
+      id: m['id'] as String,
+      postId: m['post_id'] as String,
+      authorId: m['author_id'] as String,
+      text: m['text'] as String? ?? '',
+      timestamp: m['timestamp'] as int,
+      reactions: reactions,
+    );
+  }
 }

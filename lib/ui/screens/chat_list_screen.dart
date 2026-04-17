@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import '../../main.dart';
 import '../../models/channel.dart';
 import '../../models/contact.dart';
-import '../../models/group.dart';
+import '../../services/app_settings.dart';
 import '../../services/ble_service.dart';
 import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
@@ -26,7 +26,6 @@ import 'chat_screen.dart';
 import 'ether_screen.dart';
 import 'groups_screen.dart';
 import 'profile_screen.dart';
-import 'contacts_screen.dart';
 import 'settings_screen.dart';
 import 'story_creator_screen.dart';
 import 'story_viewer_screen.dart';
@@ -55,7 +54,7 @@ class ChatListScreen extends StatefulWidget {
 }
 
 class _ChatListScreenState extends State<ChatListScreen> {
-  int _currentTab = 0; // 0=Чаты, 1=Контакты, 2=Рядом, 3=Эфир
+  int _currentTab = 0; // 0=Чаты, 1=Рядом, 2=Эфир
   bool _searchActive = false;
   final _searchController = TextEditingController();
 
@@ -81,7 +80,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
       const SnackBar(
           content: Text('Поиск устройств...'), duration: Duration(seconds: 2)),
     );
-    setState(() => _currentTab = 2);
+    setState(() => _currentTab = 1);
   }
 
   void _toggleSearch() {
@@ -96,65 +95,113 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   void _createChannel() {
     final nameCtrl = TextEditingController();
+    final usernameCtrl = TextEditingController();
     final descCtrl = TextEditingController();
+    bool isPublic = true;
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Новый канал'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(
-            controller: nameCtrl,
-            autofocus: true,
-            decoration: const InputDecoration(hintText: 'Название канала'),
-            maxLength: 30,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Новый канал'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                controller: nameCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(hintText: 'Название канала'),
+                maxLength: 30,
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: usernameCtrl,
+                decoration: const InputDecoration(
+                  hintText: 'Юзернейм (необязательно)',
+                  prefixText: '@',
+                ),
+                maxLength: 24,
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z0-9_\.]')),
+                ],
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: descCtrl,
+                decoration: const InputDecoration(hintText: 'Описание (необязательно)'),
+                maxLength: 100,
+              ),
+              const SizedBox(height: 8),
+              SwitchListTile(
+                value: isPublic,
+                onChanged: (v) => setLocal(() => isPublic = v),
+                contentPadding: EdgeInsets.zero,
+                title: Text(isPublic ? 'Публичный' : 'Скрытый'),
+                subtitle: Text(
+                  isPublic
+                      ? 'Находится по названию, юзернейму и универсальному коду'
+                      : 'Админ сам добавляет подписчиков. В поиске не виден.',
+                  style: const TextStyle(fontSize: 11),
+                ),
+              ),
+            ]),
           ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: descCtrl,
-            decoration: const InputDecoration(hintText: 'Описание (необязательно)'),
-            maxLength: 100,
-          ),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
-          FilledButton(
-            onPressed: () async {
-              final name = nameCtrl.text.trim();
-              if (name.isEmpty) return;
-              Navigator.pop(ctx);
-              try {
-                final myId = CryptoService.instance.publicKeyHex;
-                final ch = await ChannelService.instance.createChannel(
-                  name: name,
-                  adminId: myId,
-                  description: descCtrl.text.trim().isNotEmpty ? descCtrl.text.trim() : null,
-                );
-                GossipRouter.instance.broadcastChannelMeta(
-                  channelId: ch.id,
-                  name: ch.name,
-                  adminId: ch.adminId,
-                  avatarColor: ch.avatarColor,
-                  avatarEmoji: ch.avatarEmoji,
-                  description: ch.description,
-                  commentsEnabled: ch.commentsEnabled,
-                  createdAt: ch.createdAt,
-                );
-                if (mounted) {
-                  Navigator.push(context, slideRoute(
-                    ChannelViewScreen(channel: ch),
-                  ));
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+            FilledButton(
+              onPressed: () async {
+                final name = nameCtrl.text.trim();
+                if (name.isEmpty) return;
+                final uname = usernameCtrl.text.trim().toLowerCase();
+                if (uname.isNotEmpty) {
+                  final taken = await ChannelService.instance.isUsernameTaken(uname);
+                  if (taken) {
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Этот юзернейм уже занят')),
+                      );
+                    }
+                    return;
+                  }
                 }
-              } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Ошибка: $e')),
+                if (ctx.mounted) Navigator.pop(ctx);
+                try {
+                  final myId = CryptoService.instance.publicKeyHex;
+                  final ch = await ChannelService.instance.createChannel(
+                    name: name,
+                    adminId: myId,
+                    username: uname,
+                    isPublic: isPublic,
+                    description: descCtrl.text.trim().isNotEmpty ? descCtrl.text.trim() : null,
                   );
+                  GossipRouter.instance.broadcastChannelMeta(
+                    channelId: ch.id,
+                    name: ch.name,
+                    adminId: ch.adminId,
+                    avatarColor: ch.avatarColor,
+                    avatarEmoji: ch.avatarEmoji,
+                    description: ch.description,
+                    commentsEnabled: ch.commentsEnabled,
+                    createdAt: ch.createdAt,
+                    username: ch.username,
+                    universalCode: ch.universalCode,
+                    isPublic: ch.isPublic,
+                  );
+                  if (mounted) {
+                    Navigator.push(context, slideRoute(
+                      ChannelViewScreen(channel: ch),
+                    ));
+                  }
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Ошибка: $e')),
+                    );
+                  }
                 }
-              }
-            },
-            child: const Text('Создать'),
-          ),
-        ],
+              },
+              child: const Text('Создать'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -217,15 +264,14 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 autofocus: true,
                 style: const TextStyle(fontSize: 16),
                 decoration: InputDecoration(
-                  hintText: _currentTab == 0
-                      ? 'Поиск...'
-                      : _currentTab == 1
-                          ? 'Поиск контактов и людей...'
-                          : 'Поиск...',
+                  hintText: 'Поиск контактов, каналов, людей...',
                   hintStyle: TextStyle(color: Colors.grey.shade500),
                   border: InputBorder.none,
                 ),
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) {
+                  setState(() {});
+                  _triggerGlobalSearch(_searchController.text);
+                },
               )
             : const Text('Rlink',
                 style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22)),
@@ -253,13 +299,13 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 ),
               ),
         actions: [
-          if (_currentTab == 2 && !_searchActive)
+          if (_currentTab == 1 && !_searchActive)
             IconButton(
               icon: const Icon(Icons.refresh),
               tooltip: 'Обновить',
               onPressed: _rescan,
             ),
-          if (_currentTab != 2)
+          if (_currentTab == 0)
             IconButton(
               icon: Icon(_searchActive ? Icons.close : Icons.search),
               tooltip: _searchActive ? 'Закрыть' : 'Поиск',
@@ -297,7 +343,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
         index: _currentTab,
         children: [
           _UnifiedChatsTab(searchQuery: _searchActive ? _searchController.text : ''),
-          ContactsScreen(searchQuery: _searchActive ? _searchController.text : ''),
           _NearbyTab(),
           const EtherScreen(),
         ],
@@ -311,10 +356,26 @@ class _ChatListScreenState extends State<ChatListScreen> {
             _searchController.clear();
             RelayService.instance.searchResults.value = [];
           }
-          if (i == 3) EtherService.instance.markRead();
+          if (i == 2) EtherService.instance.markRead();
         }),
       ),
     );
+  }
+
+  // ── Глобальный поиск (контакты + каналы + люди) ──
+  Timer? _globalSearchDebounce;
+  void _triggerGlobalSearch(String query) {
+    _globalSearchDebounce?.cancel();
+    final raw = query.trim();
+    if (raw.length < 2) {
+      RelayService.instance.searchResults.value = [];
+      return;
+    }
+    _globalSearchDebounce = Timer(const Duration(milliseconds: 350), () {
+      if (RelayService.instance.isConnected) {
+        RelayService.instance.searchUsers(raw);
+      }
+    });
   }
 }
 
@@ -347,14 +408,10 @@ class _AnimatedNavBar extends StatelessWidget {
           label: AppL10n.t('nav_chats'),
         ),
         NavigationDestination(
-          icon: const Icon(Icons.contacts_outlined),
-          selectedIcon: const Icon(Icons.contacts),
-          label: AppL10n.t('nav_contacts'),
-        ),
-        NavigationDestination(
           icon: ValueListenableBuilder<int>(
             valueListenable: BleService.instance.peersCount,
-            builder: (_, count, __) => count > 0
+            builder: (_, count, __) =>
+                count > 0 && AppSettings.instance.connectionMode != 1
                 ? Badge(
                     label: Text('$count'),
                     child: const Icon(Icons.radar))
@@ -362,7 +419,8 @@ class _AnimatedNavBar extends StatelessWidget {
           ),
           selectedIcon: ValueListenableBuilder<int>(
             valueListenable: BleService.instance.peersCount,
-            builder: (_, count, __) => count > 0
+            builder: (_, count, __) =>
+                count > 0 && AppSettings.instance.connectionMode != 1
                 ? Badge(
                     label: Text('$count'),
                     child: const Icon(Icons.radar))
@@ -405,6 +463,8 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   Timer? _loadDebounce;
   VoidCallback? _groupListener;
   VoidCallback? _channelListener;
+  VoidCallback? _bleListener;   // fires on BLE peer connect/disconnect
+  VoidCallback? _contactListener; // fires when contactsNotifier updates
 
   @override
   void initState() {
@@ -416,8 +476,14 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     });
     _groupListener = () => _debouncedLoad();
     _channelListener = () => _debouncedLoad();
+    // Rebuild when BLE peers connect/disconnect so the green dot updates live.
+    _bleListener = () => _debouncedLoad();
+    // Also rebuild when contacts change (avatar/banner/nickname updates).
+    _contactListener = () => _debouncedLoad();
     GroupService.instance.version.addListener(_groupListener!);
     ChannelService.instance.version.addListener(_channelListener!);
+    BleService.instance.peersCount.addListener(_bleListener!);
+    ChatStorageService.instance.contactsNotifier.addListener(_contactListener!);
   }
 
   void _debouncedLoad() {
@@ -431,15 +497,21 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     _sub?.cancel();
     if (_groupListener != null) GroupService.instance.version.removeListener(_groupListener!);
     if (_channelListener != null) ChannelService.instance.version.removeListener(_channelListener!);
+    if (_bleListener != null) BleService.instance.peersCount.removeListener(_bleListener!);
+    if (_contactListener != null) ChatStorageService.instance.contactsNotifier.removeListener(_contactListener!);
     super.dispose();
   }
 
   Future<void> _load() async {
     final items = <_ChatItem>[];
+    final myId = CryptoService.instance.publicKeyHex;
+    final showOnline = AppSettings.instance.showOnlineStatus;
 
     // 1) Личные чаты
     final summaries = await ChatStorageService.instance.getChatSummaries();
+    final summaryIds = <String>{};
     for (final s in summaries) {
+      summaryIds.add(s.peerId);
       items.add(_ChatItem(
         type: _ChatItemType.personal,
         id: s.peerId,
@@ -449,13 +521,33 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         avatarImagePath: s.avatarImagePath,
         lastMessage: s.displayText,
         lastTime: s.timestamp,
-        isOnline: BleService.instance.isPeerConnected(s.peerId),
+        isOnline: showOnline && BleService.instance.isPeerConnected(s.peerId),
       ));
     }
 
-    // 2) Группы
+    // 1б) Контакты без переписки — добавляем с пустым lastMessage
+    final contacts = await ChatStorageService.instance.getContacts();
+    for (final c in contacts) {
+      if (summaryIds.contains(c.publicKeyHex)) continue;
+      items.add(_ChatItem(
+        type: _ChatItemType.personal,
+        id: c.publicKeyHex,
+        nickname: c.nickname.isNotEmpty
+            ? c.nickname
+            : '${c.publicKeyHex.substring(0, 8)}...',
+        avatarColor: c.avatarColor,
+        avatarEmoji: c.avatarEmoji,
+        avatarImagePath: c.avatarImagePath,
+        lastMessage: '',
+        lastTime: c.addedAt,
+        isOnline: showOnline && BleService.instance.isPeerConnected(c.publicKeyHex),
+      ));
+    }
+
+    // 2) Группы — только те, где я участник или создатель.
     final groups = await GroupService.instance.getGroups();
     for (final g in groups) {
+      if (g.creatorId != myId && !g.memberIds.contains(myId)) continue;
       final lastMsg = await GroupService.instance.getLastMessage(g.id);
       items.add(_ChatItem(
         type: _ChatItemType.group,
@@ -472,9 +564,10 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
       ));
     }
 
-    // 3) Каналы
+    // 3) Каналы — только те, где я подписан или являюсь админом.
     final channels = await ChannelService.instance.getChannels();
     for (final ch in channels) {
+      if (ch.adminId != myId && !ch.subscriberIds.contains(myId)) continue;
       final lastPost = await ChannelService.instance.getLastPost(ch.id);
       items.add(_ChatItem(
         type: _ChatItemType.channel,
@@ -527,40 +620,39 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   @override
   Widget build(BuildContext context) {
     final q = widget.searchQuery.toLowerCase().trim();
-    final visible = q.isEmpty
-        ? _items
-        : _items.where((item) =>
-            item.nickname.toLowerCase().contains(q) ||
-            item.lastMessage.toLowerCase().contains(q)).toList();
 
-    if (_items.isEmpty) {
+    if (_items.isEmpty && q.isEmpty) {
       return Column(children: [
         _StoriesStrip(chatItems: _items),
         const Expanded(child: _EmptyChatsState()),
       ]);
     }
-    if (visible.isEmpty && q.isNotEmpty) {
-      return Center(
-        child: Text('Ничего не найдено',
-            style: TextStyle(color: Colors.grey.shade500, fontSize: 15)),
-      );
+
+    if (q.isEmpty) {
+      return Column(children: [
+        _StoriesStrip(chatItems: _items),
+        Expanded(child: ListView.builder(
+          itemCount: _items.length,
+          padding: const EdgeInsets.only(top: 4, bottom: 8),
+          itemBuilder: (_, i) {
+            final item = _items[i];
+            return _AnimatedChatCard(
+              index: i,
+              item: item,
+              onTap: () => _navigate(context, item),
+              timeLabel: _fmtTime(item.lastTime),
+            );
+          },
+        )),
+      ]);
     }
-    return Column(children: [
-      _StoriesStrip(chatItems: _items),
-      Expanded(child: ListView.builder(
-        itemCount: visible.length,
-        padding: const EdgeInsets.only(top: 4, bottom: 8),
-        itemBuilder: (_, i) {
-          final item = visible[i];
-          return _AnimatedChatCard(
-            index: i,
-            item: item,
-            onTap: () => _navigate(context, item),
-            timeLabel: _fmtTime(item.lastTime),
-          );
-        },
-      )),
-    ]);
+
+    // Режим поиска — секции «Чаты», «Контакты», «Каналы», «Люди в сети».
+    return _UnifiedSearchResults(
+      query: q,
+      localItems: _items,
+      onOpenItem: (item) => _navigate(context, item),
+    );
   }
 
   String _fmtTime(DateTime dt) {
@@ -808,6 +900,281 @@ class _ChatItem {
   String get peerId => id;
 }
 
+// ── Единый блок результатов поиска (чаты + контакты + каналы + люди) ──
+
+class _UnifiedSearchResults extends StatefulWidget {
+  final String query;
+  final List<_ChatItem> localItems;
+  final void Function(_ChatItem) onOpenItem;
+  const _UnifiedSearchResults({
+    required this.query,
+    required this.localItems,
+    required this.onOpenItem,
+  });
+
+  @override
+  State<_UnifiedSearchResults> createState() => _UnifiedSearchResultsState();
+}
+
+class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
+  List<Channel> _channelMatches = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadChannels();
+  }
+
+  @override
+  void didUpdateWidget(_UnifiedSearchResults old) {
+    super.didUpdateWidget(old);
+    if (old.query != widget.query) _loadChannels();
+  }
+
+  Future<void> _loadChannels() async {
+    final matches = await ChannelService.instance.searchChannels(widget.query);
+    if (!mounted) return;
+    setState(() => _channelMatches = matches);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = widget.query;
+
+    // 1) Чаты (из localItems)
+    final chatMatches = widget.localItems.where((item) =>
+        item.nickname.toLowerCase().contains(q) ||
+        item.lastMessage.toLowerCase().contains(q)).toList();
+
+    return ValueListenableBuilder<List<Contact>>(
+      valueListenable: ChatStorageService.instance.contactsNotifier,
+      builder: (_, contacts, __) {
+        // 2) Контакты (без дубликатов с чатами)
+        final chatIds = chatMatches.map((c) => c.id).toSet();
+        final contactMatches = contacts.where((c) {
+          if (chatIds.contains(c.publicKeyHex)) return false;
+          final short = c.publicKeyHex.length > 8 ? c.publicKeyHex.substring(0, 8) : c.publicKeyHex;
+          return c.nickname.toLowerCase().contains(q) ||
+              c.username.toLowerCase().contains(q) ||
+              short.toLowerCase().contains(q) ||
+              c.publicKeyHex.toLowerCase().startsWith(q);
+        }).toList();
+
+        // 3) Каналы из локального кеша (searchChannels фильтрует скрытые)
+        final channels = _channelMatches;
+
+        // 4) Люди из relay
+        return ValueListenableBuilder<List<RelayPeer>>(
+          valueListenable: RelayService.instance.searchResults,
+          builder: (_, relayResults, __) {
+            final knownKeys = <String>{
+              ...contactMatches.map((c) => c.publicKeyHex),
+              ...chatIds,
+            };
+            final relayPeople = relayResults
+                .where((p) => !knownKeys.contains(p.publicKey))
+                .toList();
+
+            final hasAny = chatMatches.isNotEmpty ||
+                contactMatches.isNotEmpty ||
+                channels.isNotEmpty ||
+                relayPeople.isNotEmpty;
+
+            if (!hasAny) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.search_off,
+                          size: 56, color: Colors.grey.shade600),
+                      const SizedBox(height: 12),
+                      Text('Ничего не найдено',
+                          style: TextStyle(
+                              color: Colors.grey.shade400, fontSize: 15)),
+                      const SizedBox(height: 4),
+                      Text(
+                        RelayService.instance.isConnected
+                            ? 'Попробуй другой запрос'
+                            : 'Relay не подключён — поиск людей недоступен',
+                        style: TextStyle(
+                            color: Colors.grey.shade600, fontSize: 12),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            return ListView(
+              padding: const EdgeInsets.only(top: 4, bottom: 80),
+              children: [
+                if (chatMatches.isNotEmpty) ...[
+                  _searchSection('Чаты', chatMatches.length),
+                  for (int i = 0; i < chatMatches.length; i++)
+                    _AnimatedChatCard(
+                      index: i,
+                      item: chatMatches[i],
+                      onTap: () => widget.onOpenItem(chatMatches[i]),
+                      timeLabel: _fmtTimeStatic(chatMatches[i].lastTime),
+                    ),
+                ],
+                if (contactMatches.isNotEmpty) ...[
+                  _searchSection('Контакты', contactMatches.length),
+                  for (final c in contactMatches)
+                    ListTile(
+                      leading: AvatarWidget(
+                        initials: c.nickname.isNotEmpty
+                            ? c.nickname[0].toUpperCase()
+                            : '?',
+                        color: c.avatarColor,
+                        emoji: c.avatarEmoji,
+                        imagePath: c.avatarImagePath,
+                        size: 44,
+                      ),
+                      title: Text(c.nickname),
+                      subtitle: Text(
+                        c.username.isNotEmpty ? '#${c.username}' : c.shortId,
+                        style: TextStyle(
+                            color: Colors.grey.shade500, fontSize: 11),
+                      ),
+                      onTap: () => Navigator.push(
+                        context,
+                        slideRoute(ChatScreen(
+                          peerId: c.publicKeyHex,
+                          peerNickname: c.nickname,
+                          peerAvatarColor: c.avatarColor,
+                          peerAvatarEmoji: c.avatarEmoji,
+                          peerAvatarImagePath: c.avatarImagePath,
+                        )),
+                      ),
+                    ),
+                ],
+                if (channels.isNotEmpty) ...[
+                  _searchSection('Каналы', channels.length),
+                  for (final ch in channels)
+                    ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: Color(ch.avatarColor),
+                        child: Text(
+                          ch.avatarEmoji,
+                          style: const TextStyle(fontSize: 20),
+                        ),
+                      ),
+                      title: Row(children: [
+                        Expanded(
+                          child: Text(ch.name,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                        ),
+                        if (ch.verified)
+                          const Icon(Icons.verified,
+                              size: 16, color: Colors.blue),
+                      ]),
+                      subtitle: Text(
+                        ch.username.isNotEmpty
+                            ? '@${ch.username}'
+                            : (ch.description ?? ch.universalCode),
+                        style: TextStyle(
+                            color: Colors.grey.shade500, fontSize: 11),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () => Navigator.push(
+                        context,
+                        slideRoute(ChannelViewScreen(channel: ch)),
+                      ),
+                    ),
+                ],
+                if (relayPeople.isNotEmpty) ...[
+                  _searchSection('Люди в сети', relayPeople.length),
+                  for (final p in relayPeople)
+                    ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor:
+                            Theme.of(context).colorScheme.primary.withValues(alpha: 0.15),
+                        child: Text(
+                          p.nick.isNotEmpty ? p.nick[0].toUpperCase() : '#',
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.primary,
+                              fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      title: Text(
+                        p.username.isNotEmpty
+                            ? '#${p.username}'
+                            : (p.nick.isNotEmpty ? p.nick : p.shortId),
+                      ),
+                      subtitle: Text(
+                        p.publicKey.substring(0, p.publicKey.length.clamp(0, 16)),
+                        style: TextStyle(
+                            color: Colors.grey.shade500,
+                            fontSize: 11,
+                            fontFamily: 'monospace'),
+                      ),
+                      trailing: const Icon(Icons.circle,
+                          size: 10, color: Color(0xFF4CAF50)),
+                      onTap: () {
+                        final myProfile = ProfileService.instance.profile;
+                        if (myProfile != null) {
+                          GossipRouter.instance.sendPairRequest(
+                            publicKey: myProfile.publicKeyHex,
+                            nick: myProfile.nickname,
+                            username: myProfile.username,
+                            color: myProfile.avatarColor,
+                            emoji: myProfile.avatarEmoji,
+                            recipientId: p.publicKey,
+                            x25519Key:
+                                CryptoService.instance.x25519PublicKeyBase64,
+                            tags: myProfile.tags,
+                          );
+                        }
+                        final nick =
+                            p.nick.isNotEmpty ? p.nick : p.shortId;
+                        Navigator.push(
+                          context,
+                          slideRoute(ChatScreen(
+                            peerId: p.publicKey,
+                            peerNickname: nick,
+                            peerAvatarColor: 0xFF607D8B,
+                            peerAvatarEmoji: '',
+                            peerAvatarImagePath: null,
+                          )),
+                        );
+                      },
+                    ),
+                ],
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  static Widget _searchSection(String title, int count) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+        child: Text(
+          '$title ($count)',
+          style: TextStyle(
+            color: Colors.grey.shade500,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.5,
+          ),
+        ),
+      );
+
+  static String _fmtTimeStatic(DateTime dt) {
+    final now = DateTime.now();
+    if (dt.day == now.day) {
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    }
+    return '${dt.day}.${dt.month}';
+  }
+}
+
 // ── Сторис полоска ───────────────────────────────────────────────
 
 class _StoriesStrip extends StatelessWidget {
@@ -837,8 +1204,43 @@ class _StoriesStrip extends StatelessWidget {
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                 children: [
-                  // My story button
+                  // ── Создать историю (всегда видна) ──────────────
                   if (myProfile != null)
+                    _StoryAvatar(
+                      label: 'Создать',
+                      avatar: AvatarWidget(
+                        initials: myProfile.initials,
+                        color: myProfile.avatarColor,
+                        emoji: myProfile.avatarEmoji,
+                        imagePath: myProfile.avatarImagePath,
+                        size: 56,
+                        hasStory: false,
+                        hasUnviewedStory: false,
+                      ),
+                      showAddBadge: true,
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          slideRoute(
+                            StoryCreatorScreen(
+                                authorId: myProfile.publicKeyHex),
+                          ),
+                        ).then((story) {
+                          if (story is StoryItem) {
+                            GossipRouter.instance.sendStory(
+                              storyId: story.id,
+                              authorId: story.authorId,
+                              text: story.text,
+                              bgColor: story.bgColor,
+                            );
+                          }
+                        });
+                      },
+                    ),
+
+                  // ── Моя история (только когда есть активные) ────
+                  if (myProfile != null &&
+                      StoryService.instance.hasActiveStory(myProfile.publicKeyHex))
                     _StoryAvatar(
                       label: 'Моя история',
                       avatar: AvatarWidget(
@@ -847,11 +1249,9 @@ class _StoriesStrip extends StatelessWidget {
                         emoji: myProfile.avatarEmoji,
                         imagePath: myProfile.avatarImagePath,
                         size: 56,
-                        hasStory:
-                            StoryService.instance.hasActiveStory(myProfile.publicKeyHex),
+                        hasStory: true,
                         hasUnviewedStory: false,
                       ),
-                      showAddBadge: true,
                       onTap: () {
                         final existing = StoryService.instance
                             .storiesFor(myProfile.publicKeyHex);
@@ -866,23 +1266,6 @@ class _StoriesStrip extends StatelessWidget {
                               ),
                             ),
                           );
-                        } else {
-                          Navigator.push(
-                            context,
-                            slideRoute(
-                              StoryCreatorScreen(
-                                  authorId: myProfile.publicKeyHex),
-                            ),
-                          ).then((story) {
-                            if (story is StoryItem) {
-                              GossipRouter.instance.sendStory(
-                                storyId: story.id,
-                                authorId: story.authorId,
-                                text: story.text,
-                                bgColor: story.bgColor,
-                              );
-                            }
-                          });
                         }
                       },
                     ),
@@ -1022,6 +1405,35 @@ class _NearbyTabState extends State<_NearbyTab> {
 
   @override
   Widget build(BuildContext context) {
+    // Internet-only mode — BLE is disabled
+    if (AppSettings.instance.connectionMode == 1) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.bluetooth_disabled,
+                size: 72, color: Colors.grey.shade700),
+            const SizedBox(height: 16),
+            Text(
+              'Bluetooth выключен',
+              style: TextStyle(
+                  color: Colors.grey.shade300,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Режим «Только интернет» включён.\nОбщение ведётся через сеть.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+            ),
+            const SizedBox(height: 20),
+            Icon(Icons.wifi, size: 36, color: Colors.green.shade400),
+          ]),
+        ),
+      );
+    }
+
     return Stack(
       children: [
         AnimatedSwitcher(
@@ -1033,7 +1445,7 @@ class _NearbyTabState extends State<_NearbyTab> {
                   key: const ValueKey('radar'),
                   onPeerTap: _navigateToChat,
                 )
-              : _NearbyListView(key: const ValueKey('list')),
+              : const _NearbyListView(key: ValueKey('list')),
         ),
         // Toggle button
         Positioned(
@@ -1197,12 +1609,16 @@ class _PendingDeviceTile extends StatelessWidget {
     HapticFeedback.mediumImpact();
     final profile = ProfileService.instance.profile;
     if (profile == null) return;
+    final resolvedKey = BleService.instance.resolvePublicKey(bleId);
     GossipRouter.instance.sendPairRequest(
       publicKey: profile.publicKeyHex,
       nick: profile.nickname,
+      username: profile.username,
       color: profile.avatarColor,
       emoji: profile.avatarEmoji,
+      recipientId: resolvedKey,
       x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+      tags: profile.tags,
     );
     BleService.instance.setExchangeState(bleId, 1); // invite sent
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1322,7 +1738,7 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
   late final AnimationController _pulseController;
   late final AnimationController _rippleController;
   bool _loading = false;
-  bool _done = false;
+  final bool _done = false;
 
   @override
   void initState() {
@@ -1351,20 +1767,28 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
     final profile = ProfileService.instance.profile;
     if (profile == null) return;
 
-    // Send pair accept
+    // Send pair accept — targeted to the requester
+    final requesterKey = widget.info['publicKey'] as String? ?? '';
     await GossipRouter.instance.sendPairAccept(
       publicKey: profile.publicKeyHex,
       nick: profile.nickname,
+      username: profile.username,
       color: profile.avatarColor,
       emoji: profile.avatarEmoji,
       x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+      recipientId: requesterKey,
+      tags: profile.tags,
     );
 
-    // Save their contact
+    // Save their contact (with their tags from the pair_req)
     final nick = widget.info['nick'] as String? ?? 'Unknown';
+    final theirUsername = widget.info['username'] as String? ?? '';
     final color = widget.info['color'] as int? ?? 0xFF607D8B;
     final emoji = widget.info['emoji'] as String? ?? '';
     final publicKey = widget.info['publicKey'] as String? ?? '';
+    final theirTags = (widget.info['tags'] as List<dynamic>?)
+            ?.cast<String>() ??
+        const <String>[];
 
     if (publicKey.isNotEmpty) {
       // Always register — pair_req only arrives from direct peers (TTL=1)
@@ -1379,12 +1803,17 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
       BleService.instance.setExchangeState(publicKey, 3);
       BleService.instance.clearPendingForPublicKey(publicKey);
       try {
+        final existing = await ChatStorageService.instance.getContact(publicKey);
         await ChatStorageService.instance.saveContact(Contact(
           publicKeyHex: publicKey,
-          nickname: nick,
+          nickname: existing?.nickname ?? nick,
+          username: theirUsername.isNotEmpty ? theirUsername : (existing?.username ?? ''),
           avatarColor: color,
           avatarEmoji: emoji,
-          addedAt: DateTime.now(),
+          avatarImagePath: existing?.avatarImagePath,
+          x25519Key: theirX25519.isNotEmpty ? theirX25519 : existing?.x25519Key,
+          addedAt: existing?.addedAt ?? DateTime.now(),
+          tags: theirTags.isNotEmpty ? theirTags : (existing?.tags ?? const []),
         ));
       } catch (_) {}
     }
@@ -1393,12 +1822,17 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
     await GossipRouter.instance.broadcastProfile(
       id: profile.publicKeyHex,
       nick: profile.nickname,
+      username: profile.username,
       color: profile.avatarColor,
       emoji: profile.avatarEmoji,
       x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+      tags: profile.tags,
     );
-    // Send avatar in background
-    broadcastMyAvatar();
+    // Send full profile (avatar + banner) directly to the paired peer
+    final pairedKey = widget.info['publicKey'] as String? ?? '';
+    if (pairedKey.isNotEmpty) {
+      sendProfileToAllContacts();
+    }
 
     BleService.instance.removePairRequest(widget.bleId);
 
@@ -1409,7 +1843,7 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
     final theirNick = widget.info['nick'] as String? ?? 'Unknown';
     Navigator.of(context).pop();
     final ctx = navigatorKey.currentContext;
-    if (ctx != null) {
+    if (ctx != null && ctx.mounted) {
       showBoomCelebration(ctx, theirNick, myKey, theirKey);
     }
   }
@@ -1945,7 +2379,7 @@ class _NearbyDeviceTile extends StatelessWidget {
 
   void _addContact(BuildContext context, String peerId) {
     final resolvedKey = BleService.instance.resolvePublicKey(peerId);
-    // Require valid Ed25519 public key before saving
+    // Require valid Ed25519 public key before sending pair_req
     if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(resolvedKey)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -1955,43 +2389,23 @@ class _NearbyDeviceTile extends StatelessWidget {
       );
       return;
     }
-    final ctrl = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Добавить контакт'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Имя'),
-          textCapitalization: TextCapitalization.words,
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Отмена')),
-          FilledButton(
-            onPressed: () async {
-              final name = ctrl.text.trim();
-              if (name.isEmpty) return;
-              final contact = Contact(
-                publicKeyHex: resolvedKey,
-                nickname: name,
-                avatarColor: 0xFF5C6BC0,
-                avatarEmoji: '',
-                addedAt: DateTime.now(),
-              );
-              await ChatStorageService.instance.saveContact(contact);
-              if (ctx.mounted) {
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(ctx).showSnackBar(
-                  SnackBar(content: Text('$name добавлен')),
-                );
-              }
-            },
-            child: const Text('Добавить'),
-          ),
-        ],
+    final profile = ProfileService.instance.profile;
+    if (profile == null) return;
+    GossipRouter.instance.sendPairRequest(
+      publicKey: profile.publicKeyHex,
+      nick: profile.nickname,
+      username: profile.username,
+      color: profile.avatarColor,
+      emoji: profile.avatarEmoji,
+      recipientId: resolvedKey,
+      x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+      tags: profile.tags,
+    );
+    BleService.instance.setExchangeState(peerId, 1); // invite sent
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Запрос на обмен отправлен'),
+        duration: Duration(seconds: 2),
       ),
     );
   }

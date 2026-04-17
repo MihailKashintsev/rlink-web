@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../models/chat_message.dart';
@@ -43,19 +42,22 @@ class ChatStorageService {
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 9,
+      version: 11,
       onCreate: (db, v) async {
         try { await db.rawQuery('PRAGMA journal_mode = WAL'); } catch (_) {}
         await db.execute('''
           CREATE TABLE contacts (
             id                TEXT PRIMARY KEY,
             nick              TEXT NOT NULL,
+            username          TEXT,
             color             INTEGER NOT NULL,
             emoji             TEXT NOT NULL,
             avatar_img_path   TEXT,
             x25519_key        TEXT,
             added_at          INTEGER NOT NULL,
-            last_seen         INTEGER
+            last_seen         INTEGER,
+            tags              TEXT,
+            banner_img_path   TEXT
           )
         ''');
         await db.execute('''
@@ -149,6 +151,19 @@ class ChatStorageService {
             await db.execute('ALTER TABLE contacts ADD COLUMN x25519_key TEXT');
           } catch (_) {}
         }
+        if (oldVersion < 10) {
+          try {
+            await db.execute('ALTER TABLE contacts ADD COLUMN tags TEXT');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE contacts ADD COLUMN banner_img_path TEXT');
+          } catch (_) {}
+        }
+        if (oldVersion < 11) {
+          try {
+            await db.execute('ALTER TABLE contacts ADD COLUMN username TEXT');
+          } catch (_) {}
+        }
       },
     );
     debugPrint('[RLINK][DB] Initialized');
@@ -193,6 +208,7 @@ class ChatStorageService {
       'contacts',
       {
         'nick': contact.nickname,
+        'username': contact.username.isEmpty ? null : contact.username,
         'color': contact.avatarColor,
         'emoji': contact.avatarEmoji,
         'avatar_img_path': contact.avatarImagePath,
@@ -345,6 +361,22 @@ class ChatStorageService {
           whereArgs: [peerId],
           orderBy: 'timestamp ASC',
           limit: limit,
+        ) ??
+        [];
+    return rows.map(ChatMessage.fromMap).toList();
+  }
+
+  /// Все исходящие сообщения со статусом sending/failed — для очереди повторной отправки.
+  /// Отсортированы по возрастанию времени, чтобы порядок доставки не ломался.
+  Future<List<ChatMessage>> getPendingOutgoingMessages() async {
+    final rows = await _db?.query(
+          'messages',
+          where: 'is_outgoing = 1 AND (status = ? OR status = ?)',
+          whereArgs: [
+            MessageStatus.sending.index,
+            MessageStatus.failed.index,
+          ],
+          orderBy: 'timestamp ASC',
         ) ??
         [];
     return rows.map(ChatMessage.fromMap).toList();

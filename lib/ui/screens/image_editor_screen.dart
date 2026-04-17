@@ -272,7 +272,8 @@ class _ImageEditorScreenState extends State<ImageEditorScreen> {
                       alignment: Alignment.center,
                       transform: Matrix4.identity()
                         ..rotateZ(_rotateTurns * math.pi / 2)
-                        ..scale(_flipH ? -1.0 : 1.0, 1.0, 1.0),
+                        ..multiply(Matrix4.diagonal3Values(
+                            _flipH ? -1.0 : 1.0, 1.0, 1.0)),
                       child: Image.file(
                         File(widget.imagePath),
                         fit: BoxFit.contain,

@@ -325,18 +325,6 @@ class BleService {
     return false;
   }
 
-  DeviceIdentifier? _resolveBleId(String peerId) {
-    final direct = DeviceIdentifier(peerId);
-    if (_connectedPeers.containsKey(direct)) return direct;
-    if (_publicKeyToBleId.containsKey(peerId)) {
-      return DeviceIdentifier(_publicKeyToBleId[peerId]!);
-    }
-    for (final id in _connectedPeers.keys) {
-      if (_bleIdToPublicKey[id.str] == peerId) return id;
-    }
-    return null;
-  }
-
   Stream<BluetoothAdapterState> get adapterState =>
       FlutterBluePlus.adapterState;
 
@@ -575,12 +563,17 @@ class BleService {
   void _startScan() {
     _scanSub?.cancel();
     try {
+      // Both platforms pass withServices AND withNames.
+      // flutter_blue_plus ORs multiple scan filters, so devices matching
+      // EITHER criteria are returned. This lets both platforms find:
+      //   • Devices advertising service UUID (foreground)
+      //   • Devices advertising name "Rlink" (background iOS, some Android)
       FlutterBluePlus.startScan(
         withServices: [Guid(_kServiceUuid)],
+        withNames: ['Rlink'],
         continuousUpdates: true,
         removeIfGone: const Duration(seconds: 15),
-        androidScanMode:
-            Platform.isAndroid ? AndroidScanMode.lowLatency : AndroidScanMode.balanced,
+        androidScanMode: AndroidScanMode.lowLatency,
       );
     } catch (e) {
       debugPrint('[RLINK][BLE] Start scan error: $e');

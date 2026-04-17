@@ -18,6 +18,7 @@ import '../../services/image_service.dart';
 import '../../services/voice_service.dart';
 import '../widgets/animated_transitions.dart';
 import '../widgets/avatar_widget.dart';
+import '../widgets/reactions.dart';
 import 'image_editor_screen.dart';
 import 'square_video_recorder_screen.dart';
 
@@ -227,17 +228,39 @@ class _ChannelTile extends StatelessWidget {
           const SizedBox(width: 4),
           const Icon(Icons.verified, size: 16, color: Colors.blue),
         ],
+        if (channel.blocked) ...[
+          const SizedBox(width: 4),
+          const Icon(Icons.block, size: 14, color: Colors.red),
+        ],
         if (isAdmin) ...[
           const SizedBox(width: 6),
           Icon(Icons.star, size: 14, color: Colors.amber.shade700),
         ],
       ]),
-      subtitle: Text(
-          channel.description ?? '${channel.subscriberIds.length} подписчиков',
-          style: TextStyle(
-              fontSize: 13, color: cs.onSurface.withValues(alpha: 0.5)),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (channel.foreignAgent)
+            const Text(
+              'ДАННОЕ СООБЩЕНИЕ СОЗДАНО И (ИЛИ) РАСПРОСТРАНЕНО ИНОСТРАННЫМ АГЕНТОМ',
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                color: Colors.orange,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          Text(
+            channel.description ??
+                '${channel.subscriberIds.length} подписчиков',
+            style: TextStyle(
+                fontSize: 13, color: cs.onSurface.withValues(alpha: 0.5)),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
       onTap: onTap,
     );
   }
@@ -399,10 +422,12 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() {
-        _isSending = false;
-        _sendProgress = 0.0;
-      });
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
     }
   }
 
@@ -468,10 +493,12 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() {
-        _isSending = false;
-        _sendProgress = 0.0;
-      });
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
     }
   }
 
@@ -493,6 +520,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
 
     final originalName = picked.name;
     final fileBytes = await File(srcPath).readAsBytes();
+    if (!mounted) return;
 
     if (fileBytes.length > 500 * 1024) {
       final proceed = await showDialog<bool>(
@@ -571,10 +599,12 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() {
-        _isSending = false;
-        _sendProgress = 0.0;
-      });
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
     }
   }
 
@@ -672,10 +702,12 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() {
-        _isSending = false;
-        _sendProgress = 0.0;
-      });
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
     }
   }
 
@@ -699,21 +731,21 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
               title: const Text('Быстрое'),
               subtitle: const Text('160px, маленький размер'),
               onTap: () =>
-                  Navigator.pop(ctx, _ImageQuality(quality: 40, maxSize: 160)),
+                  Navigator.pop(ctx, const _ImageQuality(quality: 40, maxSize: 160)),
             ),
             ListTile(
               leading: const Icon(Icons.tune, color: Colors.orange),
               title: const Text('Стандарт'),
               subtitle: const Text('320px, баланс скорость/качество'),
               onTap: () =>
-                  Navigator.pop(ctx, _ImageQuality(quality: 55, maxSize: 320)),
+                  Navigator.pop(ctx, const _ImageQuality(quality: 55, maxSize: 320)),
             ),
             ListTile(
               leading: const Icon(Icons.high_quality, color: Colors.blue),
               title: const Text('Высокое'),
               subtitle: const Text('640px, дольше передача'),
               onTap: () =>
-                  Navigator.pop(ctx, _ImageQuality(quality: 70, maxSize: 640)),
+                  Navigator.pop(ctx, const _ImageQuality(quality: 70, maxSize: 640)),
             ),
             const SizedBox(height: 8),
           ],
@@ -775,13 +807,19 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         );
       }
     } else {
+      // Send verification request to network admins.
+      await GossipRouter.instance.sendVerificationRequest(
+        channelId: _channel.id,
+        channelName: _channel.name,
+        adminId: _channel.adminId,
+        subscriberCount: _channel.subscriberIds.length,
+        avatarEmoji: _channel.avatarEmoji,
+        description: _channel.description,
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Для авто-верификации нужно 10+ подписчиков '
-              '(сейчас ${_channel.subscriberIds.length})',
-            ),
+          const SnackBar(
+            content: Text('Заявка на верификацию отправлена администраторам сети'),
           ),
         );
       }
@@ -790,82 +828,213 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
 
   // ── Edit channel profile ─────────────────────────────────────
 
+  static const _accentColors = [
+    0xFF42A5F5, // голубой (по умолчанию)
+    0xFF66BB6A, // зелёный
+    0xFFEF5350, // красный
+    0xFFAB47BC, // фиолетовый
+    0xFFFFA726, // оранжевый
+    0xFF26C6DA, // бирюзовый
+    0xFFEC407A, // розовый
+    0xFF8D6E63, // коричневый
+    0xFF78909C, // серо-стальной
+  ];
+
   void _editChannel() {
     final nameCtrl = TextEditingController(text: _channel.name);
     final descCtrl = TextEditingController(text: _channel.description ?? '');
     final emojiCtrl = TextEditingController(text: _channel.avatarEmoji);
+    String? pickedImagePath = _channel.avatarImagePath;
+    int pickedColor = _channel.avatarColor;
+    bool commentsEnabled = _channel.commentsEnabled;
+    bool isPublic = _channel.isPublic;
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Редактировать канал'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameCtrl,
-              maxLength: 30,
-              autofocus: true,
-              decoration: const InputDecoration(
-                labelText: 'Название',
-                hintText: 'Название канала',
-                border: OutlineInputBorder(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final cs = Theme.of(ctx).colorScheme;
+          return AlertDialog(
+            title: const Text('Настройки канала'),
+            contentPadding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Avatar image picker
+                  Center(
+                    child: GestureDetector(
+                      onTap: () async {
+                        final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+                        if (picked == null) return;
+                        final saved = await ImageService.instance.compressAndSave(
+                          picked.path, isAvatar: true,
+                        );
+                        setDialogState(() => pickedImagePath = saved);
+                      },
+                      child: CircleAvatar(
+                        radius: 36,
+                        backgroundColor: Color(pickedColor),
+                        backgroundImage: pickedImagePath != null && File(pickedImagePath!).existsSync()
+                            ? FileImage(File(pickedImagePath!)) : null,
+                        child: pickedImagePath == null || !File(pickedImagePath!).existsSync()
+                            ? Text(emojiCtrl.text.isEmpty ? '📢' : emojiCtrl.text,
+                                style: const TextStyle(fontSize: 28))
+                            : null,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: nameCtrl,
+                    maxLength: 30,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Название канала',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.drive_file_rename_outline),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: descCtrl,
+                    maxLength: 200,
+                    maxLines: 3,
+                    decoration: const InputDecoration(
+                      labelText: 'Описание',
+                      hintText: 'Краткое описание канала...',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.info_outline),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: emojiCtrl,
+                    maxLength: 2,
+                    decoration: const InputDecoration(
+                      labelText: 'Эмодзи',
+                      hintText: '📢',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.emoji_emotions_outlined),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Color palette
+                  Text('Цвет канала', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: _accentColors.map((c) {
+                      final sel = c == pickedColor;
+                      return GestureDetector(
+                        onTap: () => setDialogState(() => pickedColor = c),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 150),
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            color: Color(c),
+                            shape: BoxShape.circle,
+                            border: sel
+                                ? Border.all(color: cs.onSurface, width: 2.5)
+                                : null,
+                          ),
+                          child: sel ? const Icon(Icons.check, color: Colors.white, size: 16) : null,
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 12),
+                  // Toggles
+                  SwitchListTile(
+                    value: commentsEnabled,
+                    onChanged: (v) => setDialogState(() => commentsEnabled = v),
+                    title: const Text('Комментарии'),
+                    subtitle: const Text('Подписчики могут комментировать посты',
+                        style: TextStyle(fontSize: 12)),
+                    secondary: const Icon(Icons.comment_outlined),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                  ),
+                  SwitchListTile(
+                    value: isPublic,
+                    onChanged: (v) => setDialogState(() => isPublic = v),
+                    title: const Text('Публичный канал'),
+                    subtitle: Text(isPublic
+                        ? 'Найдётся в поиске'
+                        : 'Скрытый — только по прямой ссылке',
+                        style: const TextStyle(fontSize: 12)),
+                    secondary: Icon(isPublic ? Icons.public : Icons.lock_outline),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                  ),
+                  const SizedBox(height: 4),
+                  // Manage subscribers link
+                  ListTile(
+                    leading: const Icon(Icons.group_outlined),
+                    title: const Text('Управление подписчиками'),
+                    trailing: const Icon(Icons.chevron_right),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _manageSubscribers();
+                    },
+                  ),
+                  // Manage moderators link
+                  ListTile(
+                    leading: const Icon(Icons.admin_panel_settings_outlined),
+                    title: const Text('Редакторы канала'),
+                    trailing: const Icon(Icons.chevron_right),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _manageModerators();
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                ],
               ),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: descCtrl,
-              maxLength: 100,
-              decoration: const InputDecoration(
-                labelText: 'Описание',
-                hintText: 'Описание (необязательно)',
-                border: OutlineInputBorder(),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+              FilledButton(
+                onPressed: () async {
+                  final name = nameCtrl.text.trim();
+                  if (name.isEmpty) return;
+                  Navigator.pop(ctx);
+                  final updated = _channel.copyWith(
+                    name: name,
+                    description: descCtrl.text.trim().isEmpty ? null : descCtrl.text.trim(),
+                    avatarEmoji: emojiCtrl.text.trim().isEmpty ? _channel.avatarEmoji : emojiCtrl.text.trim(),
+                    avatarImagePath: pickedImagePath,
+                    avatarColor: pickedColor,
+                    commentsEnabled: commentsEnabled,
+                    isPublic: isPublic,
+                  );
+                  await ChannelService.instance.updateChannel(updated);
+                  unawaited(GossipRouter.instance.broadcastChannelMeta(
+                    channelId: updated.id,
+                    name: updated.name,
+                    adminId: updated.adminId,
+                    avatarColor: updated.avatarColor,
+                    avatarEmoji: updated.avatarEmoji,
+                    description: updated.description,
+                    commentsEnabled: updated.commentsEnabled,
+                    createdAt: updated.createdAt,
+                    verified: updated.verified,
+                    verifiedBy: updated.verifiedBy,
+                    moderatorIds: updated.moderatorIds,
+                  ));
+                  if (mounted) setState(() => _channel = updated);
+                },
+                child: const Text('Сохранить'),
               ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: emojiCtrl,
-              maxLength: 2,
-              decoration: const InputDecoration(
-                labelText: 'Эмодзи-аватар',
-                hintText: '📢',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
-          FilledButton(
-            onPressed: () async {
-              final name = nameCtrl.text.trim();
-              if (name.isEmpty) return;
-              Navigator.pop(ctx);
-              final updated = _channel.copyWith(
-                name: name,
-                description: descCtrl.text.trim().isEmpty ? null : descCtrl.text.trim(),
-                avatarEmoji: emojiCtrl.text.trim().isEmpty ? _channel.avatarEmoji : emojiCtrl.text.trim(),
-              );
-              await ChannelService.instance.updateChannel(updated);
-              // Broadcast so other devices see the update
-              unawaited(GossipRouter.instance.broadcastChannelMeta(
-                channelId: updated.id,
-                name: updated.name,
-                adminId: updated.adminId,
-                avatarColor: updated.avatarColor,
-                avatarEmoji: updated.avatarEmoji,
-                description: updated.description,
-                commentsEnabled: updated.commentsEnabled,
-                createdAt: updated.createdAt,
-                verified: updated.verified,
-                verifiedBy: updated.verifiedBy,
-                moderatorIds: updated.moderatorIds,
-              ));
-              if (mounted) setState(() => _channel = updated);
-            },
-            child: const Text('Сохранить'),
-          ),
-        ],
+            ],
+          );
+        },
       ),
     );
   }
@@ -988,6 +1157,15 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
       unawaited(GossipRouter.instance.broadcastChannelSubscribe(
         channelId: _channel.id,
         userId: _myId,
+      ));
+      // Запрашиваем историю канала у админа — он (или старый подписчик)
+      // пришлёт накопившиеся посты через gossip.
+      final lastPost = await ChannelService.instance.getLastPost(_channel.id);
+      unawaited(GossipRouter.instance.sendChannelHistoryRequest(
+        channelId: _channel.id,
+        requesterId: _myId,
+        adminId: _channel.adminId,
+        sinceTs: lastPost?.timestamp ?? 0,
       ));
       _load();
     }
@@ -1314,6 +1492,42 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
       ),
       body: Column(
         children: [
+          if (_channel.foreignAgent)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              color: Colors.orange.withValues(alpha: 0.15),
+              child: const Text(
+                'ДАННОЕ СООБЩЕНИЕ (МАТЕРИАЛ) СОЗДАНО И (ИЛИ) РАСПРОСТРАНЕНО ИНОСТРАННЫМ АГЕНТОМ',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.orange,
+                ),
+              ),
+            ),
+          if (_channel.blocked)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              color: Colors.red.withValues(alpha: 0.15),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.block, size: 16, color: Colors.red),
+                  SizedBox(width: 6),
+                  Text(
+                    'Канал заблокирован администратором сети',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.red,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (_channel.description != null)
             Container(
               width: double.infinity,
@@ -1342,11 +1556,12 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
                           ? () => _deletePost(_posts[i].id)
                           : null,
                       channelId: _channel.id,
+                      channelName: _channel.name,
                     ),
                   ),
           ),
-          // Post input bar for admin + moderators
-          if (_channel.canPost(_myId))
+          // Post input bar for admin + moderators (hidden if channel blocked)
+          if (_channel.canPost(_myId) && !_channel.blocked)
             _ChannelInputBar(
               controller: _postCtrl,
               isSending: _isSending,
@@ -1650,6 +1865,7 @@ class _PostCard extends StatelessWidget {
   final String Function(String) nickFor;
   final VoidCallback? onDelete;
   final String channelId;
+  final String channelName;
 
   const _PostCard({
     required this.post,
@@ -1658,23 +1874,48 @@ class _PostCard extends StatelessWidget {
     required this.nickFor,
     this.onDelete,
     required this.channelId,
+    this.channelName = '',
   });
+
+  Future<void> _togglePostReaction(BuildContext context, String emoji) async {
+    final myId = CryptoService.instance.publicKeyHex;
+    await ChannelService.instance.togglePostReaction(post.id, emoji, myId);
+    await GossipRouter.instance.sendReactionExt(
+      kind: 'channel_post',
+      targetId: post.id,
+      emoji: emoji,
+      fromId: myId,
+    );
+  }
+
+  Future<void> _openReactionPicker(BuildContext context) async {
+    final emoji = await showReactionPickerSheet(context);
+    if (emoji == null) return;
+    if (!context.mounted) return;
+    await _togglePostReaction(context, emoji);
+  }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final dt = DateTime.fromMillisecondsSinceEpoch(post.timestamp);
+    final myId = CryptoService.instance.publicKeyHex;
+    // Show channel name as sender (like Telegram). In parentheses show author only
+    // if it's a moderator posting (not admin), so admins know who posted.
+    final senderLabel = channelName.isNotEmpty ? channelName : nickFor(post.authorId);
 
-    return Card(
+    return GestureDetector(
+      onLongPress: () => _openReactionPicker(context),
+      child: Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header
+            // Header — shows channel name as the author (Telegram-style)
             Row(children: [
-              Text(nickFor(post.authorId),
+              Text(senderLabel,
                   style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
@@ -1733,42 +1974,76 @@ class _PostCard extends StatelessWidget {
               SelectableText(post.text,
                   style: TextStyle(fontSize: 15, color: cs.onSurface)),
             const SizedBox(height: 8),
-            // Comments button — navigates to PostCommentsScreen
-            if (commentsEnabled)
-              GestureDetector(
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => PostCommentsScreen(
-                        post: post,
-                        channelId: channelId,
-                        nickFor: nickFor,
-                      ),
-                    ),
-                  );
-                },
-                child: Row(children: [
-                  Icon(Icons.comment_outlined,
-                      size: 14,
-                      color: cs.onSurface.withValues(alpha: 0.4)),
-                  const SizedBox(width: 4),
-                  Text(
-                    post.comments.isEmpty
-                        ? 'Комментировать'
-                        : '${post.comments.length} комментариев',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: cs.onSurface.withValues(alpha: 0.5)),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(Icons.chevron_right,
-                      size: 14,
-                      color: cs.onSurface.withValues(alpha: 0.3)),
-                ]),
+            if (post.reactions.isNotEmpty) ...[
+              ReactionsBar(
+                reactions: post.reactions,
+                myId: myId,
+                onTap: (e) => _togglePostReaction(context, e),
+                compact: true,
               ),
+              const SizedBox(height: 6),
+            ],
+            Row(children: [
+              // React button
+              InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => _openReactionPicker(context),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 2),
+                  child: Row(children: [
+                    Icon(Icons.add_reaction_outlined,
+                        size: 14,
+                        color: cs.onSurface.withValues(alpha: 0.55)),
+                    const SizedBox(width: 4),
+                    Text('Реакция',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: cs.onSurface.withValues(alpha: 0.5))),
+                  ]),
+                ),
+              ),
+              const SizedBox(width: 12),
+              // Comments button — navigates to PostCommentsScreen
+              if (commentsEnabled)
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => PostCommentsScreen(
+                            post: post,
+                            channelId: channelId,
+                            nickFor: nickFor,
+                          ),
+                        ),
+                      );
+                    },
+                    child: Row(children: [
+                      Icon(Icons.comment_outlined,
+                          size: 14,
+                          color: cs.onSurface.withValues(alpha: 0.4)),
+                      const SizedBox(width: 4),
+                      Text(
+                        post.comments.isEmpty
+                            ? 'Комментировать'
+                            : '${post.comments.length} комментариев',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: cs.onSurface.withValues(alpha: 0.5)),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(Icons.chevron_right,
+                          size: 14,
+                          color: cs.onSurface.withValues(alpha: 0.3)),
+                    ]),
+                  ),
+                ),
+            ]),
           ],
         ),
+      ),
       ),
     );
   }
@@ -1993,6 +2268,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                       final cDt = DateTime.fromMillisecondsSinceEpoch(
                           c.timestamp);
                       return _CommentBubble(
+                        comment: c,
                         nick: widget.nickFor(c.authorId),
                         text: c.text,
                         time:
@@ -2066,58 +2342,91 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
 // ── Comment bubble widget ───────────────────────────────────────
 
 class _CommentBubble extends StatelessWidget {
+  final ChannelComment comment;
   final String nick;
   final String text;
   final String time;
   final bool isMe;
 
   const _CommentBubble({
+    required this.comment,
     required this.nick,
     required this.text,
     required this.time,
     required this.isMe,
   });
 
+  Future<void> _toggle(BuildContext context, String emoji) async {
+    final myId = CryptoService.instance.publicKeyHex;
+    await ChannelService.instance.toggleCommentReaction(comment.id, emoji, myId);
+    await GossipRouter.instance.sendReactionExt(
+      kind: 'channel_comment',
+      targetId: comment.id,
+      emoji: emoji,
+      fromId: myId,
+    );
+  }
+
+  Future<void> _openPicker(BuildContext context) async {
+    final emoji = await showReactionPickerSheet(context);
+    if (emoji == null) return;
+    if (!context.mounted) return;
+    await _toggle(context, emoji);
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final myId = CryptoService.instance.publicKeyHex;
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.75,
-        ),
-        margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: isMe
-              ? cs.primary.withValues(alpha: 0.15)
-              : cs.surfaceContainerHighest,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(16),
-            topRight: const Radius.circular(16),
-            bottomLeft: Radius.circular(isMe ? 16 : 4),
-            bottomRight: Radius.circular(isMe ? 4 : 16),
+      child: GestureDetector(
+        onLongPress: () => _openPicker(context),
+        child: Container(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.75,
           ),
-        ),
-        child: Column(
-          crossAxisAlignment:
-              isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          children: [
-            Text(nick,
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: cs.primary)),
-            const SizedBox(height: 2),
-            Text(text,
-                style: TextStyle(fontSize: 14, color: cs.onSurface)),
-            const SizedBox(height: 2),
-            Text(time,
-                style: TextStyle(
-                    fontSize: 10,
-                    color: cs.onSurface.withValues(alpha: 0.4))),
-          ],
+          margin: const EdgeInsets.symmetric(vertical: 3),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: isMe
+                ? cs.primary.withValues(alpha: 0.15)
+                : cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(16),
+              topRight: const Radius.circular(16),
+              bottomLeft: Radius.circular(isMe ? 16 : 4),
+              bottomRight: Radius.circular(isMe ? 4 : 16),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment:
+                isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            children: [
+              Text(nick,
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: cs.primary)),
+              const SizedBox(height: 2),
+              Text(text,
+                  style: TextStyle(fontSize: 14, color: cs.onSurface)),
+              const SizedBox(height: 2),
+              Text(time,
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: cs.onSurface.withValues(alpha: 0.4))),
+              if (comment.reactions.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                ReactionsBar(
+                  reactions: comment.reactions,
+                  myId: myId,
+                  onTap: (e) => _toggle(context, e),
+                  compact: true,
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );

@@ -95,6 +95,7 @@ class GroupMessage {
   final String? voicePath;
   final bool isOutgoing;
   final int timestamp;
+  final Map<String, List<String>> reactions;
 
   const GroupMessage({
     required this.id,
@@ -106,7 +107,16 @@ class GroupMessage {
     this.voicePath,
     required this.isOutgoing,
     required this.timestamp,
+    this.reactions = const {},
   });
+
+  int get totalReactions {
+    var n = 0;
+    for (final list in reactions.values) {
+      n += list.length;
+    }
+    return n;
+  }
 
   Map<String, dynamic> toMap() => {
         'id': id,
@@ -118,17 +128,30 @@ class GroupMessage {
         'voice_path': voicePath,
         'is_outgoing': isOutgoing ? 1 : 0,
         'timestamp': timestamp,
+        'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
       };
 
-  factory GroupMessage.fromMap(Map<String, dynamic> m) => GroupMessage(
-        id: m['id'] as String,
-        groupId: m['group_id'] as String,
-        senderId: m['sender_id'] as String,
-        text: m['text'] as String? ?? '',
-        imagePath: m['image_path'] as String?,
-        videoPath: m['video_path'] as String?,
-        voicePath: m['voice_path'] as String?,
-        isOutgoing: (m['is_outgoing'] as int) == 1,
-        timestamp: m['timestamp'] as int,
-      );
+  factory GroupMessage.fromMap(Map<String, dynamic> m) {
+    Map<String, List<String>> reactions = const {};
+    final raw = m['reactions'] as String?;
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw) as Map<String, dynamic>;
+        reactions =
+            decoded.map((k, v) => MapEntry(k, (v as List).cast<String>()));
+      } catch (_) {}
+    }
+    return GroupMessage(
+      id: m['id'] as String,
+      groupId: m['group_id'] as String,
+      senderId: m['sender_id'] as String,
+      text: m['text'] as String? ?? '',
+      imagePath: m['image_path'] as String?,
+      videoPath: m['video_path'] as String?,
+      voicePath: m['voice_path'] as String?,
+      isOutgoing: (m['is_outgoing'] as int) == 1,
+      timestamp: m['timestamp'] as int,
+      reactions: reactions,
+    );
+  }
 }

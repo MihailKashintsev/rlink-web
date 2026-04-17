@@ -69,6 +69,11 @@ class RelayService {
   /// Callback when a new peer comes online (publicKey) — used for avatar sync
   void Function(String publicKey)? onPeerOnline;
 
+  /// Callback fired when a directed packet could not be delivered because the
+  /// recipient is offline. The argument is the recipient's public key.
+  /// Used by [MediaUploadQueue] to abort and re-queue inflight uploads.
+  void Function(String recipientKey)? onDeliveryFailed;
+
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
 
@@ -76,6 +81,8 @@ class RelayService {
   final Map<String, bool> _peerOnline = {};
   /// Peer nicks discovered via relay presence
   final Map<String, String> _peerNicks = {};
+  /// Peer usernames discovered via relay presence
+  final Map<String, String> _peerUsernames = {};
   final ValueNotifier<int> presenceVersion = ValueNotifier(0);
 
   bool get isConnected => state.value == RelayState.connected;
@@ -84,16 +91,25 @@ class RelayService {
   /// Check if a peer is online on relay
   bool isPeerOnline(String publicKey) => _peerOnline[publicKey] ?? false;
 
+  /// Register a peer's username from gossip profile packet
+  void registerPeerUsername(String publicKey, String username) {
+    if (username.isNotEmpty) _peerUsernames[publicKey] = username;
+  }
+
   /// Get X25519 key for a peer discovered via relay
   String? getPeerX25519Key(String publicKey) => _peerX25519Keys[publicKey];
 
   /// Find full public key by 8-char prefix (for directed relay sends).
-  /// Checks online peers first, then all known peers.
+  /// Checks online peers first, then contacts cache.
   String? findPeerByPrefix(String rid8) {
     final prefix = rid8.toLowerCase();
     // Check online peers first
     for (final key in _peerOnline.keys) {
       if (key.toLowerCase().startsWith(prefix)) return key;
+    }
+    // Fallback: check contacts cache
+    for (final c in ChatStorageService.instance.contactsNotifier.value) {
+      if (c.publicKeyHex.toLowerCase().startsWith(prefix)) return c.publicKeyHex;
     }
     return null;
   }
@@ -102,7 +118,7 @@ class RelayService {
 
   Future<void> connect() async {
     if (state.value == RelayState.connected ||
-        state.value == RelayState.connecting) return;
+        state.value == RelayState.connecting) { return; }
 
     final customUrl = AppSettings.instance.relayServerUrl;
     final url = customUrl.isNotEmpty ? customUrl : defaultServerUrl;
@@ -129,12 +145,15 @@ class RelayService {
       );
 
       // Register with server (include X25519 key for E2E encryption)
-      final nick = ProfileService.instance.profile?.nickname ?? '';
+      final profile = ProfileService.instance.profile;
+      final nick = profile?.nickname ?? '';
+      final username = profile?.username ?? '';
       final x25519Key = CryptoService.instance.x25519PublicKeyBase64;
       _channel!.sink.add(jsonEncode({
         'type': 'register',
         'publicKey': myKey,
         'nick': nick,
+        if (username.isNotEmpty) 'username': username,
         if (x25519Key.isNotEmpty) 'x25519': x25519Key,
       }));
 
@@ -155,6 +174,22 @@ class RelayService {
       state.value = RelayState.disconnected;
       _scheduleReconnect();
     }
+  }
+
+  /// Force reconnect — disconnect and reconnect immediately.
+  Future<void> reconnect() async {
+    debugPrint('[RLINK][Relay] Force reconnect requested');
+    _intentionalClose = true;
+    _pingTimer?.cancel();
+    _reconnectTimer?.cancel();
+    _subscription?.cancel();
+    _chunkQueue.clear();
+    _draining = false;
+    try { _channel?.sink.close(); } catch (_) {}
+    _channel = null;
+    state.value = RelayState.disconnected;
+    _intentionalClose = false;
+    await connect();
   }
 
   void disconnect() {
@@ -258,9 +293,11 @@ class RelayService {
     }
   }
 
-  /// Send a compressed blob (voice/video/file) as a single relay message.
-  /// This bypasses the chunk protocol — much faster over internet.
-  /// The blob carries img_meta info so the receiver can reconstruct.
+  /// Send a compressed blob (voice/video/file/story-image) as a single relay message.
+  ///
+  /// Sends as relay type `blob` — no packet wrapping, no double-base64.
+  /// The relay routes it via the `to` field and the receiver handles it via
+  /// [_handleIncomingBlob].  Relay limit: 10 MB raw message (vs 256 KB for packets).
   Future<void> sendBlob({
     required String recipientKey,
     required String fromId,
@@ -274,7 +311,9 @@ class RelayService {
   }) async {
     if (!isConnected) return;
     final b64 = base64Encode(compressedData);
-    final envelope = {
+    // Send as 'blob' type directly — single base64, no packet wrapping.
+    // The relay server routes via 'to', replaces it with 'from', and forwards.
+    final msg = <String, dynamic>{
       'type': 'blob',
       'to': recipientKey,
       'msgId': msgId,
@@ -287,10 +326,53 @@ class RelayService {
       if (fileName != null) 'fname': fileName,
     };
     try {
-      _channel?.sink.add(jsonEncode(envelope));
+      _channel?.sink.add(jsonEncode(msg));
       debugPrint('[RLINK][Relay] Sent blob ${compressedData.length} bytes for $msgId');
     } catch (e) {
       debugPrint('[RLINK][Relay] Failed to send blob: $e');
+    }
+  }
+
+  /// Send a single chunk of a large blob via relay.
+  ///
+  /// Also uses `blob` type — bypasses rate limiting and the 256 KB packet limit.
+  /// Relay limit per message: 10 MB raw (chunk after base64 ≈ 267 KB for 200 KB raw).
+  Future<void> sendBlobChunk({
+    required String recipientKey,
+    required String fromId,
+    required String msgId,
+    required int chunkIdx,
+    required int chunkTotal,
+    required Uint8List chunkData,
+    bool isVoice = false,
+    bool isVideo = false,
+    bool isSquare = false,
+    bool isFile = false,
+    String? fileName,
+  }) async {
+    if (!isConnected) return;
+    final b64 = base64Encode(chunkData);
+    // Meta flags + filename only in first chunk — saves bytes.
+    final msg = <String, dynamic>{
+      'type': 'blob',
+      'to': recipientKey,
+      'msgId': msgId,
+      'from': fromId,
+      'data': b64,
+      'cIdx': chunkIdx,
+      'cTot': chunkTotal,
+      if (chunkIdx == 0 && isVoice) 'voice': true,
+      if (chunkIdx == 0 && isVideo) 'video': true,
+      if (chunkIdx == 0 && isSquare) 'sq': true,
+      if (chunkIdx == 0 && isFile) 'file': true,
+      if (chunkIdx == 0 && fileName != null) 'fname': fileName,
+    };
+    try {
+      _channel?.sink.add(jsonEncode(msg));
+      debugPrint('[RLINK][Relay] Sent blob chunk $chunkIdx/$chunkTotal '
+          '(${chunkData.length} bytes) for $msgId');
+    } catch (e) {
+      debugPrint('[RLINK][Relay] Failed to send blob chunk: $e');
     }
   }
 
@@ -303,8 +385,8 @@ class RelayService {
     sendProgress.value = progress;
   }
 
-  /// Search for users by nickname or ID.
-  /// Searches local presence cache first, then queries server.
+  /// Search for users by nickname, username, or ID.
+  /// Searches local presence cache + contacts first, then queries server.
   Future<void> searchUsers(String query) async {
     final q = query.trim();
     if (q.isEmpty) {
@@ -314,10 +396,10 @@ class RelayService {
     _lastSearchQuery = q;
     debugPrint('[RLINK][Relay] Searching for: "$q" (known online: ${knownOnlinePeers.length})');
 
-    // Immediately search local presence cache (instant results)
+    // Immediately search local presence cache + contacts DB (instant results)
     final localResults = _searchLocalPeers(q);
     if (localResults.isNotEmpty) {
-      debugPrint('[RLINK][Relay] Local presence match: ${localResults.length}');
+      debugPrint('[RLINK][Relay] Local match: ${localResults.length}');
       searchResults.value = localResults;
     }
 
@@ -330,14 +412,15 @@ class RelayService {
     }
   }
 
-  /// Search known online peers from local presence cache
+  /// Search known online peers from local presence cache + contacts DB
   List<RelayPeer> _searchLocalPeers(String query) {
     final q = query.toLowerCase().trim();
     if (q.isEmpty) return [];
 
     final myKey = CryptoService.instance.publicKeyHex;
-    final results = <RelayPeer>[];
+    final results = <String, RelayPeer>{};
 
+    // Search online presence cache
     for (final entry in _peerOnline.entries) {
       if (!entry.value) continue;
       if (entry.key == myKey) continue;
@@ -345,20 +428,43 @@ class RelayService {
       final publicKey = entry.key;
       final shortId = publicKey.length > 8 ? publicKey.substring(0, 8) : publicKey;
       final nick = _peerNicks[publicKey] ?? '';
+      final uname = _peerUsernames[publicKey] ?? '';
 
       if (nick.toLowerCase().contains(q) ||
+          uname.toLowerCase().contains(q) ||
           shortId.toLowerCase().contains(q) ||
           publicKey.toLowerCase().startsWith(q)) {
-        results.add(RelayPeer(
+        results[publicKey] = RelayPeer(
           publicKey: publicKey,
           nick: nick,
+          username: uname,
           shortId: shortId,
           online: true,
           x25519Key: _peerX25519Keys[publicKey] ?? '',
-        ));
+        );
       }
     }
-    return results;
+
+    // Also search contacts DB for username matches (gossip-delivered usernames)
+    for (final c in ChatStorageService.instance.contactsNotifier.value) {
+      if (c.publicKeyHex == myKey) continue;
+      if (results.containsKey(c.publicKeyHex)) continue;
+      final shortId = c.publicKeyHex.length > 8 ? c.publicKeyHex.substring(0, 8) : c.publicKeyHex;
+      if (c.username.toLowerCase().contains(q) ||
+          c.nickname.toLowerCase().contains(q) ||
+          shortId.toLowerCase().contains(q) ||
+          c.publicKeyHex.toLowerCase().startsWith(q)) {
+        results[c.publicKeyHex] = RelayPeer(
+          publicKey: c.publicKeyHex,
+          nick: c.nickname,
+          username: c.username,
+          shortId: shortId,
+          online: _peerOnline[c.publicKeyHex] ?? false,
+          x25519Key: _peerX25519Keys[c.publicKeyHex] ?? c.x25519Key ?? '',
+        );
+      }
+    }
+    return results.values.toList();
   }
 
   /// All known online peers (from presence data)
@@ -371,6 +477,7 @@ class RelayService {
           return RelayPeer(
             publicKey: pk,
             nick: _peerNicks[pk] ?? '',
+            username: _peerUsernames[pk] ?? '',
             shortId: pk.length > 8 ? pk.substring(0, 8) : pk,
             online: true,
             x25519Key: _peerX25519Keys[pk] ?? '',
@@ -433,13 +540,31 @@ class RelayService {
     if (from == null || data == null) return;
 
     try {
-      // Decode base64 → raw bytes → feed to GossipRouter
-      // GossipRouter handles decryption, dedup, and delivery
+      // Decode base64 → check if this is a blob wrapped in a packet envelope
       final bytes = base64Decode(data);
-      GossipRouter.instance.onPacketReceived(
-        Uint8List.fromList(bytes),
-        sourceId: 'relay:$from',
-      );
+
+      // Try to detect blob-in-packet: valid UTF-8 JSON with 'isBlob' flag
+      bool handled = false;
+      try {
+        final jsonStr = utf8.decode(bytes);
+        final inner = jsonDecode(jsonStr) as Map<String, dynamic>;
+        if (inner['isBlob'] == true) {
+          // This is a blob wrapped as a packet — delegate to blob handler
+          inner['from'] = from; // ensure sender info
+          _handleIncomingBlob(inner);
+          handled = true;
+        }
+      } catch (_) {
+        // Not JSON / not a blob — treat as normal gossip packet
+      }
+
+      if (!handled) {
+        // Regular gossip packet — feed to GossipRouter
+        GossipRouter.instance.onPacketReceived(
+          Uint8List.fromList(bytes),
+          sourceId: 'relay:$from',
+        );
+      }
     } catch (e) {
       debugPrint('[RLINK][Relay] Failed to decode incoming packet: $e');
     }
@@ -452,6 +577,7 @@ class RelayService {
       final peer = RelayPeer(
         publicKey: m['publicKey'] as String? ?? '',
         nick: m['nick'] as String? ?? '',
+        username: m['username'] as String? ?? '',
         shortId: m['shortId'] as String? ?? '',
         online: m['online'] as bool? ?? false,
         x25519Key: m['x25519'] as String? ?? '',
@@ -477,12 +603,13 @@ class RelayService {
       for (final p in local) { merged.putIfAbsent(p.publicKey, () => p); }
       searchResults.value = merged.values.toList();
     } else if (_lastSearchQuery.isNotEmpty) {
-      // Server returned 0 — fall back to local presence cache
+      // Server returned 0 — fall back to local presence cache + contacts
       final local = _searchLocalPeers(_lastSearchQuery);
       if (local.isNotEmpty) {
         debugPrint('[RLINK][Relay] Server 0 → local fallback: ${local.length} matches');
         searchResults.value = local;
-      } else {
+      } else if (searchResults.value.isEmpty) {
+        // Only clear if no results were already set by the initial local search
         searchResults.value = [];
         final online = knownOnlinePeers;
         debugPrint('[RLINK][Relay] No match. Online peers (${online.length}): '
@@ -513,10 +640,14 @@ class RelayService {
       unawaited(ChatStorageService.instance.updateContactX25519Key(publicKey, x25519Key));
     }
 
-    // Store nick from initial presence dump (server sends nick for online peers)
+    // Store nick and username from presence data
     final nick = msg['nick'] as String?;
     if (nick != null && nick.isNotEmpty) {
       _peerNicks[publicKey] = nick;
+    }
+    final uname = msg['username'] as String?;
+    if (uname != null && uname.isNotEmpty) {
+      _peerUsernames[publicKey] = uname;
     }
 
     debugPrint('[RLINK][Relay] Presence: ${publicKey.substring(0, 8)} → ${online ? 'online' : 'offline'}');
@@ -527,6 +658,9 @@ class RelayService {
     }
   }
 
+  /// In-flight blob chunk assemblies, keyed by msgId.
+  final Map<String, _BlobAssembly> _blobAssemblies = {};
+
   void _handleIncomingBlob(Map<String, dynamic> msg) {
     final from = msg['from'] as String?;
     final msgId = msg['msgId'] as String?;
@@ -535,14 +669,59 @@ class RelayService {
 
     try {
       final bytes = base64Decode(data);
-      final isVoice = (msg['voice'] as bool?) ?? false;
-      final isVideo = (msg['video'] as bool?) ?? false;
-      final isSquare = (msg['sq'] as bool?) ?? false;
-      final isFile = (msg['file'] as bool?) ?? false;
-      final fileName = msg['fname'] as String?;
-      debugPrint('[RLINK][Relay] Received blob ${bytes.length} bytes for $msgId');
-      onBlobReceived?.call(from, msgId, Uint8List.fromList(bytes),
-          isVoice, isVideo, isSquare, isFile, fileName);
+      final chunkIdx = msg['cIdx'] as int?;
+      final chunkTotal = msg['cTot'] as int?;
+
+      // Single-blob path (no chunking)
+      if (chunkIdx == null || chunkTotal == null || chunkTotal <= 1) {
+        final isVoice = (msg['voice'] as bool?) ?? false;
+        final isVideo = (msg['video'] as bool?) ?? false;
+        final isSquare = (msg['sq'] as bool?) ?? false;
+        final isFile = (msg['file'] as bool?) ?? false;
+        final fileName = msg['fname'] as String?;
+        debugPrint('[RLINK][Relay] Received blob ${bytes.length} bytes for $msgId');
+        onBlobReceived?.call(from, msgId, Uint8List.fromList(bytes),
+            isVoice, isVideo, isSquare, isFile, fileName);
+        return;
+      }
+
+      // Chunked path — accumulate until all chunks are in.
+      final assembly = _blobAssemblies.putIfAbsent(
+        msgId,
+        () => _BlobAssembly(total: chunkTotal, from: from),
+      );
+      assembly.chunks[chunkIdx] = Uint8List.fromList(bytes);
+      // First chunk carries the media-type flags and filename.
+      if (chunkIdx == 0) {
+        assembly.isVoice = (msg['voice'] as bool?) ?? false;
+        assembly.isVideo = (msg['video'] as bool?) ?? false;
+        assembly.isSquare = (msg['sq'] as bool?) ?? false;
+        assembly.isFile = (msg['file'] as bool?) ?? false;
+        assembly.fileName = msg['fname'] as String?;
+      }
+      debugPrint('[RLINK][Relay] Blob chunk $chunkIdx/$chunkTotal '
+          '(${bytes.length} bytes) for $msgId '
+          '[${assembly.chunks.length}/${assembly.total}]');
+
+      if (assembly.chunks.length >= assembly.total) {
+        // All chunks received — concatenate in order and deliver.
+        final builder = BytesBuilder();
+        for (var i = 0; i < assembly.total; i++) {
+          final c = assembly.chunks[i];
+          if (c == null) {
+            debugPrint('[RLINK][Relay] Missing chunk $i for $msgId — dropping');
+            _blobAssemblies.remove(msgId);
+            return;
+          }
+          builder.add(c);
+        }
+        final full = builder.toBytes();
+        _blobAssemblies.remove(msgId);
+        debugPrint('[RLINK][Relay] Assembled chunked blob ${full.length} bytes for $msgId');
+        onBlobReceived?.call(from, msgId, full,
+            assembly.isVoice, assembly.isVideo, assembly.isSquare,
+            assembly.isFile, assembly.fileName);
+      }
     } catch (e) {
       debugPrint('[RLINK][Relay] Failed to decode blob: $e');
     }
@@ -556,8 +735,10 @@ class RelayService {
       _peerOnline[to] = false;
       presenceVersion.value++;
       debugPrint('[RLINK][Relay] Delivery FAILED → ${to.substring(0, 8)} is OFFLINE');
+      onDeliveryFailed?.call(to);
     } else if (status == 'error') {
       debugPrint('[RLINK][Relay] Delivery ERROR → ${to.substring(0, 8)}');
+      onDeliveryFailed?.call(to);
     } else {
       debugPrint('[RLINK][Relay] Delivery to ${to.substring(0, 8)}: $status');
     }
@@ -571,6 +752,7 @@ enum RelayState { disconnected, connecting, connected }
 class RelayPeer {
   final String publicKey;
   final String nick;
+  final String username;
   final String shortId;
   final bool online;
   final String x25519Key;
@@ -578,8 +760,22 @@ class RelayPeer {
   const RelayPeer({
     required this.publicKey,
     required this.nick,
+    this.username = '',
     required this.shortId,
     required this.online,
     this.x25519Key = '',
   });
+}
+
+/// Accumulator for a chunked blob arriving over relay.
+class _BlobAssembly {
+  final int total;
+  final String from;
+  final Map<int, Uint8List> chunks = {};
+  bool isVoice = false;
+  bool isVideo = false;
+  bool isSquare = false;
+  bool isFile = false;
+  String? fileName;
+  _BlobAssembly({required this.total, required this.from});
 }

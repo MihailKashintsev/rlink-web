@@ -14,7 +14,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 
-import '../../main.dart' show IncomingMessage, incomingMessageController, broadcastMyAvatar;
+import '../../main.dart' show IncomingMessage, incomingMessageController;
 import '../../models/chat_message.dart';
 import '../../models/contact.dart';
 import '../../services/app_settings.dart';
@@ -29,8 +29,9 @@ import '../../services/voice_service.dart';
 import '../../services/story_service.dart';
 import '../../services/typing_service.dart';
 import '../../services/relay_service.dart';
+import '../../services/media_upload_queue.dart';
 import '../widgets/avatar_widget.dart';
-import 'chat_list_screen.dart' show showBoomCelebration;
+import '../widgets/reactions.dart';
 import 'image_editor_screen.dart';
 import 'square_video_recorder_screen.dart';
 import 'story_viewer_screen.dart';
@@ -61,6 +62,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final _uuid = const Uuid();
   final _picker = ImagePicker();
   bool _isSending = false;
+  /// MsgIds currently uploading in background (for the "Загружается файл..." bar)
+  final Set<String> _uploadingMsgIds = {};
   StreamSubscription<IncomingMessage>? _msgSub;
   // Резолвленный публичный ключ пира (может отличаться от widget.peerId если тот BLE UUID)
   late String _resolvedPeerId;
@@ -76,8 +79,16 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _typingDebounce;
   bool _strangerBannerDismissed = false;
 
+  /// Max blob size for single relay message (~800KB compressed).
+  /// Larger data is split into relay-friendly gossip chunks (50KB each).
+  static const _kMaxBlobBytes = 800 * 1024;
+
+  /// Relay chunk size for large media — 30 KB raw → ~53 KB after double-base64 wrap.
+  static const _kRelayChunkBytes = 30 * 1024;
+
   /// Send media: relay blob over internet, BLE chunks for mesh.
-  Future<void> _sendMedia({
+  /// Returns true if the file was queued for background upload (status = sending).
+  Future<bool> _sendMedia({
     required Uint8List bytes,
     required String msgId,
     required String myId,
@@ -86,38 +97,76 @@ class _ChatScreenState extends State<ChatScreen> {
     bool isSquare = false,
     bool isFile = false,
     String? fileName,
+    String? filePath, // local file path for upload queue (large file resume)
   }) async {
     final mode = AppSettings.instance.connectionMode;
     bool blobSent = false;
+    bool wasQueued = false;
 
-    // 1. Relay blob — fast, instant delivery over internet
+    // 1. Relay — fast delivery over internet.
+    // Always use the persistent upload queue when filePath is available — this
+    // gives upload-progress tracking, retry on disconnect, and avoids holding
+    // large files in RAM.  In-memory fallback only when no filePath is given.
     if (RelayService.instance.isConnected && mode >= 1) {
       try {
-        final compressed = ImageService.instance.compress(bytes);
-        await RelayService.instance.sendBlob(
-          recipientKey: _resolvedPeerId,
-          fromId: myId,
-          msgId: msgId,
-          compressedData: compressed,
-          isVoice: isVoice,
-          isVideo: isVideo,
-          isSquare: isSquare,
-          isFile: isFile,
-          fileName: fileName,
-        );
-        blobSent = true;
-        debugPrint('[RLINK][Media] Blob sent: ${compressed.length} bytes');
+        if (filePath != null && File(filePath).existsSync()) {
+          // Queue-based send (all sizes) — progress shown on bubble overlay
+          unawaited(MediaUploadQueue.instance.enqueue(
+            msgId: msgId,
+            filePath: filePath,
+            recipientKey: _resolvedPeerId,
+            fromId: myId,
+            isVoice: isVoice,
+            isVideo: isVideo,
+            isSquare: isSquare,
+            isFile: isFile,
+            fileName: fileName,
+          ));
+          blobSent = true;
+          wasQueued = true;
+          debugPrint('[RLINK][Media] Queued for upload: ${bytes.length} bytes raw');
+        } else {
+          // No persistent file — in-memory send (voice from RAM, etc.)
+          final compressed = ImageService.instance.compress(bytes);
+          if (compressed.length <= _kMaxBlobBytes) {
+            await RelayService.instance.sendBlob(
+              recipientKey: _resolvedPeerId,
+              fromId: myId,
+              msgId: msgId,
+              compressedData: compressed,
+              isVoice: isVoice,
+              isVideo: isVideo,
+              isSquare: isSquare,
+              isFile: isFile,
+              fileName: fileName,
+            );
+            debugPrint('[RLINK][Media] In-memory blob sent: ${compressed.length} bytes');
+          } else {
+            final total = (compressed.length / _kRelayChunkBytes).ceil();
+            debugPrint('[RLINK][Media] Fallback in-memory chunks: $total');
+            _sendBlobChunksInBackground(
+              compressed: compressed,
+              msgId: msgId,
+              myId: myId,
+              total: total,
+              isVoice: isVoice,
+              isVideo: isVideo,
+              isSquare: isSquare,
+              isFile: isFile,
+              fileName: fileName,
+            );
+          }
+          blobSent = true;
+        }
       } catch (e) {
-        debugPrint('[RLINK][Media] Relay blob failed: $e');
+        debugPrint('[RLINK][Media] Relay media failed: $e');
       }
     }
 
-    // 2. Gossip chunks — only when blob was NOT sent (BLE mode, or relay failed).
-    //    When blob succeeds, chunks are redundant and would flood the relay queue,
-    //    blocking text messages for minutes (hundreds of 90-byte chunks at 50ms each).
+    // 2. BLE gossip chunks — only when relay is unavailable.
     if (!blobSent) {
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-      debugPrint('[RLINK][Media] Sending ${chunks.length} gossip chunks (no blob)');
+      debugPrint('[RLINK][Media] Relay unavailable — sending ${chunks.length} BLE gossip chunks');
       await GossipRouter.instance.sendImgMeta(
         msgId: msgId,
         totalChunks: chunks.length,
@@ -129,9 +178,9 @@ class _ChatScreenState extends State<ChatScreen> {
         isFile: isFile,
         fileName: fileName,
       );
-      // Send chunks in background to avoid blocking text messages
       _sendChunksInBackground(chunks, msgId, myId);
     }
+    return wasQueued;
   }
 
   /// Send gossip chunks in background — does NOT block the UI or other sends.
@@ -144,6 +193,47 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
       debugPrint('[RLINK][Media] All ${chunks.length} gossip chunks sent for $msgId');
+    }();
+  }
+
+  /// Send large blob as relay-native chunks in background. Each chunk is a
+  /// standalone 'packet' envelope so relay routes them reliably (no 500-byte
+  /// gossip size cap).
+  void _sendBlobChunksInBackground({
+    required Uint8List compressed,
+    required String msgId,
+    required String myId,
+    required int total,
+    bool isVoice = false,
+    bool isVideo = false,
+    bool isSquare = false,
+    bool isFile = false,
+    String? fileName,
+  }) {
+    () async {
+      for (var i = 0; i < total; i++) {
+        final offset = i * _kRelayChunkBytes;
+        final end = (offset + _kRelayChunkBytes) > compressed.length
+            ? compressed.length
+            : offset + _kRelayChunkBytes;
+        final chunk = Uint8List.sublistView(compressed, offset, end);
+        await RelayService.instance.sendBlobChunk(
+          recipientKey: _resolvedPeerId,
+          fromId: myId,
+          msgId: msgId,
+          chunkIdx: i,
+          chunkTotal: total,
+          chunkData: chunk,
+          isVoice: isVoice,
+          isVideo: isVideo,
+          isSquare: isSquare,
+          isFile: isFile,
+          fileName: fileName,
+        );
+        // Gentle pacing — relay allows ~30 msgs/sec, we stay at 20/sec.
+        await Future.delayed(const Duration(milliseconds: 50));
+      }
+      debugPrint('[RLINK][Media] All $total blob chunks sent for $msgId');
     }();
   }
 
@@ -187,6 +277,13 @@ class _ChatScreenState extends State<ChatScreen> {
     BleService.instance.peersCount.addListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
+    // Update message status + clear uploading indicator when background upload finishes
+    MediaUploadQueue.instance.onTaskCompleted = (msgId) async {
+      await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
+        msgId, MessageStatus.sent);
+      if (mounted) setState(() => _uploadingMsgIds.remove(msgId));
+    };
+
     _msgSub = incomingMessageController.stream.listen((msg) async {
       // fromId — Ed25519 public key. Сообщение уже сохранено в main.dart.
       final resolved = BleService.instance.resolvePublicKey(widget.peerId);
@@ -316,7 +413,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final msgId = _uuid.v4();
       final myId = CryptoService.instance.publicKeyHex;
 
-      await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, isVoice: true);
+      await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, isVoice: true, filePath: path);
 
       await ChatStorageService.instance.saveMessage(ChatMessage(
         id: msgId,
@@ -348,6 +445,17 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     try {
+      // Check if location services are enabled (required on Android)
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('Включите геолокацию в настройках телефона')),
+          );
+        }
+        return;
+      }
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
@@ -361,11 +469,23 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         return;
       }
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.lowest, // WiFi/cell towers instead of GPS
+      // Use AndroidSettings on Android to ensure LocationManager is used
+      // and avoid issues with Google Play Services location API.
+      final LocationSettings locationSettings;
+      if (Platform.isAndroid) {
+        locationSettings = AndroidSettings(
+          accuracy: LocationAccuracy.low,
+          timeLimit: const Duration(seconds: 15),
+          forceLocationManager: true,
+        );
+      } else {
+        locationSettings = const LocationSettings(
+          accuracy: LocationAccuracy.lowest,
           timeLimit: Duration(seconds: 10),
-        ),
+        );
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: locationSettings,
       );
       setState(() {
         _pendingLat = pos.latitude;
@@ -560,19 +680,60 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     final myId = CryptoService.instance.publicKeyHex;
-    if (myId.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Ошибка: приложение еще не готово'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
+    if (myId.isEmpty) return;
 
     final picked = await _picker.pickImage(source: ImageSource.gallery);
     if (picked == null || !mounted) return;
 
+    // Ask: compressed image (editable, opens fullscreen) or original file
+    final choice = await showModalBottomSheet<_ImageSendMode>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 36,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade400,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_size_select_actual_outlined),
+                title: const Text('Отправить со сжатием'),
+                subtitle: const Text('Редактирование, просмотр в чате'),
+                onTap: () => Navigator.pop(ctx, _ImageSendMode.compressed),
+              ),
+              ListTile(
+                leading: const Icon(Icons.attach_file_rounded),
+                title: const Text('Отправить как файл'),
+                subtitle: const Text('Оригинальное качество'),
+                onTap: () => Navigator.pop(ctx, _ImageSendMode.asFile),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+
+    if (choice == _ImageSendMode.compressed) {
+      await _sendImageCompressed(picked, myId);
+    } else {
+      await _sendImageAsFile(picked, myId);
+    }
+  }
+
+  /// Send photo with compression + editing (opens fullscreen on tap in chat).
+  Future<void> _sendImageCompressed(XFile picked, String myId) async {
     final editedBytes = await Navigator.push<Uint8List>(
       context,
       MaterialPageRoute(builder: (_) => ImageEditorScreen(imagePath: picked.path)),
@@ -588,20 +749,76 @@ class _ChatScreenState extends State<ChatScreen> {
       final bytes = await File(path).readAsBytes();
       final msgId = _uuid.v4();
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
-          ? _resolvedPeerId
-          : widget.peerId;
+          ? _resolvedPeerId : widget.peerId;
 
-      await _sendMedia(bytes: bytes, msgId: msgId, myId: myId);
-      final msg = ChatMessage(
+      final wasQueued = await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, filePath: path);
+      await _saveAndTrack(ChatMessage(
         id: msgId,
         peerId: targetPeerId,
         text: '',
         isOutgoing: true,
         timestamp: DateTime.now(),
-        status: MessageStatus.sent,
+        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
         imagePath: path,
-      );
-      await ChatStorageService.instance.saveMessage(msg);
+      ), wasQueued: wasQueued);
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  /// Send photo as original-quality file (no compression, no image editor).
+  Future<void> _sendImageAsFile(XFile picked, String myId) async {
+    setState(() => _isSending = true);
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final filesDir = Directory('${docsDir.path}/files')
+        ..createSync(recursive: true);
+      final destPath = '${filesDir.path}/${DateTime.now().millisecondsSinceEpoch}_${picked.name}';
+      await File(picked.path).copy(destPath);
+
+      final fileSize = File(destPath).lengthSync();
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId : widget.peerId;
+      bool wasQueued = false;
+
+      if (fileSize > _kMaxBlobBytes) {
+        // Large original — use upload queue directly (avoid loading into RAM)
+        unawaited(MediaUploadQueue.instance.enqueue(
+          msgId: msgId,
+          filePath: destPath,
+          recipientKey: _resolvedPeerId,
+          fromId: myId,
+          isFile: true,
+          fileName: picked.name,
+        ));
+        wasQueued = true;
+      } else {
+        final bytes = await File(destPath).readAsBytes();
+        wasQueued = await _sendMedia(
+          bytes: bytes, msgId: msgId, myId: myId,
+          isFile: true, fileName: picked.name, filePath: destPath,
+        );
+      }
+
+      await _saveAndTrack(ChatMessage(
+        id: msgId,
+        peerId: targetPeerId,
+        text: '📎 ${picked.name}',
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+        filePath: destPath,
+        fileName: picked.name,
+        fileSize: fileSize,
+      ), wasQueued: wasQueued);
       _scrollToBottom();
     } catch (e) {
       if (mounted) {
@@ -630,6 +847,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isEmpty) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Ошибка: приложение еще не готово'),
@@ -639,8 +857,50 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    // Open square video recorder as overlay with blur
+    // Show sheet: record or pick from gallery
     if (!mounted) return;
+    final choice = await showModalBottomSheet<_VideoSendMode>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 36, height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade400,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.videocam_outlined),
+                title: const Text('Записать видео'),
+                onTap: () => Navigator.pop(ctx, _VideoSendMode.record),
+              ),
+              ListTile(
+                leading: const Icon(Icons.video_library_outlined),
+                title: const Text('Видео из галереи'),
+                onTap: () => Navigator.pop(ctx, _VideoSendMode.gallery),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+
+    if (choice == _VideoSendMode.gallery) {
+      await _sendVideoFromGallery(myId);
+      return;
+    }
+
+    // Record square video
     _sendActivity(Activity.recordingVideo);
     final videoPath = await showSquareVideoRecorder(context);
     _sendActivity(Activity.stopped);
@@ -655,7 +915,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ? _resolvedPeerId
           : widget.peerId;
 
-      await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, isVideo: true, isSquare: true);
+      final wasQueued = await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, isVideo: true, isSquare: true, filePath: path);
 
       final msg = ChatMessage(
         id: msgId,
@@ -663,16 +923,58 @@ class _ChatScreenState extends State<ChatScreen> {
         text: '⬛ Видео',
         isOutgoing: true,
         timestamp: DateTime.now(),
-        status: MessageStatus.sent,
+        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
         videoPath: path,
       );
-      await ChatStorageService.instance.saveMessage(msg);
+      await _saveAndTrack(msg, wasQueued: wasQueued);
       _scrollToBottom();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
               content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  /// Send a video picked from the device gallery.
+  Future<void> _sendVideoFromGallery(String myId) async {
+    final picked = await _picker.pickVideo(source: ImageSource.gallery);
+    if (picked == null || !mounted) return;
+
+    setState(() => _isSending = true);
+    try {
+      // Compress/copy to app storage (isSquare: false → regular landscape/portrait)
+      final path = await ImageService.instance.saveVideo(picked.path, isSquare: false);
+      final bytes = await File(path).readAsBytes();
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+
+      final wasQueued = await _sendMedia(
+        bytes: bytes, msgId: msgId, myId: myId,
+        isVideo: true, isSquare: false, filePath: path,
+      );
+
+      final msg = ChatMessage(
+        id: msgId,
+        peerId: targetPeerId,
+        text: '📹 Видео',
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+        videoPath: path,
+      );
+      await _saveAndTrack(msg, wasQueued: wasQueued);
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -694,6 +996,8 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
+    // withData: false — get path without loading entire file into RAM.
+    // On Android, file_picker copies to cache so picked.path is always usable.
     final result = await FilePicker.platform.pickFiles(
       type: FileType.any,
       allowMultiple: false,
@@ -702,71 +1006,70 @@ class _ChatScreenState extends State<ChatScreen> {
     if (result == null || result.files.isEmpty || !mounted) return;
 
     final picked = result.files.first;
-    final srcPath = picked.path;
-    if (srcPath == null) return;
-
     final originalName = picked.name;
-    final fileBytes = await File(srcPath).readAsBytes();
-
-    // Warn if file is too large (> 500 KB — slow over BLE)
-    if (fileBytes.length > 500 * 1024) {
-      final proceed = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Большой файл'),
-          content: Text(
-            'Файл ${(fileBytes.length / 1024).toStringAsFixed(0)} КБ — '
-            'передача по Bluetooth займёт несколько минут. Продолжить?',
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('Отмена')),
-            TextButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('Отправить')),
-          ],
-        ),
-      );
-      if (proceed != true || !mounted) return;
-    }
-
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isEmpty) return;
 
     setState(() => _isSending = true);
+    _sendActivity(Activity.sendingFile);
     try {
-      // Save a local copy to the files directory
+      // Copy to app's files dir for persistent local storage
       final docsDir = await getApplicationDocumentsDirectory();
-      final filesDir = Directory('${docsDir.path}/files');
-      if (!filesDir.existsSync()) filesDir.createSync(recursive: true);
-      final destPath = '${filesDir.path}/$originalName';
-      await File(srcPath).copy(destPath);
+      final filesDir = Directory('${docsDir.path}/files')
+        ..createSync(recursive: true);
+      final destPath = '${filesDir.path}/${DateTime.now().millisecondsSinceEpoch}_$originalName';
 
+      if (picked.path != null) {
+        await File(picked.path!).copy(destPath);
+      } else {
+        // path unavailable — try re-pick with bytes (rare edge case)
+        final r2 = await FilePicker.platform.pickFiles(
+          type: FileType.any, allowMultiple: false, withData: true);
+        final b = r2?.files.firstOrNull?.bytes;
+        if (b == null || !mounted) { setState(() => _isSending = false); return; }
+        await File(destPath).writeAsBytes(b);
+      }
+
+      final fileSize = File(destPath).lengthSync();
       final msgId = _uuid.v4();
-      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
-          ? _resolvedPeerId
-          : widget.peerId;
+      final targetPeerId =
+          _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
+      bool wasQueued = false;
 
-      await _sendMedia(
-        bytes: fileBytes,
-        msgId: msgId,
-        myId: myId,
-        isFile: true,
-        fileName: originalName,
-      );
+      if (fileSize > _kMaxBlobBytes) {
+        // Large file — enqueue directly, never load full content into RAM
+        unawaited(MediaUploadQueue.instance.enqueue(
+          msgId: msgId,
+          filePath: destPath,
+          recipientKey: _resolvedPeerId,
+          fromId: myId,
+          isFile: true,
+          fileName: originalName,
+        ));
+        wasQueued = true;
+      } else {
+        final fileBytes = await File(destPath).readAsBytes();
+        wasQueued = await _sendMedia(
+          bytes: fileBytes,
+          msgId: msgId,
+          myId: myId,
+          isFile: true,
+          fileName: originalName,
+          filePath: destPath,
+        );
+      }
 
-      await ChatStorageService.instance.saveMessage(ChatMessage(
+      await _saveAndTrack(ChatMessage(
         id: msgId,
         peerId: targetPeerId,
         text: '📎 $originalName',
         isOutgoing: true,
         timestamp: DateTime.now(),
-        status: MessageStatus.sent,
+        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
         filePath: destPath,
         fileName: originalName,
-        fileSize: fileBytes.length,
-      ));
+        fileSize: fileSize,
+      ), wasQueued: wasQueued);
       _scrollToBottom();
     } catch (e) {
       if (mounted) {
@@ -777,7 +1080,17 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
     } finally {
+      _sendActivity(Activity.stopped);
       if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  /// Save a message and, if it was queued for background upload,
+  /// register its id so the "Загружается..." bar appears.
+  Future<void> _saveAndTrack(ChatMessage msg, {required bool wasQueued}) async {
+    await ChatStorageService.instance.saveMessage(msg);
+    if (wasQueued && mounted) {
+      setState(() => _uploadingMsgIds.add(msg.id));
     }
   }
 
@@ -930,59 +1243,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _showReactionPicker(ChatMessage msg) async {
-    const emojis = [
-      '👍',
-      '❤️',
-      '😂',
-      '😮',
-      '😢',
-      '😡',
-      '🎉',
-      '🔥',
-      '👎',
-      '🤔',
-      '😴',
-      '🤗'
-    ];
-    await showModalBottomSheet<void>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Выберите реакцию',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500)),
-              const SizedBox(height: 16),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: emojis
-                    .map((emoji) => GestureDetector(
-                          onTap: () async {
-                            Navigator.pop(ctx);
-                            await _toggleReaction(msg, emoji);
-                          },
-                          child: Container(
-                            width: 48,
-                            height: 48,
-                            decoration: BoxDecoration(
-                              border: Border.all(color: Colors.grey.shade600),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Center(
-                                child: Text(emoji,
-                                    style: const TextStyle(fontSize: 24))),
-                          ),
-                        ))
-                    .toList(),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+    final emoji = await showReactionPickerSheet(context);
+    if (emoji == null) return;
+    await _toggleReaction(msg, emoji);
   }
 
   Future<void> _toggleReaction(ChatMessage msg, String emoji) async {
@@ -1004,33 +1267,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _removeChatBackground() async {
     await AppSettings.instance.setChatBgForPeer(_resolvedPeerId, null);
-  }
-
-  Future<String?> _askNickname(BuildContext context) async {
-    final controller = TextEditingController();
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Имя контакта'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Введите имя...'),
-          textCapitalization: TextCapitalization.words,
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отмена'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('Добавить'),
-          ),
-        ],
-      ),
-    );
   }
 
   void _openPeerProfile() {
@@ -1117,7 +1353,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             RelayService.instance.isPeerOnline(_resolvedPeerId);
                         final isOnline = online || relayOnline;
                         return Text(
-                          isOnline ? 'в сети' : '��е в сети',
+                          isOnline ? 'в сети' : 'не в сети',
                           style: TextStyle(
                             fontSize: 12,
                             color: isOnline ? Colors.green : Colors.grey.shade500,
@@ -1140,7 +1376,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 const PopupMenuItem(value: 'background', child: Text('Фон чата')),
                 if (hasBg)
                   const PopupMenuItem(value: 'remove_bg', child: Text('Убрать фон')),
-                const PopupMenuItem(value: 'clear', child: Text('Очистить чат')),
                 const PopupMenuItem(value: 'delete', child: Text('Удалить чат')),
               ];
             },
@@ -1152,25 +1387,6 @@ class _ChatScreenState extends State<ChatScreen> {
                   _pickChatBackground();
                 case 'remove_bg':
                   _removeChatBackground();
-                case 'clear':
-                  final ok = await showDialog<bool>(
-                    context: context,
-                    builder: (ctx) => AlertDialog(
-                      title: const Text('Очистить чат?'),
-                      content: const Text('Все сообщения будут удалены.'),
-                      actions: [
-                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-                        TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Очистить')),
-                      ],
-                    ),
-                  );
-                  if (ok == true) {
-                    await ChatStorageService.instance.deleteChat(_resolvedPeerId);
-                    if (mounted) {
-                      await ChatStorageService.instance.loadMessages(_resolvedPeerId);
-                      setState(() {});
-                    }
-                  }
                 case 'delete':
                   final ok = await showDialog<bool>(
                     context: context,
@@ -1188,7 +1404,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   );
                   if (ok == true) {
                     await ChatStorageService.instance.deleteChat(_resolvedPeerId);
-                    if (mounted) Navigator.pop(context);
+                    if (context.mounted) Navigator.pop(context);
                   }
               }
             },
@@ -1196,34 +1412,43 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
       body: Column(children: [
-        // Sending progress indicator
-        if (_isSending)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            color: Theme.of(context).colorScheme.primaryContainer,
-            child: Row(children: [
-              const SizedBox(
-                width: 14, height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-              const SizedBox(width: 10),
-              Text('Отправка...',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.onPrimaryContainer,
-                ),
-              ),
-            ]),
+        // Sending / uploading status bar
+        if (_isSending || _uploadingMsgIds.isNotEmpty)
+          ValueListenableBuilder<Map<String, double>>(
+            valueListenable: MediaUploadQueue.instance.progressMap,
+            builder: (_, progressMap, __) {
+              final uploadProgress = _uploadingMsgIds.isEmpty
+                  ? null
+                  : progressMap.entries
+                      .where((e) => _uploadingMsgIds.contains(e.key))
+                      .map((e) => e.value)
+                      .fold<double?>(null, (acc, v) => acc == null ? v : (acc + v) / 2);
+              final label = uploadProgress != null
+                  ? 'Загружается файл... ${(uploadProgress * 100).round()}%'
+                  : 'Отправка...';
+              return Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                color: Theme.of(context).colorScheme.primaryContainer,
+                child: Row(children: [
+                  SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      value: uploadProgress,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(label,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                ]),
+              );
+            },
           ),
-        // ── Profile photo banner: shows peer's avatar image ──
-        _ProfileBanner(
-          peerId: _resolvedPeerId,
-          peerNickname: widget.peerNickname,
-          peerAvatarColor: widget.peerAvatarColor,
-          peerAvatarEmoji: widget.peerAvatarEmoji,
-          peerAvatarImagePath: widget.peerAvatarImagePath,
-        ),
         // ── Stranger banner: block / add / dismiss for unknown contacts ──
         if (_isStrangerPeer && !_strangerBannerDismissed)
           Container(
@@ -1257,7 +1482,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 color: Colors.red.shade400,
                 onTap: () async {
                   await BlockService.instance.block(_resolvedPeerId);
-                  if (mounted) {
+                  if (context.mounted) {
                     Navigator.pop(context);
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Пользователь заблокирован')),
@@ -1271,29 +1496,28 @@ class _ChatScreenState extends State<ChatScreen> {
                 label: 'Добавить',
                 color: const Color(0xFF1DB954),
                 onTap: () async {
-                  final nick = widget.peerNickname;
-                  await ChatStorageService.instance.saveContact(Contact(
-                    publicKeyHex: _resolvedPeerId,
-                    nickname: nick,
-                    avatarColor: widget.peerAvatarColor,
-                    avatarEmoji: widget.peerAvatarEmoji,
-                    addedAt: DateTime.now(),
-                  ));
+                  if (!mounted) return;
+                  // Send a pair_req — the other side accepts and both get full profiles
                   final myProfile = ProfileService.instance.profile;
-                  if (myProfile != null) {
-                    GossipRouter.instance.broadcastProfile(
-                      id: myProfile.publicKeyHex,
-                      nick: myProfile.nickname,
-                      color: myProfile.avatarColor,
-                      emoji: myProfile.avatarEmoji,
-                      x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+                  if (myProfile == null) return;
+                  await GossipRouter.instance.sendPairRequest(
+                    publicKey: myProfile.publicKeyHex,
+                    nick: myProfile.nickname,
+                    username: myProfile.username,
+                    color: myProfile.avatarColor,
+                    emoji: myProfile.avatarEmoji,
+                    recipientId: _resolvedPeerId,
+                    x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+                    tags: myProfile.tags,
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Запрос на обмен отправлен — ожидаем ответ'),
+                        duration: Duration(seconds: 3),
+                      ),
                     );
-                    broadcastMyAvatar();
-                  }
-                  if (mounted) {
                     setState(() => _strangerBannerDismissed = true);
-                    final myKey = CryptoService.instance.publicKeyHex;
-                    showBoomCelebration(context, nick, myKey, _resolvedPeerId);
                   }
                 },
               ),
@@ -1512,12 +1736,7 @@ class _MessageBubble extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
             color: isOut ? cs.primary : cs.surfaceContainerHigh,
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(18),
-              topRight: const Radius.circular(18),
-              bottomLeft: Radius.circular(isOut ? 18 : 4),
-              bottomRight: Radius.circular(isOut ? 4 : 18),
-            ),
+            borderRadius: AppSettings.instance.bubbleRadius(isMe: isOut),
           ),
           child: Column(
           crossAxisAlignment:
@@ -1538,37 +1757,53 @@ class _MessageBubble extends StatelessWidget {
             if (msg.imagePath != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
-                child: Stack(
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Image.file(
-                        File(msg.imagePath!),
-                        width: 220,
-                        fit: BoxFit.cover,
+                child: _UploadProgressOverlay(
+                  msgId: msg.id,
+                  child: GestureDetector(
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => _FullScreenImageViewer(
+                          imagePath: msg.imagePath!),
                       ),
                     ),
-                    Positioned(
-                      top: 8,
-                      right: 8,
-                      child: IconButton(
-                        icon: const Icon(Icons.download, color: Colors.white),
-                        onPressed: () => onDownloadImage?.call(msg.imagePath!),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
+                    child: Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.file(
+                            File(msg.imagePath!),
+                            width: 220,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        Positioned(
+                          top: 8,
+                          right: 8,
+                          child: IconButton(
+                            icon: const Icon(Icons.download, color: Colors.white),
+                            onPressed: () => onDownloadImage?.call(msg.imagePath!),
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ),
             if (msg.filePath != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
-                child: _FileMessageBubble(
-                  filePath: msg.filePath!,
-                  fileName: msg.fileName ?? 'Файл',
-                  fileSize: msg.fileSize,
-                  isOut: isOut,
+                child: _UploadProgressOverlay(
+                  msgId: msg.id,
+                  child: _FileMessageBubble(
+                    msgId: msg.id,
+                    filePath: msg.filePath!,
+                    fileName: msg.fileName ?? 'Файл',
+                    fileSize: msg.fileSize,
+                    isOut: isOut,
+                  ),
                 ),
               ),
             if (msg.replyToMessageId != null)
@@ -1625,7 +1860,7 @@ class _MessageBubble extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  _fmt(msg.timestamp),
+                  AppSettings.instance.formatTime(msg.timestamp),
                   style: TextStyle(
                     fontSize: 10,
                     color: isOut
@@ -1633,7 +1868,7 @@ class _MessageBubble extends StatelessWidget {
                         : cs.onSurfaceVariant,
                   ),
                 ),
-                if (isOut) ...[
+                if (isOut && AppSettings.instance.showReadReceipts) ...[
                   const SizedBox(width: 4),
                   _statusIcon(msg.status, cs),
                 ],
@@ -1664,8 +1899,6 @@ class _MessageBubble extends StatelessWidget {
     }
   }
 
-  String _fmt(DateTime dt) =>
-      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 }
 
 // ── Виджет реакций ───────────────────────────────────────────────
@@ -2025,13 +2258,23 @@ class _InputBarState extends State<_InputBar> {
                 builder: (_, secs, __) {
                   final s = secs.floor();
                   final t = ((secs % 1) * 10).floor();
+                  final sendOnEnter = AppSettings.instance.sendOnEnter;
                   return TextField(
                     controller: widget.controller,
                     focusNode: _focusNode,
                     enabled: !widget.isRecording,
-                    maxLines: 4,
+                    maxLines: sendOnEnter ? 1 : 4,
                     minLines: 1,
-                    textInputAction: TextInputAction.newline,
+                    textInputAction: sendOnEnter
+                        ? TextInputAction.send
+                        : TextInputAction.newline,
+                    onSubmitted: sendOnEnter
+                        ? (_) {
+                            if (!widget.isSending && !over && !widget.isRecording) {
+                              widget.onSend();
+                            }
+                          }
+                        : null,
                     style: const TextStyle(fontSize: 15),
                     decoration: InputDecoration(
                       hintText: widget.isRecording
@@ -2134,21 +2377,35 @@ class _InputBarState extends State<_InputBar> {
 // ── Файл/документ ────────────────────────────────────────────────
 
 class _FileMessageBubble extends StatelessWidget {
+  final String msgId;
   final String filePath;
   final String fileName;
   final int? fileSize;
   final bool isOut;
 
   const _FileMessageBubble({
+    required this.msgId,
     required this.filePath,
     required this.fileName,
     required this.fileSize,
     required this.isOut,
   });
 
+  static const _audioExts = {
+    '.mp3', '.ogg', '.wav', '.m4a', '.aac', '.flac', '.opus', '.wma', '.mp4a',
+  };
+
+  bool get _isAudio {
+    final name = fileName.toLowerCase();
+    for (final ext in _audioExts) {
+      if (name.endsWith(ext)) return true;
+    }
+    return false;
+  }
+
   String _fmtSize(int? bytes) {
     if (bytes == null) return '';
-    if (bytes < 1024) return '${bytes} Б';
+    if (bytes < 1024) return '$bytes Б';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} КБ';
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} МБ';
   }
@@ -2161,6 +2418,12 @@ class _FileMessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (_isAudio && File(filePath).existsSync()) {
+      return _AudioFileBubble(
+        filePath: filePath, fileName: fileName,
+        fileSize: fileSize, isOut: isOut,
+      );
+    }
     final cs = Theme.of(context).colorScheme;
     final textColor = isOut ? cs.onPrimary : cs.onSurface;
     final subColor = isOut
@@ -2173,7 +2436,7 @@ class _FileMessageBubble extends StatelessWidget {
     return GestureDetector(
       onTap: _open,
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 240),
+        constraints: const BoxConstraints(maxWidth: 260),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: bgColor,
@@ -2209,6 +2472,114 @@ class _FileMessageBubble extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ── Аудио-файл (mp3/ogg/wav/etc.) в сообщении ───────────────────
+
+class _AudioFileBubble extends StatelessWidget {
+  final String filePath;
+  final String fileName;
+  final int? fileSize;
+  final bool isOut;
+
+  const _AudioFileBubble({
+    required this.filePath,
+    required this.fileName,
+    required this.fileSize,
+    required this.isOut,
+  });
+
+  String _fmtSize(int? bytes) {
+    if (bytes == null) return '';
+    if (bytes < 1024) return '$bytes Б';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} КБ';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} МБ';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final iconColor = isOut ? cs.onPrimary : cs.onSurface;
+    final activeColor = isOut ? cs.onPrimary : cs.primary;
+    final inactiveColor =
+        (isOut ? cs.onPrimary : cs.onSurface).withValues(alpha: 0.35);
+    final subColor = isOut
+        ? cs.onPrimary.withValues(alpha: 0.65)
+        : cs.onSurfaceVariant;
+
+    return ValueListenableBuilder<String?>(
+      valueListenable: VoiceService.instance.currentlyPlaying,
+      builder: (_, playing, __) {
+        final isPlaying = playing == filePath;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  onPressed: () async {
+                    try {
+                      if (isPlaying) {
+                        await VoiceService.instance.stop();
+                      } else {
+                        await VoiceService.instance.play(filePath);
+                      }
+                    } catch (e) {
+                      debugPrint('[Audio] Playback error: $e');
+                    }
+                  },
+                  icon: Icon(
+                    isPlaying
+                        ? Icons.stop_circle_outlined
+                        : Icons.play_circle_outline,
+                    color: iconColor,
+                    size: 28,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                ValueListenableBuilder<double>(
+                  valueListenable: VoiceService.instance.playProgress,
+                  builder: (_, progress, __) => SizedBox(
+                    width: 110,
+                    height: 28,
+                    child: CustomPaint(
+                      painter: _WaveformPainter(
+                        seed: filePath.hashCode,
+                        progress: isPlaying ? progress : 0,
+                        activeColor: activeColor,
+                        inactiveColor: inactiveColor,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.only(left: 4, top: 2),
+              child: Text(
+                fileName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: subColor),
+              ),
+            ),
+            if (fileSize != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 4),
+                child: Text(
+                  _fmtSize(fileSize),
+                  style: TextStyle(fontSize: 10, color: subColor),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }
@@ -2569,6 +2940,7 @@ class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
 
 class _PeerProfileScreen extends StatefulWidget {
   final String peerId;
+  // Initial values from widget params (used while DB loads)
   final String nickname;
   final int avatarColor;
   final String avatarEmoji;
@@ -2592,146 +2964,246 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
   List<ChatMessage> _files = [];
   List<ChatMessage> _links = [];
 
+  // Loaded from DB
+  String? _nick;
+  int? _color;
+  String? _emoji;
+  String? _avatarPath;
+  String? _bannerPath;
+  List<String> _tags = const [];
+
   @override
   void initState() {
     super.initState();
-    _loadMedia();
+    _loadAll();
+    // Реактивно подхватываем обновления контакта (аватар, баннер, ник, теги),
+    // которые прилетают по BLE/relay пока экран открыт.
+    ChatStorageService.instance.contactsNotifier.addListener(_onContactsChanged);
   }
 
-  Future<void> _loadMedia() async {
-    final msgs = await ChatStorageService.instance.getMessages(widget.peerId, limit: 1000);
+  @override
+  void dispose() {
+    ChatStorageService.instance.contactsNotifier.removeListener(_onContactsChanged);
+    super.dispose();
+  }
+
+  void _onContactsChanged() {
+    if (!mounted) return;
+    final contacts = ChatStorageService.instance.contactsNotifier.value;
+    Contact? c;
+    for (final x in contacts) {
+      if (x.publicKeyHex == widget.peerId) { c = x; break; }
+    }
+    if (c == null) return;
+    final newAvatar = ImageService.instance.resolveStoredPath(c.avatarImagePath);
+    final newBanner = ImageService.instance.resolveStoredPath(c.bannerImagePath);
+    // Обновляем только если реально изменилось (иначе setState впустую).
+    if (c.nickname == _nick &&
+        c.avatarColor == _color &&
+        c.avatarEmoji == _emoji &&
+        newAvatar == _avatarPath &&
+        newBanner == _bannerPath &&
+        _listEq(c.tags, _tags)) {
+      return;
+    }
     setState(() {
-      _images = msgs.where((m) => m.imagePath != null).toList();
-      _voices = msgs.where((m) => m.voicePath != null).toList();
-      _files = msgs.where((m) => m.filePath != null).toList();
-      _links = msgs.where((m) => _hasLink(m.text)).toList();
+      _nick = c!.nickname;
+      _color = c.avatarColor;
+      _emoji = c.avatarEmoji;
+      _avatarPath = newAvatar;
+      _bannerPath = newBanner;
+      _tags = c.tags;
     });
   }
 
-  bool _hasLink(String text) {
-    return RegExp(r'https?://\S+').hasMatch(text);
+  bool _listEq(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
+
+  Future<void> _loadAll() async {
+    final contact = await ChatStorageService.instance.getContact(widget.peerId);
+    final msgs = await ChatStorageService.instance.getMessages(widget.peerId, limit: 1000);
+    if (!mounted) return;
+    setState(() {
+      if (contact != null) {
+        _nick        = contact.nickname;
+        _color       = contact.avatarColor;
+        _emoji       = contact.avatarEmoji;
+        _avatarPath  = ImageService.instance.resolveStoredPath(contact.avatarImagePath);
+        _bannerPath  = ImageService.instance.resolveStoredPath(contact.bannerImagePath);
+        _tags        = contact.tags;
+      }
+      _images = msgs.where((m) => m.imagePath != null).toList();
+      _voices = msgs.where((m) => m.voicePath != null).toList();
+      _files  = msgs.where((m) => m.filePath != null).toList();
+      _links  = msgs.where((m) => _hasLink(m.text)).toList();
+    });
+  }
+
+  bool _hasLink(String text) => RegExp(r'https?://\S+').hasMatch(text);
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final stories = StoryService.instance.storiesFor(widget.peerId);
 
+    final nick       = _nick       ?? widget.nickname;
+    final color      = _color      ?? widget.avatarColor;
+    final emoji      = _emoji      ?? widget.avatarEmoji;
+    final avatarPath = _avatarPath ?? widget.avatarImagePath;
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Профиль')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          // Avatar + name
-          Center(
-            child: AvatarWidget(
-              initials: widget.nickname.isNotEmpty ? widget.nickname[0].toUpperCase() : '?',
-              color: widget.avatarColor,
-              emoji: widget.avatarEmoji,
-              imagePath: widget.avatarImagePath,
-              size: 96,
-              hasStory: stories.isNotEmpty,
-              hasUnviewedStory: StoryService.instance.hasUnviewedStory(widget.peerId),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Center(
-            child: Text(
-              widget.nickname,
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
-            ),
-          ),
-          Center(
-            child: Text(
-              '${widget.peerId.substring(0, 16)}...',
-              style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.4), fontFamily: 'monospace'),
-            ),
-          ),
-
-          // Stories section
-          if (stories.isNotEmpty) ...[
-            const SizedBox(height: 20),
-            ListTile(
-              leading: const Icon(Icons.amp_stories),
-              title: const Text('Сегодняшняя история'),
-              subtitle: Text('${stories.length} историй'),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => StoryViewerScreen(
-                    authorId: widget.peerId,
-                    authorName: widget.nickname,
-                    stories: stories,
-                  ),
-                ),
+      body: CustomScrollView(
+        slivers: [
+          // ── Collapsible header with banner + avatar ──
+          SliverAppBar(
+            expandedHeight: _bannerPath != null && File(_bannerPath!).existsSync() ? 200 : 120,
+            pinned: true,
+            flexibleSpace: FlexibleSpaceBar(
+              titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
+              title: Text(
+                nick,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                overflow: TextOverflow.ellipsis,
               ),
+              background: _bannerPath != null && File(_bannerPath!).existsSync()
+                  ? Image.file(File(_bannerPath!), fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => _bannerFallback(color))
+                  : _bannerFallback(color),
             ),
-          ],
-
-          const SizedBox(height: 16),
-          const Divider(),
-
-          // Media library
-          _MediaSection(
-            title: 'Фото',
-            icon: Icons.photo_outlined,
-            count: _images.length,
-            child: _images.isEmpty
-                ? null
-                : SizedBox(
-                    height: 80,
-                    child: ListView.builder(
-                      scrollDirection: Axis.horizontal,
-                      itemCount: _images.length,
-                      itemBuilder: (_, i) {
-                        final path = ImageService.instance.resolveStoredPath(_images[i].imagePath);
-                        if (path == null) return const SizedBox.shrink();
-                        return Padding(
-                          padding: const EdgeInsets.only(right: 6),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: Image.file(File(path), width: 80, height: 80, fit: BoxFit.cover),
-                          ),
-                        );
-                      },
+          ),
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Avatar circle centred
+                  Center(
+                    child: AvatarWidget(
+                      initials: nick.isNotEmpty ? nick[0].toUpperCase() : '?',
+                      color: color,
+                      emoji: emoji,
+                      imagePath: avatarPath,
+                      size: 80,
+                      hasStory: stories.isNotEmpty,
+                      hasUnviewedStory: StoryService.instance.hasUnviewedStory(widget.peerId),
                     ),
                   ),
-          ),
-          _MediaSection(
-            title: 'Голосовые',
-            icon: Icons.mic_outlined,
-            count: _voices.length,
-          ),
-          _MediaSection(
-            title: 'Файлы',
-            icon: Icons.attach_file_outlined,
-            count: _files.length,
-          ),
-          _MediaSection(
-            title: 'Ссылки',
-            icon: Icons.link,
-            count: _links.length,
-            child: _links.isEmpty
-                ? null
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: _links.take(5).map((m) {
-                      final match = RegExp(r'https?://\S+').firstMatch(m.text);
-                      final url = match?.group(0) ?? '';
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: GestureDetector(
-                          onTap: () => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
-                          child: Text(url, style: TextStyle(color: cs.primary, fontSize: 13, decoration: TextDecoration.underline)),
-                        ),
-                      );
-                    }).toList(),
+                  const SizedBox(height: 10),
+                  Center(
+                    child: Text(
+                      nick,
+                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                    ),
                   ),
+                  Center(
+                    child: Text(
+                      '${widget.peerId.substring(0, 16)}...',
+                      style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.4), fontFamily: 'monospace'),
+                    ),
+                  ),
+
+                  // ── Tags ──
+                  if (_tags.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: _tags.map((tag) => Chip(
+                        label: Text(tag, style: const TextStyle(fontSize: 12)),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        backgroundColor: cs.primaryContainer,
+                      )).toList(),
+                    ),
+                  ],
+
+                  // ── Stories ──
+                  if (stories.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.amp_stories),
+                      title: const Text('Сегодняшняя история'),
+                      subtitle: Text('${stories.length} историй'),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => StoryViewerScreen(
+                            authorId: widget.peerId,
+                            authorName: nick,
+                            stories: stories,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 12),
+                  const Divider(),
+
+                  // ── Media library ──
+                  _MediaSection(
+                    title: 'Фото',
+                    icon: Icons.photo_outlined,
+                    count: _images.length,
+                    child: _images.isEmpty ? null : SizedBox(
+                      height: 80,
+                      child: ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _images.length,
+                        itemBuilder: (_, i) {
+                          final path = ImageService.instance.resolveStoredPath(_images[i].imagePath);
+                          if (path == null) return const SizedBox.shrink();
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.file(File(path), width: 80, height: 80, fit: BoxFit.cover),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                  _MediaSection(title: 'Голосовые', icon: Icons.mic_outlined,    count: _voices.length),
+                  _MediaSection(title: 'Файлы',     icon: Icons.attach_file_outlined, count: _files.length),
+                  _MediaSection(
+                    title: 'Ссылки',
+                    icon: Icons.link,
+                    count: _links.length,
+                    child: _links.isEmpty ? null : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: _links.take(5).map((m) {
+                        final match = RegExp(r'https?://\S+').firstMatch(m.text);
+                        final url = match?.group(0) ?? '';
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: GestureDetector(
+                            onTap: () => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
+                            child: Text(url, style: TextStyle(color: cs.primary, fontSize: 13, decoration: TextDecoration.underline)),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
     );
   }
+
+  Widget _bannerFallback(int color) => Container(
+    color: Color(color).withValues(alpha: 0.3),
+  );
 }
 
 class _MediaSection extends StatelessWidget {
@@ -3075,96 +3547,112 @@ class _StrangerAction extends StatelessWidget {
   }
 }
 
-// ── Profile Photo Banner ──────────────────────────────────────
+// ── Режим отправки изображения ────────────────────────────────────
+enum _ImageSendMode { compressed, asFile }
+enum _VideoSendMode { record, gallery }
 
-/// Compact profile photo banner at the top of every chat.
-/// Shows the peer's avatar image (if available) as a wide banner,
-/// or a colored strip with emoji/initials if no photo.
-class _ProfileBanner extends StatelessWidget {
-  final String peerId;
-  final String peerNickname;
-  final int peerAvatarColor;
-  final String peerAvatarEmoji;
-  final String? peerAvatarImagePath;
+// ── Оверлей прогресса загрузки ────────────────────────────────────
 
-  const _ProfileBanner({
-    required this.peerId,
-    required this.peerNickname,
-    required this.peerAvatarColor,
-    required this.peerAvatarEmoji,
-    this.peerAvatarImagePath,
-  });
+/// Wraps any message widget with an upload-progress overlay while the
+/// message is being uploaded via [MediaUploadQueue].
+class _UploadProgressOverlay extends StatelessWidget {
+  final String msgId;
+  final Widget child;
+
+  const _UploadProgressOverlay({required this.msgId, required this.child});
 
   @override
   Widget build(BuildContext context) {
-    // Listen for avatar updates from DB
-    return ValueListenableBuilder<List<Contact>>(
-      valueListenable: ChatStorageService.instance.contactsNotifier,
-      builder: (_, contacts, __) {
-        // Find latest avatar path from contacts
-        String? imagePath = peerAvatarImagePath;
-        for (final c in contacts) {
-          if (c.publicKeyHex == peerId && c.avatarImagePath != null) {
-            imagePath = c.avatarImagePath;
-            break;
-          }
-        }
-
-        final hasImage = imagePath != null && File(imagePath).existsSync();
-
-        return Container(
-          width: double.infinity,
-          height: 72,
-          decoration: BoxDecoration(
-            color: hasImage ? null : Color(peerAvatarColor).withValues(alpha: 0.15),
-            border: Border(
-              bottom: BorderSide(
-                color: Theme.of(context).colorScheme.outlineVariant.withValues(alpha: 0.3),
-                width: 0.5,
+    return ValueListenableBuilder<Map<String, double>>(
+      valueListenable: MediaUploadQueue.instance.progressMap,
+      builder: (_, map, __) {
+        final progress = map[msgId];
+        if (progress == null) return child;
+        return Stack(
+          children: [
+            child,
+            Positioned.fill(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 40,
+                          height: 40,
+                          child: CircularProgressIndicator(
+                            value: progress > 0.02 ? progress : null,
+                            color: Colors.white,
+                            strokeWidth: 3,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '${(progress * 100).round()}%',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
             ),
-          ),
-          child: hasImage
-              ? Image.file(
-                  File(imagePath!),
-                  fit: BoxFit.cover,
-                  width: double.infinity,
-                  height: 72,
-                  errorBuilder: (_, __, ___) => _fallback(context),
-                )
-              : _fallback(context),
+          ],
         );
       },
     );
   }
+}
 
-  Widget _fallback(BuildContext context) {
-    return Center(
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (peerAvatarEmoji.isNotEmpty)
-            Text(peerAvatarEmoji, style: const TextStyle(fontSize: 28))
-          else
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: Color(peerAvatarColor),
-              child: Text(
-                peerNickname.isNotEmpty ? peerNickname[0].toUpperCase() : '?',
-                style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+// ── Полноэкранный просмотр изображения ───────────────────────────
+
+class _FullScreenImageViewer extends StatelessWidget {
+  final String imagePath;
+  const _FullScreenImageViewer({required this.imagePath});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: GestureDetector(
+        onTap: () => Navigator.of(context).pop(),
+        child: Stack(
+          children: [
+            Center(
+              child: InteractiveViewer(
+                minScale: 0.5,
+                maxScale: 5.0,
+                child: Image.file(
+                  File(imagePath),
+                  fit: BoxFit.contain,
+                  width: double.infinity,
+                  height: double.infinity,
+                ),
               ),
             ),
-          const SizedBox(width: 10),
-          Text(
-            peerNickname,
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w500,
-              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topRight,
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white, size: 28),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
+

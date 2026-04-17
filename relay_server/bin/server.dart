@@ -122,7 +122,7 @@ void _handlePacket(_User sender, Map<String, dynamic> msg) {
   final to = msg['to'] as String?;
   final data = msg['data'] as String?; // base64-encoded encrypted packet
   if (to == null || data == null) return;
-  if (data.length > 65536) return; // sanity
+  if (data.length > 262144) return; // 256 KB max (blob chunks double-base64 ~90 KB each)
 
   final recipient = _users[to];
   if (recipient == null) {
@@ -155,7 +155,7 @@ void _handlePacket(_User sender, Map<String, dynamic> msg) {
 
 void _handleBroadcast(_User sender, Map<String, dynamic> msg) {
   final data = msg['data'] as String?;
-  if (data == null || data.length > 65536) return;
+  if (data == null || data.length > 262144) return;
 
   final encoded = jsonEncode({
     'type': 'packet',
@@ -198,7 +198,7 @@ void _handleBlob(_User sender, Map<String, dynamic> msg) {
   try {
     recipient.ws.sink.add(jsonEncode(forwarded));
     final dataLen = (msg['data'] as String?)?.length ?? 0;
-    print('[RLINK][Relay] Blob forwarded: ${sender.publicKey.substring(0, 8)} → ${to.substring(0, 8)} (${dataLen} chars)');
+    print('[RLINK][Relay] Blob forwarded: ${sender.publicKey.substring(0, 8)} → ${to.substring(0, 8)} ($dataLen chars)');
   } catch (e) {
     print('[RLINK][Relay] Blob forward failed: $e');
     sender.ws.sink.add(jsonEncode({
@@ -244,9 +244,7 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
 shelf.Handler _wsHandler() {
   return webSocketHandler((WebSocketChannel ws) {
     _User? user;
-    late StreamSubscription sub;
-
-    sub = ws.stream.listen(
+    ws.stream.listen(
       (raw) {
         if (user == null) {
           // First message must be registration

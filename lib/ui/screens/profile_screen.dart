@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,7 +9,7 @@ import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
-import '../../main.dart' show broadcastMyAvatar;
+import '../../main.dart' show broadcastMyAvatar, broadcastMyBanner, sendProfileToAllContacts;
 import '../widgets/avatar_widget.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -27,6 +28,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     Color(0xFFFFCA28),
   ];
   late TextEditingController _controller;
+  late TextEditingController _usernameController;
   late TextEditingController _tagController;
   late int _selectedColor;
   late String _selectedEmoji;
@@ -44,6 +46,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.initState();
     final p = ProfileService.instance.profile!;
     _controller = TextEditingController(text: p.nickname);
+    _usernameController = TextEditingController(text: p.username);
     _tagController = TextEditingController();
     _selectedColor = p.avatarColor;
     _selectedEmoji = p.avatarEmoji;
@@ -84,6 +87,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   void dispose() {
     _controller.dispose();
+    _usernameController.dispose();
     _tagController.dispose();
     super.dispose();
   }
@@ -91,8 +95,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
+      final prevProfile = ProfileService.instance.profile!;
+      final prevAvatar = prevProfile.avatarImagePath;
+      final prevBanner = prevProfile.bannerImagePath;
+
+      final rawUsername = _usernameController.text.trim().toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9_.]'), '');
       final updated = await ProfileService.instance.updateProfile(
         nickname: _controller.text.trim(),
+        username: rawUsername,
         avatarColor: _selectedColor,
         avatarEmoji: _selectedEmoji,
         avatarImagePath: _selectedImagePath,
@@ -103,17 +114,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _editing = false;
         _showEmojiPicker = false;
       });
-      // Broadcast updated profile + avatar to all peers
+      // Send updated profile directly to all contacts via relay
+      sendProfileToAllContacts();
+      // Also broadcast via gossip for BLE peers
       final x25519 = CryptoService.instance.x25519PublicKeyBase64;
       GossipRouter.instance.broadcastProfile(
         id: updated.publicKeyHex,
         nick: updated.nickname,
+        username: updated.username,
         color: updated.avatarColor,
         emoji: updated.avatarEmoji,
         x25519Key: x25519,
+        tags: updated.tags,
       );
-      if (updated.avatarImagePath != null) {
-        broadcastMyAvatar();
+      // Если аватар/баннер реально изменились — перешлём изображения контактам,
+      // чтобы у них обновилась картинка (а не только метаданные профиля).
+      if (updated.avatarImagePath != null &&
+          updated.avatarImagePath != prevAvatar) {
+        unawaited(broadcastMyAvatar());
+      }
+      if (updated.bannerImagePath != null &&
+          updated.bannerImagePath != prevBanner) {
+        unawaited(broadcastMyBanner());
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -182,10 +204,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               color: Theme.of(context).hintColor, size: 40),
                     )
                   : _editing
-                      ? Align(
+                      ? const Align(
                           alignment: Alignment.topRight,
                           child: Padding(
-                            padding: const EdgeInsets.all(8),
+                            padding: EdgeInsets.all(8),
                             child: CircleAvatar(
                               radius: 14,
                               backgroundColor: Colors.black54,
@@ -311,18 +333,41 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
           const SizedBox(height: 12),
 
-          // Краткий код
-          _InfoTile(
-            label: 'Краткий код',
-            value: '#${profile.shortId}',
-            monospace: true,
-            onCopy: () {
-              Clipboard.setData(ClipboardData(text: profile.shortId));
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Краткий код скопирован!')),
-              );
-            },
-          ),
+          // Юзернейм
+          _editing
+              ? TextField(
+                  controller: _usernameController,
+                  maxLength: 24,
+                  decoration: InputDecoration(
+                    labelText: 'Юзернейм',
+                    hintText: 'Например: ivan_99',
+                    prefixText: '#',
+                    border: const OutlineInputBorder(),
+                    counterStyle:
+                        TextStyle(color: Theme.of(context).hintColor, fontSize: 11),
+                    helperText: 'Латиница, цифры, _ и . — для быстрого поиска',
+                    helperStyle:
+                        TextStyle(color: Theme.of(context).hintColor, fontSize: 11),
+                  ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z0-9_.]')),
+                  ],
+                )
+              : _InfoTile(
+                  label: 'Юзернейм',
+                  value: profile.username.isNotEmpty
+                      ? '#${profile.username}'
+                      : 'Не задан',
+                  monospace: profile.username.isNotEmpty,
+                  onCopy: profile.username.isNotEmpty
+                      ? () {
+                          Clipboard.setData(ClipboardData(text: profile.username));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Юзернейм скопирован!')),
+                          );
+                        }
+                      : null,
+                ),
           const SizedBox(height: 12),
 
           // Теги
@@ -390,7 +435,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           const SizedBox(height: 12),
 
           _InfoTile(
-            label: 'Публичный ключ (ID)',
+            label: 'Полный ID (для поиска через &)',
             value: profile.publicKeyHex,
             monospace: true,
             onCopy: () {

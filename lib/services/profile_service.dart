@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/user_profile.dart';
+import 'crypto_service.dart';
 
 class ProfileService {
   ProfileService._();
@@ -47,6 +48,25 @@ class ProfileService {
     final stored = await _read();
     if (stored != null) {
       _profile = UserProfile.tryDecode(stored);
+      // Sync publicKeyHex with the current CryptoService key —
+      // if secure storage was cleared, the crypto key regenerated
+      // but the profile still holds the old one.
+      if (_profile != null) {
+        final currentKey = CryptoService.instance.publicKeyHex;
+        if (currentKey.isNotEmpty && _profile!.publicKeyHex != currentKey) {
+          _profile = UserProfile(
+            publicKeyHex: currentKey,
+            nickname: _profile!.nickname,
+            username: _profile!.username,
+            avatarColor: _profile!.avatarColor,
+            avatarEmoji: _profile!.avatarEmoji,
+            avatarImagePath: _profile!.avatarImagePath,
+            tags: _profile!.tags,
+            bannerImagePath: _profile!.bannerImagePath,
+          );
+          await _write(_profile!.encode());
+        }
+      }
       profileNotifier.value = _profile;
     }
   }
@@ -76,6 +96,7 @@ class ProfileService {
 
   Future<UserProfile> updateProfile({
     String? nickname,
+    String? username,
     int? avatarColor,
     String? avatarEmoji,
     String? avatarImagePath,
@@ -83,9 +104,12 @@ class ProfileService {
     String? bannerImagePath,
   }) async {
     if (_profile == null) throw StateError('No profile');
+    // Always use the current CryptoService key to prevent divergence
+    final currentKey = CryptoService.instance.publicKeyHex;
     final updated = UserProfile(
-      publicKeyHex: _profile!.publicKeyHex,
+      publicKeyHex: currentKey.isNotEmpty ? currentKey : _profile!.publicKeyHex,
       nickname: nickname ?? _profile!.nickname,
+      username: username ?? _profile!.username,
       avatarColor: avatarColor ?? _profile!.avatarColor,
       avatarEmoji: avatarEmoji ?? _profile!.avatarEmoji,
       avatarImagePath: avatarImagePath ?? _profile!.avatarImagePath,

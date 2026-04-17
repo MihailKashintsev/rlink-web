@@ -122,9 +122,31 @@ class ImageService {
   /// Сохраняет аватар контакта по его publicKeyHex (перезаписывает).
   Future<String> saveContactAvatar(String publicKeyHex, Uint8List data) async {
     final dir = await _imagesDir();
-    final name = 'avatar_${publicKeyHex.substring(0, 16)}.jpg';
+    final key = publicKeyHex.length >= 16 ? publicKeyHex.substring(0, 16) : publicKeyHex;
+    final name = 'avatar_$key.jpg';
     final path = p.join(dir.path, name);
     await File(path).writeAsBytes(data);
+    return path;
+  }
+
+  /// Сохраняет баннер профиля контакта (отдельный файл, не пересекается с аватаром).
+  Future<String> saveBannerImage(String publicKeyHex, Uint8List data) async {
+    final dir = await _imagesDir();
+    final key = publicKeyHex.length >= 16 ? publicKeyHex.substring(0, 16) : publicKeyHex;
+    final name = 'banner_$key.jpg';
+    final path = p.join(dir.path, name);
+    await File(path).writeAsBytes(data);
+    return path;
+  }
+
+  /// Saves a received video story to persistent storage.
+  /// [storyId] is the story UUID; returns the local file path.
+  Future<String> saveStoryVideo(String storyId, Uint8List bytes) async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    final dir = Directory(p.join(docsDir.path, 'story_videos'))
+      ..createSync(recursive: true);
+    final path = p.join(dir.path, '$storyId.mp4');
+    await File(path).writeAsBytes(bytes);
     return path;
   }
 
@@ -214,9 +236,20 @@ class ImageService {
     final raw = assembly.assemble();
     final data = decompress(raw);
     final dir = await _imagesDir();
-    final name = forContactKey != null
-        ? 'avatar_${forContactKey.substring(0, 16)}.jpg'
-        : '${_uuid.v4()}.jpg';
+    String name;
+    if (forContactKey != null) {
+      // Banner keys end with '_banner' — use distinct prefix to avoid overwriting avatar.
+      if (forContactKey.endsWith('_banner')) {
+        final base = forContactKey.substring(0, forContactKey.length - 7); // strip '_banner'
+        final key = base.length >= 16 ? base.substring(0, 16) : base;
+        name = 'banner_$key.jpg';
+      } else {
+        final key = forContactKey.length >= 16 ? forContactKey.substring(0, 16) : forContactKey;
+        name = 'avatar_$key.jpg';
+      }
+    } else {
+      name = '${_uuid.v4()}.jpg';
+    }
     final path = p.join(dir.path, name);
     await File(path).writeAsBytes(data);
     return path;
