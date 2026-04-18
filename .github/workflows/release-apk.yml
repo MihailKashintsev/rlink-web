@@ -1,0 +1,82 @@
+name: Release APK (public)
+
+# Собирает Android APK и публикует его как релиз
+# в публичный репозиторий MihailKashintsev/Rlink-releases.
+#
+# Запуск:
+#   1) Тег вида v0.0.4 / v0.1.0:
+#        git tag v0.0.4 && git push origin v0.0.4
+#   2) Вручную со страницы Actions (workflow_dispatch).
+#
+# Требуется секрет RELEASES_PAT в Settings → Secrets and variables →
+# Actions этого (приватного) репозитория Rlink.
+# PAT нужен с правом "contents:write" на Rlink-releases:
+#   - Classic PAT: scope `repo`
+#   - Fine-grained PAT: Repository access → Only select repositories →
+#     Rlink-releases; Permissions → Contents: Read and write.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Версия (например v0.0.4)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-release:
+    name: Build APK and publish to Rlink-releases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Compute version tag
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rename APK
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             Rlink-${{ steps.ver.outputs.tag }}.apk
+
+      - name: Publish release to Rlink-releases
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: MihailKashintsev/Rlink-releases
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          draft: false
+          prerelease: ${{ contains(steps.ver.outputs.tag, '-') }}
+          files: Rlink-${{ steps.ver.outputs.tag }}.apk
+          body: |
+            Android APK для Rlink ${{ steps.ver.outputs.tag }}.
+
+            Установка: скачай `Rlink-${{ steps.ver.outputs.tag }}.apk`,
+            разреши установку из неизвестных источников, открой файл.
+          token: ${{ secrets.RELEASES_PAT }}
