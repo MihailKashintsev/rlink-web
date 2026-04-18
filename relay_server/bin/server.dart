@@ -78,8 +78,11 @@ bool _checkRate(String publicKey) {
 
 void _handleMessage(_User user, dynamic raw) {
   if (raw is! String) return;
-  // 10 MB limit for blobs (voice/video/files), 64 KB for regular packets
-  if (raw.length > 10 * 1024 * 1024) return;
+  // 100 MB limit for blobs (voice/video/files). Большие файлы клиент
+  // всё равно режет на чанки (~90 KB каждый), так что в этот лимит
+  // упираются только крупные single-blob сообщения (длинные голосовые,
+  // большие single-shot фото/видео без чанкования).
+  if (raw.length > 100 * 1024 * 1024) return;
 
   Map<String, dynamic> msg;
   try {

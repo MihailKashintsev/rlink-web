@@ -31,8 +31,11 @@ class RelayService {
   RelayService._();
   static final RelayService instance = RelayService._();
 
-  /// Default public relay server
-  static const defaultServerUrl = 'wss://rlink-relay.onrender.com';
+  /// Default public relay server.
+  /// Захардкожен — пользователь не может переопределить через настройки
+  /// (см. serverUrl getter и connect() ниже).
+  static const defaultServerUrl =
+      'wss://sheri-unsymbolised-powerfully.ngrok-free.dev';
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -86,7 +89,10 @@ class RelayService {
   final ValueNotifier<int> presenceVersion = ValueNotifier(0);
 
   bool get isConnected => state.value == RelayState.connected;
-  String? get serverUrl => AppSettings.instance.relayServerUrl;
+  /// URL сервера всегда захардкожен в defaultServerUrl.
+  /// Любое значение в AppSettings.relayServerUrl игнорируется,
+  /// чтобы клиенты не могли подключаться к чужим relay.
+  String? get serverUrl => defaultServerUrl;
 
   /// Check if a peer is online on relay
   bool isPeerOnline(String publicKey) => _peerOnline[publicKey] ?? false;
@@ -120,8 +126,9 @@ class RelayService {
     if (state.value == RelayState.connected ||
         state.value == RelayState.connecting) { return; }
 
-    final customUrl = AppSettings.instance.relayServerUrl;
-    final url = customUrl.isNotEmpty ? customUrl : defaultServerUrl;
+    // URL захардкожен в defaultServerUrl — AppSettings.relayServerUrl
+    // намеренно игнорируется, см. комментарий у defaultServerUrl.
+    const url = defaultServerUrl;
 
     final myKey = CryptoService.instance.publicKeyHex;
     if (myKey.isEmpty) return;
