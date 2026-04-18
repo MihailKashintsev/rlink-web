@@ -48,6 +48,20 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
+      # ubuntu-latest даёт 7 GB RAM. Проектный android/gradle.properties
+      # просит -Xmx8G, из-за чего Gradle daemon ловит OOM (exit 143).
+      # Тут временно переопределяем настройки только в runner-workspace —
+      # исходный файл в репозитории не трогается.
+      - name: Tune Gradle memory for CI runner
+        run: |
+          cat > android/gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:ReservedCodeCacheSize=384m -XX:+HeapDumpOnOutOfMemoryError
+          android.useAndroidX=true
+          org.gradle.daemon=false
+          org.gradle.parallel=false
+          org.gradle.workers.max=2
+          EOF
+
       - name: Build release APK
         run: flutter build apk --release
 
