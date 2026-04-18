@@ -16,9 +16,12 @@ import '../../services/app_settings.dart';
 import '../../services/ble_service.dart';
 import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/crypto_service.dart';
 import '../../services/group_service.dart';
+import '../../services/media_upload_queue.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
+import '../../services/story_service.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/chat_screen.dart';
 import '../screens/about_screen.dart';
@@ -802,21 +805,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _fullReset(BuildContext context) async {
-    try {
-      await BleService.instance.stop();
-    } catch (_) {}
+    // 1. Stop transports — BLE is stopped here; relay is reconnected AFTER
+    //    key regeneration so the new identity is used from the start.
+    try { await BleService.instance.stop(); } catch (_) {}
     BleService.instance.clearMappings();
+
+    // 2. Clear all persisted data
     await ChatStorageService.instance.resetAll();
     await ChannelService.instance.resetAll();
     await GroupService.instance.resetAll();
+    await StoryService.instance.reset();
+    await MediaUploadQueue.instance.clearAll();
+
+    // 3. Wipe FlutterSecureStorage (crypto keys + profile).
+    // Use the same IOSOptions as CryptoService/ProfileService — omitting
+    // synchronizable so we target the exact same Keychain items.
     const storage = FlutterSecureStorage(
       aOptions: AndroidOptions(encryptedSharedPreferences: true),
       iOptions: IOSOptions(
         accessibility: KeychainAccessibility.first_unlock,
-        synchronizable: false,
       ),
     );
     await storage.deleteAll();
+
+    // 4. Force-regenerate identity keys immediately so the new onboarding
+    //    session uses fresh keys rather than the old in-memory ones.
+    await CryptoService.instance.regenerateKeys();
+
+    // 5. Reconnect relay NOW — after key regen, so the new key is used.
+    try { RelayService.instance.reconnect(); } catch (_) {}
+
+    // 6. Clear profile from memory so hasProfile == false in onboarding
+    ProfileService.instance.clearProfile();
+
     if (!context.mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => const OnboardingScreen()),

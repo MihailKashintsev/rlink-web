@@ -18,6 +18,7 @@ import 'services/app_settings.dart';
 import 'services/channel_service.dart';
 import 'services/ether_service.dart';
 import 'services/ble_service.dart';
+import 'services/block_service.dart';
 import 'services/chat_storage_service.dart';
 import 'services/group_service.dart';
 import 'services/crypto_service.dart';
@@ -41,6 +42,16 @@ final pendingUpdateNotifier = ValueNotifier<UpdateInfo?>(null);
 final navigatorKey = GlobalKey<NavigatorState>();
 
 /// Broadcast my avatar to all peers (callable from anywhere).
+/// Сбрасывает Flutter-кэш картинок для конкретного файла, чтобы при перезаписи
+/// файла (аватар/баннер с тем же именем) UI показывал актуальную версию,
+/// а не закешированный bitmap.
+void _evictImageCache(String filePath) {
+  try {
+    final f = File(filePath);
+    PaintingBinding.instance.imageCache.evict(FileImage(f));
+  } catch (_) {}
+}
+
 Future<void> broadcastMyAvatar() async {
   final myProfile = ProfileService.instance.profile;
   if (myProfile == null) return;
@@ -271,6 +282,12 @@ Future<void> initServices() async {
         debugPrint(
             '[Main] onMessage fromId=${fromId.substring(0, 16)} ephemeral=${encrypted.ephemeralPublicKey.isEmpty ? "empty" : "set"}');
 
+        // Заблокированный отправитель — молча выкидываем сообщение.
+        if (BlockService.instance.isBlocked(fromId)) {
+          debugPrint('[Block] Dropped text from blocked ${fromId.substring(0, 8)}');
+          return;
+        }
+
         final String text;
         if (encrypted.ephemeralPublicKey.isEmpty) {
           // raw (plaintext) message — cipherText contains the actual text
@@ -450,6 +467,11 @@ Future<void> initServices() async {
         ));
       },
       onPairReq: (bleId, publicKey, nick, username, color, emoji, x25519Key, tags) {
+        // Игнорируем pair-запросы от заблокированных.
+        if (BlockService.instance.isBlocked(publicKey)) {
+          debugPrint('[Block] Dropped pair_req from blocked ${publicKey.substring(0, 8)}');
+          return;
+        }
         debugPrint('[RLINK][Main] Pair request from $nick ($bleId)');
         // Store x25519 key and username
         if (x25519Key.isNotEmpty) {
@@ -532,8 +554,11 @@ Future<void> initServices() async {
         // Send our full profile (profile + avatar + banner) directly to the peer
         final myProfile = ProfileService.instance.profile;
         if (myProfile != null) {
-          // Directed relay send (guaranteed delivery)
-          unawaited(_sendFullProfileToPeer(publicKey));
+          // Directed relay send (guaranteed delivery) — ждём, чтобы аватар
+          // и баннер ушли ДО показа экрана празднования. Иначе у получателя
+          // успевает сохраниться только метадата профиля (эмодзи/тег) без
+          // картинок.
+          await _sendFullProfileToPeer(publicKey);
           // Also broadcast via gossip for BLE peers
           await GossipRouter.instance.broadcastProfile(
             id: myProfile.publicKeyHex,
@@ -591,6 +616,7 @@ Future<void> initServices() async {
           );
           if (path != null) {
             ImageService.instance.markCompleted(msgId);
+            _evictImageCache(path);
             final existing = await ChatStorageService.instance.getContact(senderKey);
             if (existing != null) {
               await ChatStorageService.instance.saveContact(
@@ -605,6 +631,7 @@ Future<void> initServices() async {
           );
           if (path != null) {
             ImageService.instance.markCompleted(msgId);
+            _evictImageCache(path);
             await ChatStorageService.instance
                 .updateContactAvatarImage(senderKey, path);
           }
@@ -1384,14 +1411,51 @@ Future<void> _sendFullProfileToPeer(String peerKey) async {
   }
 }
 
-/// Send profile to ALL contacts via relay (after profile edit).
+/// Send profile to ALL contacts after a profile edit.
+///
+/// Uses every available transport so updates reach contacts regardless of
+/// whether they're online via BLE, WiFi-Direct or the internet relay:
+///   • Relay → direct per-contact unicast (instant for online peers).
+///   • Gossip broadcast → reaches BLE/mesh peers and gets re-broadcast to
+///     other contacts via TTL forwarding (works even with relay offline).
+///   • Avatar/banner blob re-broadcast for full visual sync.
 Future<void> sendProfileToAllContacts() async {
-  if (!RelayService.instance.isConnected) return;
-  final contacts = await ChatStorageService.instance.getContacts();
-  for (final c in contacts) {
-    unawaited(_sendFullProfileToPeer(c.publicKeyHex));
+  final myProfile = ProfileService.instance.profile;
+  final myKey = CryptoService.instance.publicKeyHex;
+  if (myProfile == null || myKey.isEmpty) return;
+
+  // 1) Relay unicast (fast path for online contacts).
+  if (RelayService.instance.isConnected) {
+    final contacts = await ChatStorageService.instance.getContacts();
+    for (final c in contacts) {
+      unawaited(_sendFullProfileToPeer(c.publicKeyHex));
+    }
+    debugPrint('[RLINK][Profile] Relay-pushed to ${contacts.length} contacts');
   }
-  debugPrint('[RLINK][Profile] Sent profile update to ${contacts.length} contacts');
+
+  // 2) Gossip broadcast (BLE / WiFi-Direct mesh).
+  try {
+    await GossipRouter.instance.broadcastProfile(
+      id: myKey,
+      nick: myProfile.nickname,
+      username: myProfile.username,
+      color: myProfile.avatarColor,
+      emoji: myProfile.avatarEmoji,
+      x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+      tags: myProfile.tags,
+    );
+    debugPrint('[RLINK][Profile] Gossip-broadcast profile');
+  } catch (e) {
+    debugPrint('[RLINK][Profile] Gossip broadcast failed: $e');
+  }
+
+  // 3) Re-broadcast avatar + banner so visuals refresh everywhere.
+  if (myProfile.avatarImagePath != null && myProfile.avatarImagePath!.isNotEmpty) {
+    unawaited(_broadcastAvatar(myKey, myProfile.avatarImagePath!));
+  }
+  if (myProfile.bannerImagePath != null && myProfile.bannerImagePath!.isNotEmpty) {
+    unawaited(broadcastMyBanner());
+  }
 }
 
 /// Request active stories from all connected peers (called on relay connect / BLE peer connect).
@@ -1566,6 +1630,12 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
     bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName) async {
   debugPrint('[RLINK][Blob] Received ${data.length} bytes from ${fromId.substring(0, 8)} msgId=$msgId voice=$isVoice video=$isVideo file=$isFile');
 
+  // Заблокированный отправитель — молча выкидываем blob.
+  if (BlockService.instance.isBlocked(fromId)) {
+    debugPrint('[Block] Dropped blob from blocked ${fromId.substring(0, 8)}');
+    return;
+  }
+
   // Dedup: if this msgId was already assembled via gossip chunks, skip
   if (ImageService.instance.wasAlreadyCompleted(msgId)) {
     debugPrint('[RLINK][Blob] msgId=$msgId already completed via chunks, skipping');
@@ -1579,6 +1649,9 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
       final avatarPath = await ImageService.instance.saveContactAvatar(
         fromId, decompressed,
       );
+      // Файл перезаписан с тем же путём — сбрасываем кэш Flutter,
+      // иначе UI продолжит показывать старую картинку.
+      _evictImageCache(avatarPath);
       await ChatStorageService.instance.updateContactAvatarImage(fromId, avatarPath);
       debugPrint('[RLINK][Avatar] Saved relay avatar for ${fromId.substring(0, 8)} → $avatarPath');
     } catch (e) {
@@ -1593,6 +1666,7 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
       final decompressed = ImageService.instance.decompress(data);
       // Use dedicated saveBannerImage to avoid overwriting avatar (different filename prefix).
       final bannerPath = await ImageService.instance.saveBannerImage(fromId, decompressed);
+      _evictImageCache(bannerPath);
       final existing = await ChatStorageService.instance.getContact(fromId);
       if (existing != null) {
         // saveContact fires contactsNotifier, so UI auto-refreshes.
@@ -1616,6 +1690,10 @@ void _onBlobReceived(String fromId, String msgId, Uint8List data,
         story.videoPath = videoPath;
         StoryService.instance.notifyUpdate();
         debugPrint('[RLINK][Story] Attached relay video to story ${storyId.substring(0, storyId.length.clamp(0, 8))}');
+      } else {
+        // История ещё не пришла — кэшируем видео и прикрепим при появлении.
+        StoryService.instance.cachePendingVideo(storyId, videoPath);
+        debugPrint('[RLINK][Story] Cached pending video for ${storyId.substring(0, storyId.length.clamp(0, 8))}');
       }
     } catch (e) {
       debugPrint('[RLINK][Story] Failed to save relay story video: $e');
@@ -1902,13 +1980,25 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
   Future<void> _notifyPeersOnline() async {
     try {
       debugPrint('[App] Notifying peers - back online');
-      // Возобновляем BLE соединение
-      await BleService.instance.start();
+      // Возобновляем BLE только если пользователь его не отключил.
+      // connectionMode: 0=BLE only, 1=Internet only, 2=Both.
+      if (AppSettings.instance.connectionMode != 1) {
+        await BleService.instance.start();
+        debugPrint('[App] BLE restarted');
+      } else {
+        // Если по какой-то причине BLE всё ещё работает — гасим его.
+        try { await BleService.instance.stop(); } catch (_) {}
+        debugPrint('[App] BLE skipped on resume — Internet-only mode');
+      }
+      // Force-reconnect relay (it may have dropped while suspended).
+      if (AppSettings.instance.connectionMode >= 1 &&
+          !RelayService.instance.isConnected) {
+        unawaited(RelayService.instance.connect());
+      }
       // Clear notification badge when app resumes
       if (Platform.isIOS) {
         unawaited(_startLiveActivity());
       }
-      debugPrint('[App] BLE restarted');
     } catch (e) {
       debugPrint('[App] Error restarting: $e');
     }

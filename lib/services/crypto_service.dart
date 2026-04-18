@@ -115,6 +115,29 @@ class CryptoService {
     x25519PublicKeyBase64 = base64.encode(x25519PubKey.bytes);
   }
 
+  /// Force-generates brand-new Ed25519 + X25519 keypairs and persists them.
+  /// Called during a full app reset so the new session uses a fresh identity
+  /// immediately — without waiting for the next cold start.
+  Future<void> regenerateKeys() async {
+    // Ed25519 identity
+    _identityKeyPair = await _ed25519.newKeyPair();
+    final priv = await _identityKeyPair.extractPrivateKeyBytes();
+    final pub  = await _identityKeyPair.extractPublicKey();
+    await _write(_keyPrivate, base64.encode(priv));
+    await _write(_keyPublic,  base64.encode(pub.bytes));
+    publicKeyHex = _bytesToHex(pub.bytes);
+
+    // X25519 ECDH
+    _x25519IdentityKeyPair = await _x25519.newKeyPair();
+    final xPriv = await _x25519IdentityKeyPair.extractPrivateKeyBytes();
+    final xPub  = await _x25519IdentityKeyPair.extractPublicKey();
+    await _write(_keyX25519Private, base64.encode(xPriv));
+    await _write(_keyX25519Public,  base64.encode(xPub.bytes));
+    x25519PublicKeyBase64 = base64.encode(xPub.bytes);
+
+    debugPrint('[Crypto] Keys regenerated → ${publicKeyHex.substring(0, 8)}…');
+  }
+
   // ── Шифрование ───────────────────────────────────────────────
 
   /// Шифрует plaintext для получателя с его X25519 публичным ключом base64.

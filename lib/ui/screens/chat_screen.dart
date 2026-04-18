@@ -78,6 +78,8 @@ class _ChatScreenState extends State<ChatScreen> {
   double? _pendingLng;
   Timer? _typingDebounce;
   bool _strangerBannerDismissed = false;
+  bool _isContact = false;
+  VoidCallback? _contactListener;
 
   /// Max blob size for single relay message (~800KB compressed).
   /// Larger data is split into relay-friendly gossip chunks (50KB each).
@@ -99,15 +101,15 @@ class _ChatScreenState extends State<ChatScreen> {
     String? fileName,
     String? filePath, // local file path for upload queue (large file resume)
   }) async {
-    final mode = AppSettings.instance.connectionMode;
     bool blobSent = false;
     bool wasQueued = false;
 
     // 1. Relay — fast delivery over internet.
-    // Always use the persistent upload queue when filePath is available — this
-    // gives upload-progress tracking, retry on disconnect, and avoids holding
-    // large files in RAM.  In-memory fallback only when no filePath is given.
-    if (RelayService.instance.isConnected && mode >= 1) {
+    // Always prefer relay for media when it is available, regardless of the
+    // connection-mode setting (that only controls text routing preference).
+    // Upload queue gives progress tracking, resume on disconnect, and keeps
+    // large files out of RAM.  In-memory fallback only when no filePath given.
+    if (RelayService.instance.isConnected) {
       try {
         if (filePath != null && File(filePath).existsSync()) {
           // Queue-based send (all sizes) — progress shown on bubble overlay
@@ -245,12 +247,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _looksLikePublicKey(String id) => _publicKeyRegExp.hasMatch(id.trim());
 
-  /// True when the peer was auto-created (not manually added by user).
-  /// Auto-created contacts have nickname = first8hex + "..." pattern.
-  static final _autoNickRegExp = RegExp(r'^[0-9a-fA-F]{8}\.\.\.$');
-  bool get _isStrangerPeer {
-    final nick = widget.peerNickname.trim();
-    return _autoNickRegExp.hasMatch(nick);
+  /// Checks DB and updates [_isContact]. Called on init and whenever contacts change.
+  Future<void> _checkContactStatus() async {
+    final key = _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
+    final contact = await ChatStorageService.instance.getContact(key);
+    if (mounted) setState(() => _isContact = contact != null);
   }
 
   Future<bool> _waitForPeerPublicKey(
@@ -272,11 +273,14 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     _resolvedPeerId = BleService.instance.resolvePublicKey(widget.peerId);
     _load();
+    unawaited(_checkContactStatus());
     _controller.addListener(_onTyping);
     // Следим за изменением маппингов BLE UUID → public key
     BleService.instance.peersCount.addListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
-    BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
+    // Следим за изменением списка контактов
+    _contactListener = () => _checkContactStatus();
+    ChatStorageService.instance.contactsNotifier.addListener(_contactListener!);
     // Update message status + clear uploading indicator when background upload finishes
     MediaUploadQueue.instance.onTaskCompleted = (msgId) async {
       await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
@@ -317,6 +321,8 @@ class _ChatScreenState extends State<ChatScreen> {
       // Перезагружаем сообщения под правильным публичным ключом
       ChatStorageService.instance.loadMessages(_resolvedPeerId);
     }
+    // Key may have just resolved — re-check contact status
+    unawaited(_checkContactStatus());
   }
 
   void _onTyping() {
@@ -349,6 +355,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _controller.removeListener(_onTyping);
     BleService.instance.peersCount.removeListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.removeListener(_onPeersChanged);
+    if (_contactListener != null) {
+      ChatStorageService.instance.contactsNotifier.removeListener(_contactListener!);
+    }
     _recordingTimer?.cancel();
     _recordingSecondsNotifier.dispose();
     _controller.dispose();
@@ -412,18 +421,22 @@ class _ChatScreenState extends State<ChatScreen> {
       final bytes = await File(path).readAsBytes();
       final msgId = _uuid.v4();
       final myId = CryptoService.instance.publicKeyHex;
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
 
-      await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, isVoice: true, filePath: path);
+      final wasQueued = await _sendMedia(
+          bytes: bytes, msgId: msgId, myId: myId, isVoice: true, filePath: path);
 
-      await ChatStorageService.instance.saveMessage(ChatMessage(
+      await _saveAndTrack(ChatMessage(
         id: msgId,
-        peerId: _resolvedPeerId,
+        peerId: targetPeerId,
         text: '🎤 Голосовое',
         isOutgoing: true,
         timestamp: DateTime.now(),
-        status: MessageStatus.sent,
+        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
         voicePath: path,
-      ));
+      ), wasQueued: wasQueued);
       _scrollToBottom();
     } catch (e) {
       if (!mounted) return;
@@ -665,7 +678,8 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> _sendImage() async {
+  /// Opens gallery to pick a photo.
+  Future<void> _sendFromGallery() async {
     if (_isSending) return;
     if (!_looksLikePublicKey(_resolvedPeerId)) {
       final ok = await _waitForPeerPublicKey();
@@ -685,7 +699,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final picked = await _picker.pickImage(source: ImageSource.gallery);
     if (picked == null || !mounted) return;
 
-    // Ask: compressed image (editable, opens fullscreen) or original file
+    // ── Photo path ─────────────────────────────────────────────────
     final choice = await showModalBottomSheet<_ImageSendMode>(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -729,6 +743,83 @@ class _ChatScreenState extends State<ChatScreen> {
       await _sendImageCompressed(picked, myId);
     } else {
       await _sendImageAsFile(picked, myId);
+    }
+  }
+
+  /// Opens gallery to pick a video and send it.
+  Future<void> _sendVideoFromGallery() async {
+    if (_isSending) return;
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
+          );
+        }
+        return;
+      }
+    }
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) return;
+
+    final picked = await _picker.pickVideo(source: ImageSource.gallery);
+    if (picked == null || !mounted) return;
+    await _sendVideoFile(picked, myId);
+  }
+
+  /// Send a video file (picked from gallery) as a chat message.
+  /// Never reads the whole file into RAM — uses the upload queue directly
+  /// when relay is available, and only loads bytes for BLE fallback.
+  Future<void> _sendVideoFile(XFile picked, String myId) async {
+    setState(() => _isSending = true);
+    try {
+      final path = await ImageService.instance.saveVideo(picked.path, isSquare: false);
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+
+      bool wasQueued = false;
+
+      if (RelayService.instance.isConnected) {
+        // Queue-based send: file never read into RAM
+        unawaited(MediaUploadQueue.instance.enqueue(
+          msgId: msgId,
+          filePath: path,
+          recipientKey: _resolvedPeerId,
+          fromId: myId,
+          isVideo: true,
+          isSquare: false,
+        ));
+        wasQueued = true;
+      } else {
+        // BLE-only fallback: must load bytes
+        final bytes = await File(path).readAsBytes();
+        await _sendMedia(
+          bytes: bytes, msgId: msgId, myId: myId,
+          isVideo: true, isSquare: false, filePath: path,
+        );
+      }
+
+      await _saveAndTrack(ChatMessage(
+        id: msgId,
+        peerId: targetPeerId,
+        text: '📹 Видео',
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+        videoPath: path,
+      ), wasQueued: wasQueued);
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
     }
   }
 
@@ -831,6 +922,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Record a square video (camera button). Gallery videos come via _sendFromGallery().
   Future<void> _sendVideo() async {
     if (_isSending) return;
     if (!_looksLikePublicKey(_resolvedPeerId)) {
@@ -857,50 +949,7 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    // Show sheet: record or pick from gallery
     if (!mounted) return;
-    final choice = await showModalBottomSheet<_VideoSendMode>(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 36, height: 4,
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade400,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.videocam_outlined),
-                title: const Text('Записать видео'),
-                onTap: () => Navigator.pop(ctx, _VideoSendMode.record),
-              ),
-              ListTile(
-                leading: const Icon(Icons.video_library_outlined),
-                title: const Text('Видео из галереи'),
-                onTap: () => Navigator.pop(ctx, _VideoSendMode.gallery),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (choice == null || !mounted) return;
-
-    if (choice == _VideoSendMode.gallery) {
-      await _sendVideoFromGallery(myId);
-      return;
-    }
-
-    // Record square video
     _sendActivity(Activity.recordingVideo);
     final videoPath = await showSquareVideoRecorder(context);
     _sendActivity(Activity.stopped);
@@ -909,15 +958,31 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _isSending = true);
     try {
       final path = await ImageService.instance.saveVideo(videoPath, isSquare: true);
-      final bytes = await File(path).readAsBytes();
       final msgId = _uuid.v4();
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
           ? _resolvedPeerId
           : widget.peerId;
 
-      final wasQueued = await _sendMedia(bytes: bytes, msgId: msgId, myId: myId, isVideo: true, isSquare: true, filePath: path);
+      bool wasQueued = false;
+      if (RelayService.instance.isConnected) {
+        unawaited(MediaUploadQueue.instance.enqueue(
+          msgId: msgId,
+          filePath: path,
+          recipientKey: _resolvedPeerId,
+          fromId: myId,
+          isVideo: true,
+          isSquare: true,
+        ));
+        wasQueued = true;
+      } else {
+        final bytes = await File(path).readAsBytes();
+        await _sendMedia(
+          bytes: bytes, msgId: msgId, myId: myId,
+          isVideo: true, isSquare: true, filePath: path,
+        );
+      }
 
-      final msg = ChatMessage(
+      await _saveAndTrack(ChatMessage(
         id: msgId,
         peerId: targetPeerId,
         text: '⬛ Видео',
@@ -925,51 +990,7 @@ class _ChatScreenState extends State<ChatScreen> {
         timestamp: DateTime.now(),
         status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
         videoPath: path,
-      );
-      await _saveAndTrack(msg, wasQueued: wasQueued);
-      _scrollToBottom();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSending = false);
-    }
-  }
-
-  /// Send a video picked from the device gallery.
-  Future<void> _sendVideoFromGallery(String myId) async {
-    final picked = await _picker.pickVideo(source: ImageSource.gallery);
-    if (picked == null || !mounted) return;
-
-    setState(() => _isSending = true);
-    try {
-      // Compress/copy to app storage (isSquare: false → regular landscape/portrait)
-      final path = await ImageService.instance.saveVideo(picked.path, isSquare: false);
-      final bytes = await File(path).readAsBytes();
-      final msgId = _uuid.v4();
-      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
-          ? _resolvedPeerId
-          : widget.peerId;
-
-      final wasQueued = await _sendMedia(
-        bytes: bytes, msgId: msgId, myId: myId,
-        isVideo: true, isSquare: false, filePath: path,
-      );
-
-      final msg = ChatMessage(
-        id: msgId,
-        peerId: targetPeerId,
-        text: '📹 Видео',
-        isOutgoing: true,
-        timestamp: DateTime.now(),
-        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
-        videoPath: path,
-      );
-      await _saveAndTrack(msg, wasQueued: wasQueued);
+      ), wasQueued: wasQueued);
       _scrollToBottom();
     } catch (e) {
       if (mounted) {
@@ -1449,8 +1470,8 @@ class _ChatScreenState extends State<ChatScreen> {
               );
             },
           ),
-        // ── Stranger banner: block / add / dismiss for unknown contacts ──
-        if (_isStrangerPeer && !_strangerBannerDismissed)
+        // ── Add-contact banner — shown for any non-contact peer ──────
+        if (!_isContact && !_strangerBannerDismissed)
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1464,12 +1485,12 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             child: Row(children: [
-              Icon(Icons.person_outline, size: 18,
-                color: Theme.of(context).colorScheme.onSurfaceVariant),
+              Icon(Icons.person_add_outlined, size: 18,
+                color: Theme.of(context).colorScheme.primary),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  'Незнакомый контакт',
+                  'Не в контактах',
                   style: TextStyle(
                     fontSize: 13,
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -1497,19 +1518,34 @@ class _ChatScreenState extends State<ChatScreen> {
                 color: const Color(0xFF1DB954),
                 onTap: () async {
                   if (!mounted) return;
-                  // Send a pair_req — the other side accepts and both get full profiles
                   final myProfile = ProfileService.instance.profile;
                   if (myProfile == null) return;
-                  await GossipRouter.instance.sendPairRequest(
-                    publicKey: myProfile.publicKeyHex,
-                    nick: myProfile.nickname,
-                    username: myProfile.username,
-                    color: myProfile.avatarColor,
-                    emoji: myProfile.avatarEmoji,
-                    recipientId: _resolvedPeerId,
-                    x25519Key: CryptoService.instance.x25519PublicKeyBase64,
-                    tags: myProfile.tags,
-                  );
+                  // Always send a targeted pair_req when we have a valid key.
+                  // If the peer was found via relay or BLE (key known), the request
+                  // arrives immediately. Fall back to broadcast for unresolved keys.
+                  if (_looksLikePublicKey(_resolvedPeerId)) {
+                    await GossipRouter.instance.sendPairRequest(
+                      publicKey: myProfile.publicKeyHex,
+                      nick: myProfile.nickname,
+                      username: myProfile.username,
+                      color: myProfile.avatarColor,
+                      emoji: myProfile.avatarEmoji,
+                      recipientId: _resolvedPeerId,
+                      x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+                      tags: myProfile.tags,
+                    );
+                  } else {
+                    // Key not yet resolved — broadcast so the peer learns who we are
+                    await GossipRouter.instance.broadcastProfile(
+                      id: myProfile.publicKeyHex,
+                      nick: myProfile.nickname,
+                      username: myProfile.username,
+                      color: myProfile.avatarColor,
+                      emoji: myProfile.avatarEmoji,
+                      x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+                      tags: myProfile.tags,
+                    );
+                  }
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
@@ -1650,7 +1686,8 @@ class _ChatScreenState extends State<ChatScreen> {
           maxLength: _kMaxMessageLength,
           locationActive: _pendingLat != null,
           onSend: _send,
-          onPickImage: _sendImage,
+          onPickImage: _sendFromGallery,
+          onPickVideoGallery: _sendVideoFromGallery,
           onPickVideo: _sendVideo,
           onPickFile: _sendFile,
           onMicDown: _startVoiceRecording,
@@ -2093,6 +2130,7 @@ class _InputBar extends StatefulWidget {
   final bool locationActive;
   final VoidCallback onSend;
   final VoidCallback onPickImage;
+  final VoidCallback onPickVideoGallery;
   final VoidCallback onPickVideo;
   final VoidCallback onPickFile;
   final VoidCallback onMicDown;
@@ -2108,6 +2146,7 @@ class _InputBar extends StatefulWidget {
     required this.locationActive,
     required this.onSend,
     required this.onPickImage,
+    required this.onPickVideoGallery,
     required this.onPickVideo,
     required this.onPickFile,
     required this.onMicDown,
@@ -2203,6 +2242,7 @@ class _InputBarState extends State<_InputBar> {
               if (widget.isSending) return;
               switch (value) {
                 case 'photo': widget.onPickImage(); break;
+                case 'video_gallery': widget.onPickVideoGallery(); break;
                 case 'file': widget.onPickFile(); break;
                 case 'location': widget.onLocation(); break;
               }
@@ -2222,9 +2262,16 @@ class _InputBarState extends State<_InputBar> {
             itemBuilder: (_) => [
               const PopupMenuItem(value: 'photo',
                 child: Row(children: [
-                  Icon(Icons.photo_outlined, size: 20),
+                  Icon(Icons.photo_library_outlined, size: 20),
                   SizedBox(width: 12),
                   Text('Фото'),
+                ]),
+              ),
+              const PopupMenuItem(value: 'video_gallery',
+                child: Row(children: [
+                  Icon(Icons.video_library_outlined, size: 20),
+                  SizedBox(width: 12),
+                  Text('Видео'),
                 ]),
               ),
               const PopupMenuItem(value: 'file',
@@ -2714,7 +2761,7 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
   @override
   void initState() {
     super.initState();
-    if (_isSquare && File(widget.videoPath).existsSync()) {
+    if (File(widget.videoPath).existsSync()) {
       _initPlayer();
     }
   }
@@ -2723,7 +2770,12 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
     final ctrl = VideoPlayerController.file(File(widget.videoPath));
     try {
       await ctrl.initialize();
-      ctrl.setLooping(true);
+      if (_isSquare) {
+        ctrl.setLooping(true);
+      } else {
+        // Seek to first frame so it shows as a thumbnail; don't auto-play.
+        await ctrl.seekTo(Duration.zero);
+      }
       if (mounted) {
         setState(() {
           _ctrl = ctrl;
@@ -2815,6 +2867,13 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
 
   Widget _buildRegular(BuildContext context) {
     final exists = File(widget.videoPath).existsSync();
+    // Aspect ratio from the video itself; fall back to 16:9.
+    final ar = (_initialized && _ctrl != null && _ctrl!.value.aspectRatio > 0)
+        ? _ctrl!.value.aspectRatio
+        : 16 / 9;
+    const w = 220.0;
+    final h = (w / ar).clamp(80.0, 320.0);
+
     return GestureDetector(
       onTap: exists
           ? () => Navigator.push(
@@ -2826,38 +2885,54 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
           : null,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
-        child: Stack(
-          children: [
-            Container(
-              width: 180,
-              height: 180,
-              color: Colors.black87,
-              child: exists
-                  ? null
-                  : const Center(
-                      child: Text('Файл не найден',
-                          style: TextStyle(color: Colors.white54, fontSize: 12),
-                          textAlign: TextAlign.center),
+        child: SizedBox(
+          width: w,
+          height: h,
+          child: !exists
+              ? Container(
+                  color: Colors.black87,
+                  child: const Center(
+                    child: Text('Файл не найден',
+                        style: TextStyle(color: Colors.white54, fontSize: 12),
+                        textAlign: TextAlign.center),
+                  ),
+                )
+              : Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // Dark backdrop
+                    Container(color: const Color(0xFF111111)),
+                    // First-frame preview via VideoPlayer
+                    if (_initialized && _ctrl != null)
+                      FittedBox(
+                        fit: BoxFit.cover,
+                        child: SizedBox(
+                          width: _ctrl!.value.size.width,
+                          height: _ctrl!.value.size.height,
+                          child: VideoPlayer(_ctrl!),
+                        ),
+                      ),
+                    // Semi-transparent overlay so play icon pops
+                    Container(color: Colors.black.withValues(alpha: 0.28)),
+                    // Play button
+                    const Center(
+                      child: Icon(Icons.play_circle_fill,
+                          color: Colors.white, size: 54),
                     ),
-            ),
-            if (exists)
-              const Positioned.fill(
-                child: Center(
-                  child: Icon(Icons.play_circle_outline,
-                      color: Colors.white, size: 52),
+                    // Videocam badge
+                    const Positioned(
+                      bottom: 6,
+                      right: 8,
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.videocam, color: Colors.white70, size: 14),
+                        SizedBox(width: 4),
+                        Text('Видео',
+                            style:
+                                TextStyle(color: Colors.white70, fontSize: 11)),
+                      ]),
+                    ),
+                  ],
                 ),
-              ),
-            const Positioned(
-              bottom: 6,
-              right: 8,
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.videocam, color: Colors.white70, size: 14),
-                SizedBox(width: 4),
-                Text('Видео',
-                    style: TextStyle(color: Colors.white70, fontSize: 11)),
-              ]),
-            ),
-          ],
         ),
       ),
     );
@@ -2966,6 +3041,7 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
 
   // Loaded from DB
   String? _nick;
+  String? _username;
   int? _color;
   String? _emoji;
   String? _avatarPath;
@@ -2999,6 +3075,7 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
     final newBanner = ImageService.instance.resolveStoredPath(c.bannerImagePath);
     // Обновляем только если реально изменилось (иначе setState впустую).
     if (c.nickname == _nick &&
+        c.username == (_username ?? '') &&
         c.avatarColor == _color &&
         c.avatarEmoji == _emoji &&
         newAvatar == _avatarPath &&
@@ -3008,6 +3085,7 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
     }
     setState(() {
       _nick = c!.nickname;
+      _username = c.username.isEmpty ? null : c.username;
       _color = c.avatarColor;
       _emoji = c.avatarEmoji;
       _avatarPath = newAvatar;
@@ -3031,6 +3109,7 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
     setState(() {
       if (contact != null) {
         _nick        = contact.nickname;
+        _username    = contact.username.isEmpty ? null : contact.username;
         _color       = contact.avatarColor;
         _emoji       = contact.avatarEmoji;
         _avatarPath  = ImageService.instance.resolveStoredPath(contact.avatarImagePath);
@@ -3045,6 +3124,76 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
   }
 
   bool _hasLink(String text) => RegExp(r'https?://\S+').hasMatch(text);
+
+  Future<void> _onProfileAction(String action) async {
+    if (action == 'unblock') {
+      await BlockService.instance.unblock(widget.peerId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Контакт разблокирован')),
+      );
+      return;
+    }
+    if (action == 'block') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Заблокировать контакт?'),
+          content: const Text(
+            'Вы больше не будете получать от него сообщения, истории и вызовы.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Заблокировать'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      await BlockService.instance.block(widget.peerId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Контакт заблокирован')),
+      );
+      Navigator.of(context).pop();
+    } else if (action == 'delete') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Удалить контакт?'),
+          content: const Text(
+            'Контакт и вся переписка будут удалены без возможности восстановления.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Удалить'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      await ChatStorageService.instance.deleteChat(widget.peerId);
+      await ChatStorageService.instance.deleteContact(widget.peerId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Контакт удалён')),
+      );
+      // Pop profile screen AND chat screen underneath.
+      Navigator.of(context).popUntil((r) => r.isFirst);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -3063,6 +3212,46 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
           SliverAppBar(
             expandedHeight: _bannerPath != null && File(_bannerPath!).existsSync() ? 200 : 120,
             pinned: true,
+            actions: [
+              ValueListenableBuilder<Set<String>>(
+                valueListenable: BlockService.instance.blockedNotifier,
+                builder: (_, blocked, __) {
+                  final isBlocked = blocked.contains(widget.peerId);
+                  return PopupMenuButton<String>(
+                    icon: const Icon(Icons.more_vert),
+                    onSelected: (value) => _onProfileAction(value),
+                    itemBuilder: (_) => [
+                      if (isBlocked)
+                        const PopupMenuItem(
+                          value: 'unblock',
+                          child: Row(children: [
+                            Icon(Icons.lock_open, size: 20, color: Colors.green),
+                            SizedBox(width: 12),
+                            Text('Разблокировать'),
+                          ]),
+                        )
+                      else
+                        const PopupMenuItem(
+                          value: 'block',
+                          child: Row(children: [
+                            Icon(Icons.block, size: 20, color: Colors.orange),
+                            SizedBox(width: 12),
+                            Text('Заблокировать'),
+                          ]),
+                        ),
+                      const PopupMenuItem(
+                        value: 'delete',
+                        child: Row(children: [
+                          Icon(Icons.delete_outline, size: 20, color: Colors.red),
+                          SizedBox(width: 12),
+                          Text('Удалить контакт'),
+                        ]),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ],
             flexibleSpace: FlexibleSpaceBar(
               titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
               title: Text(
@@ -3101,6 +3290,20 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
                       style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
                     ),
                   ),
+                  if (_username != null && _username!.isNotEmpty)
+                    Center(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          '@${_username!}',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: cs.primary,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ),
                   Center(
                     child: Text(
                       '${widget.peerId.substring(0, 16)}...',
@@ -3549,7 +3752,6 @@ class _StrangerAction extends StatelessWidget {
 
 // ── Режим отправки изображения ────────────────────────────────────
 enum _ImageSendMode { compressed, asFile }
-enum _VideoSendMode { record, gallery }
 
 // ── Оверлей прогресса загрузки ────────────────────────────────────
 

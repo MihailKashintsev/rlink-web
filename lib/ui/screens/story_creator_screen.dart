@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -10,7 +9,7 @@ import 'package:video_player/video_player.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
-import '../../services/relay_service.dart';
+import '../../services/media_upload_queue.dart';
 import '../../services/story_service.dart';
 
 /// Story creator with draggable text overlay, pinch-to-zoom image, and text size control.
@@ -152,46 +151,6 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
     unawaited(_broadcastStory(story, savedImagePath, savedVideoPath));
   }
 
-  // ── Relay size constants (mirror MediaUploadQueue) ──────────────
-  static const _kMaxBlobBytes = 800 * 1024;      // single-blob threshold
-  static const _kRelayChunkBytes = 200 * 1024;   // chunk size for large media
-
-  /// Send a blob to a single recipient, chunking if it exceeds the single-blob limit.
-  Future<void> _sendBlobToContact({
-    required String recipientKey,
-    required String msgId,
-    required Uint8List compressed,
-    bool isVideo = false,
-  }) async {
-    if (compressed.length <= _kMaxBlobBytes) {
-      await RelayService.instance.sendBlob(
-        recipientKey: recipientKey,
-        fromId: widget.authorId,
-        msgId: msgId,
-        compressedData: compressed,
-        isVideo: isVideo,
-      );
-    } else {
-      final total = (compressed.length / _kRelayChunkBytes).ceil();
-      for (var i = 0; i < total; i++) {
-        if (!RelayService.instance.isConnected) break;
-        final offset = i * _kRelayChunkBytes;
-        final end = (offset + _kRelayChunkBytes).clamp(0, compressed.length);
-        final chunk = Uint8List.sublistView(compressed, offset, end);
-        await RelayService.instance.sendBlobChunk(
-          recipientKey: recipientKey,
-          fromId: widget.authorId,
-          msgId: msgId,
-          chunkIdx: i,
-          chunkTotal: total,
-          chunkData: chunk,
-          isVideo: isVideo,
-        );
-        await Future.delayed(const Duration(milliseconds: 20));
-      }
-    }
-  }
-
   Future<void> _broadcastStory(
     StoryItem story,
     String? savedImagePath,
@@ -209,31 +168,24 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       );
 
       // ── Video blob path ────────────────────────────────────────
-      if (savedVideoPath != null) {
-        final videoFile = File(savedVideoPath);
-        if (videoFile.existsSync()) {
-          final videoBytes = await videoFile.readAsBytes();
-          final compressed = ImageService.instance.compress(videoBytes);
-          if (RelayService.instance.isConnected) {
-            try {
-              final contacts = await ChatStorageService.instance.getContacts();
-              final blobMsgId = 'story_vid_${story.id}';
-              for (final c in contacts) {
-                try {
-                  await _sendBlobToContact(
-                    recipientKey: c.publicKeyHex,
-                    msgId: blobMsgId,
-                    compressed: compressed,
-                    isVideo: true,
-                  );
-                } catch (_) {}
-              }
-              debugPrint('[RLINK][Story] Sent video to ${contacts.length} contacts '
-                  '(${compressed.length ~/ 1024} KB)');
-            } catch (e) {
-              debugPrint('[RLINK][Story] Video broadcast failed: $e');
-            }
+      // Используем MediaUploadQueue: гарантированная доставка с retry,
+      // переживает оффлайн получателя и переподключение relay.
+      if (savedVideoPath != null && File(savedVideoPath).existsSync()) {
+        try {
+          final contacts = await ChatStorageService.instance.getContacts();
+          final blobMsgId = 'story_vid_${story.id}';
+          for (final c in contacts) {
+            unawaited(MediaUploadQueue.instance.enqueue(
+              msgId: blobMsgId,
+              filePath: savedVideoPath,
+              recipientKey: c.publicKeyHex,
+              fromId: widget.authorId,
+              isVideo: true,
+            ));
           }
+          debugPrint('[RLINK][Story] Queued video for ${contacts.length} contacts');
+        } catch (e) {
+          debugPrint('[RLINK][Story] Video queue failed: $e');
         }
         return; // video story — skip image broadcast
       }
@@ -243,25 +195,21 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       if (!file.existsSync()) return;
       final bytes = await file.readAsBytes();
 
-      // Relay blob → all contacts (with size-safe send)
-      if (RelayService.instance.isConnected) {
-        try {
-          final compressed = ImageService.instance.compress(bytes);
-          final blobMsgId = 'story_${story.id}';
-          final contacts = await ChatStorageService.instance.getContacts();
-          for (final c in contacts) {
-            try {
-              await _sendBlobToContact(
-                recipientKey: c.publicKeyHex,
-                msgId: blobMsgId,
-                compressed: compressed,
-              );
-            } catch (_) {}
-          }
-          debugPrint('[RLINK][Story] Sent image to ${contacts.length} contacts');
-        } catch (e) {
-          debugPrint('[RLINK][Story] Relay image failed: $e');
+      // Картинка через MediaUploadQueue — переживает оффлайн получателя.
+      try {
+        final contacts = await ChatStorageService.instance.getContacts();
+        final blobMsgId = 'story_${story.id}';
+        for (final c in contacts) {
+          unawaited(MediaUploadQueue.instance.enqueue(
+            msgId: blobMsgId,
+            filePath: savedImagePath,
+            recipientKey: c.publicKeyHex,
+            fromId: widget.authorId,
+          ));
         }
+        debugPrint('[RLINK][Story] Queued image for ${contacts.length} contacts');
+      } catch (e) {
+        debugPrint('[RLINK][Story] Image queue failed: $e');
       }
 
       // BLE img_meta/img_chunk broadcast

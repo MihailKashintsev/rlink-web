@@ -101,6 +101,26 @@ class MediaUploadQueue {
         ''');
       },
     );
+    // Сброс залипших задач от прошлой версии: всё, что висит uploading или
+    // упёрлось в retry-лимит, сбрасываем в pending с retryCount=0, чтобы
+    // фикс race-condition-а смог их доставить с чистого листа.
+    try {
+      final reset = await _db!.rawUpdate(
+        'UPDATE upload_queue SET status = ?, retryCount = 0 '
+        'WHERE status = ? OR (status = ? AND retryCount >= ?)',
+        [
+          UploadStatus.pending.index,
+          UploadStatus.uploading.index,
+          UploadStatus.failed.index,
+          _kMaxRetries,
+        ],
+      );
+      if (reset > 0) {
+        debugPrint('[UploadQueue] Reset $reset stuck/failed tasks to pending');
+      }
+    } catch (e) {
+      debugPrint('[UploadQueue] Reset stuck tasks failed: $e');
+    }
     debugPrint('[UploadQueue] Initialized');
   }
 
@@ -203,12 +223,14 @@ class MediaUploadQueue {
     );
     _setProgress(task.msgId, 0.01);
 
-    // Track if the relay reported the recipient as offline during this upload.
+    // Per-task offline detector — устанавливаем ПОСЛЕ sendBlob, чтобы
+    // не ловить «протухшие» delivery_status:offline события от предыдущих
+    // задач или presence-пингов. Иначе блоб ложно помечается как failed
+    // и retry-ится бесконечно.
     bool recipientOffline = false;
     void onDeliveryFailed(String key) {
       if (key == task.recipientKey) recipientOffline = true;
     }
-    RelayService.instance.onDeliveryFailed = onDeliveryFailed;
 
     try {
       final bytes = await File(task.filePath).readAsBytes();
@@ -227,11 +249,13 @@ class MediaUploadQueue {
           isFile: task.isFile,
           fileName: task.fileName,
         );
-        // Brief wait so a delivery_status:offline can arrive before we mark done
-        await Future.delayed(const Duration(milliseconds: 200));
-        if (recipientOffline) {
-          throw Exception('Recipient offline — will retry when they reconnect');
-        }
+        // Только теперь начинаем слушать offline-события для этого получателя.
+        RelayService.instance.onDeliveryFailed = onDeliveryFailed;
+        await Future.delayed(const Duration(milliseconds: 300));
+        // Считаем доставкой по умолчанию — если получатель оффлайн, релей
+        // выкинет блоб, но retry на нашей стороне ничего не даст: блоб не
+        // буферизуется на сервере. Лучше пометить done и положиться на
+        // прикладной ack от получателя (если он подцепится позже).
         _setProgress(task.msgId, 1.0);
       } else {
         // ── Chunked send for large files ──────────────────────────
@@ -239,7 +263,7 @@ class MediaUploadQueue {
         debugPrint('[UploadQueue] Large file: $total chunks for ${task.msgId}');
         for (var i = 0; i < total; i++) {
           if (!RelayService.instance.isConnected) {
-            // Relay gone — requeue and stop
+            // Relay gone — requeue and stop (resume on reconnect).
             await db.update(
               'upload_queue',
               {'status': UploadStatus.pending.index},
@@ -248,9 +272,6 @@ class MediaUploadQueue {
             );
             _setProgress(task.msgId, 0);
             return;
-          }
-          if (recipientOffline) {
-            throw Exception('Recipient offline — will retry when they reconnect');
           }
           final offset = i * _kRelayChunkBytes;
           final end = (offset + _kRelayChunkBytes).clamp(0, compressed.length);
@@ -271,10 +292,19 @@ class MediaUploadQueue {
           _setProgress(task.msgId, (i + 1) / total);
           await Future.delayed(const Duration(milliseconds: 20));
         }
+        // Подключаем listener только после всех чанков.
+        RelayService.instance.onDeliveryFailed = onDeliveryFailed;
+        await Future.delayed(const Duration(milliseconds: 300));
         _setProgress(task.msgId, 1.0);
       }
 
       // ── Mark done ─────────────────────────────────────────────
+      // Логируем, если релей всё-таки сообщил об оффлайн — для диагностики,
+      // но задачу всё равно закрываем (см. комментарий выше).
+      if (recipientOffline) {
+        debugPrint('[UploadQueue] Note: ${task.recipientKey.substring(0, 8)} '
+            'reported offline — blob may be lost, ack will confirm');
+      }
       await db.update(
         'upload_queue',
         {'status': UploadStatus.done.index},
@@ -348,6 +378,15 @@ class MediaUploadQueue {
     if (deleted > 0) {
       debugPrint('[UploadQueue] Cleaned up $deleted completed tasks');
     }
+  }
+
+  /// Removes all queued tasks (used on full app reset).
+  Future<void> clearAll() async {
+    final db = _db;
+    if (db == null) return;
+    await db.delete('upload_queue');
+    progressMap.value = {};
+    debugPrint('[UploadQueue] Cleared all tasks');
   }
 
   /// All pending task count (for UI badges).

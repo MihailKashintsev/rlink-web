@@ -104,6 +104,8 @@ class StoryService {
   final Map<String, List<StoryItem>> _stories = {};
   // storyId → pending image path (если картинка пришла раньше, чем сам story).
   final Map<String, String> _pendingImages = {};
+  // storyId → pending video path (если видео пришло раньше, чем сам story).
+  final Map<String, String> _pendingVideos = {};
 
   /// Fires whenever stories change
   final ValueNotifier<int> version = ValueNotifier(0);
@@ -148,10 +150,14 @@ class StoryService {
     list.add(story);
     // Keep at most 10 stories per author
     if (list.length > 10) list.removeRange(0, list.length - 10);
-    // Если картинка пришла раньше самого story — подцепляем её сейчас.
-    final pending = _pendingImages.remove(story.id);
-    if (pending != null && story.imagePath == null) {
-      story.imagePath = pending;
+    // Если картинка/видео пришли раньше самого story — подцепляем их сейчас.
+    final pendingImg = _pendingImages.remove(story.id);
+    if (pendingImg != null && story.imagePath == null) {
+      story.imagePath = pendingImg;
+    }
+    final pendingVid = _pendingVideos.remove(story.id);
+    if (pendingVid != null && story.videoPath == null) {
+      story.videoPath = pendingVid;
     }
     debugPrint('[Stories] Added story from ${story.authorId.substring(0, 16)}, total=${list.length}');
     version.value++;
@@ -166,6 +172,19 @@ class StoryService {
     if (s != null && s.imagePath == null) {
       s.imagePath = imagePath;
       _pendingImages.remove(storyId);
+      version.value++;
+      _save();
+    }
+  }
+
+  /// Запоминает путь к видео для истории, которая ещё не дошла.
+  void cachePendingVideo(String storyId, String videoPath) {
+    _pendingVideos[storyId] = videoPath;
+    // Если история уже есть — сразу применяем.
+    final s = findStory(storyId);
+    if (s != null && s.videoPath == null) {
+      s.videoPath = videoPath;
+      _pendingVideos.remove(storyId);
       version.value++;
       _save();
     }
@@ -245,6 +264,17 @@ class StoryService {
       version.value++;
       _save();
     }
+  }
+
+  /// Clears all in-memory stories and deletes the JSON file on disk.
+  Future<void> reset() async {
+    _stories.clear();
+    _pendingImages.clear();
+    version.value++;
+    try {
+      final f = await _file();
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
   }
 
   void _clearExpired() {

@@ -71,6 +71,13 @@ class ProfileService {
     }
   }
 
+  /// Clears the in-memory profile. Called during a full app reset so that
+  /// [hasProfile] returns false and [profileNotifier] reflects the cleared state.
+  void clearProfile() {
+    _profile = null;
+    profileNotifier.value = null;
+  }
+
   Future<UserProfile> createProfile({
     required String publicKeyHex,
     required String nickname,

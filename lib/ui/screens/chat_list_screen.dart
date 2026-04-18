@@ -1609,17 +1609,37 @@ class _PendingDeviceTile extends StatelessWidget {
     HapticFeedback.mediumImpact();
     final profile = ProfileService.instance.profile;
     if (profile == null) return;
+
     final resolvedKey = BleService.instance.resolvePublicKey(bleId);
-    GossipRouter.instance.sendPairRequest(
-      publicKey: profile.publicKeyHex,
-      nick: profile.nickname,
-      username: profile.username,
-      color: profile.avatarColor,
-      emoji: profile.avatarEmoji,
-      recipientId: resolvedKey,
-      x25519Key: CryptoService.instance.x25519PublicKeyBase64,
-      tags: profile.tags,
-    );
+    final isValidKey =
+        RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(resolvedKey);
+
+    if (isValidKey) {
+      // Public key already known — send a targeted pair request.
+      GossipRouter.instance.sendPairRequest(
+        publicKey: profile.publicKeyHex,
+        nick: profile.nickname,
+        username: profile.username,
+        color: profile.avatarColor,
+        emoji: profile.avatarEmoji,
+        recipientId: resolvedKey,
+        x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+        tags: profile.tags,
+      );
+    } else {
+      // Public key not yet known (BLE UUID only) — broadcast our profile
+      // so the peer learns who we are and can send their own profile back.
+      GossipRouter.instance.broadcastProfile(
+        id: profile.publicKeyHex,
+        nick: profile.nickname,
+        username: profile.username ?? '',
+        color: profile.avatarColor,
+        emoji: profile.avatarEmoji,
+        x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+        tags: profile.tags,
+      );
+    }
+
     BleService.instance.setExchangeState(bleId, 1); // invite sent
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
