@@ -35,7 +35,7 @@ class RelayService {
   /// Захардкожен — пользователь не может переопределить через настройки
   /// (см. serverUrl getter и connect() ниже).
   static const defaultServerUrl =
-      'wss://sheri-unsymbolised-powerfully.ngrok-free.dev';
+      'wss://rlink.ru.tuna.am';
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
