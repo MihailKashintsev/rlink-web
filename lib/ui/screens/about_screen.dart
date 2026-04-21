@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../l10n/app_l10n.dart';
@@ -6,8 +7,7 @@ import '../../l10n/app_l10n.dart';
 class AboutScreen extends StatelessWidget {
   const AboutScreen({super.key});
 
-  static const _version = '0.0.2';
-  static const _websiteUrl   = 'https://rendergames.tilda.ws/';
+  static const _websiteUrl = 'https://rendergames.online/rlink';
   static const _telegramUrl  = 'https://t.me/rendergm';
   static const _boostyUrl    = 'https://boosty.to/rendergamesru/purchase/3242287?ssource=DIRECT&share=subscription_link';
   static const _githubUrl    = 'https://github.com/MihailKashintsev/';
@@ -35,7 +35,11 @@ class AboutScreen extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(vertical: 32),
             alignment: Alignment.center,
-            child: Column(children: [
+            child: FutureBuilder<PackageInfo>(
+              future: PackageInfo.fromPlatform(),
+              builder: (context, snap) {
+                final version = snap.data?.version ?? '0.0.5';
+                return Column(children: [
               Container(
                 width: 88,
                 height: 88,
@@ -63,7 +67,7 @@ class AboutScreen extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               Text(
-                '${AppL10n.t('about_version')} $_version',
+                '${AppL10n.t('about_version')} $version',
                 style: TextStyle(color: Theme.of(context).hintColor),
               ),
               const SizedBox(height: 12),
@@ -78,7 +82,9 @@ class AboutScreen extends StatelessWidget {
                   ),
                 ),
               ),
-            ]),
+                ]);
+              },
+            ),
           ),
 
           // ── Social links ─────────────────────────────────────────
@@ -88,7 +94,7 @@ class AboutScreen extends StatelessWidget {
             icon: Icons.language_rounded,
             iconColor: const Color(0xFF2196F3),
             title: AppL10n.t('about_website'),
-            subtitle: 'rendergames.tilda.ws',
+            subtitle: 'rendergames.online/rlink',
             onTap: () => _open(context, _websiteUrl),
           ),
           _LinkTile(
@@ -129,13 +135,19 @@ class AboutScreen extends StatelessWidget {
           const SizedBox(height: 32),
 
           // ── Tech info ────────────────────────────────────────────
-          Center(
-            child: Text(
-              'Rlink v$_version • BLE Mesh Messenger\nFlutter • Dart • Ed25519 + ChaCha20',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  fontSize: 11, color: Theme.of(context).hintColor),
-            ),
+          FutureBuilder<PackageInfo>(
+            future: PackageInfo.fromPlatform(),
+            builder: (context, snap) {
+              final version = snap.data?.version ?? '0.0.5';
+              return Center(
+                child: Text(
+                  'Rlink v$version • BLE Mesh Messenger\nFlutter • Dart • Ed25519 + ChaCha20',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 11, color: Theme.of(context).hintColor),
+                ),
+              );
+            },
           ),
           const SizedBox(height: 24),
         ],

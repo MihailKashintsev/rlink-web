@@ -9,7 +9,7 @@ import '../../main.dart';
 import '../../services/ble_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
-import '../../services/update_service.dart';
+import '../widgets/update_available_banner.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -18,7 +18,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with UpdateAvailableBannerMixin {
   final _messages = <ChatMessage>[];
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
@@ -31,16 +31,16 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    registerUpdateBannerListener();
     _msgSub = incomingMessageController.stream.listen(_onIncoming);
-    pendingUpdateNotifier.addListener(_onUpdateAvailable);
   }
 
   @override
   void dispose() {
+    unregisterUpdateBannerListener();
     _msgSub?.cancel();
     _controller.dispose();
     _scrollController.dispose();
-    pendingUpdateNotifier.removeListener(_onUpdateAvailable);
     super.dispose();
   }
 
@@ -119,44 +119,6 @@ class _HomeScreenState extends State<HomeScreen> {
       await Future.delayed(const Duration(seconds: 3));
       if (mounted) setState(() => _isScanning = false);
     }
-  }
-
-  void _onUpdateAvailable() {
-    final update = pendingUpdateNotifier.value;
-    if (update == null || !mounted) return;
-    ScaffoldMessenger.of(context).showMaterialBanner(
-      MaterialBanner(
-        content: Text('Доступно обновление ${update.version}'),
-        leading: const Icon(Icons.system_update, color: Colors.green),
-        actions: [
-          TextButton(
-            onPressed: () =>
-                ScaffoldMessenger.of(context).hideCurrentMaterialBanner(),
-            child: const Text('Позже'),
-          ),
-          FilledButton(
-            onPressed: () {
-              ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
-              _doUpdate(update);
-            },
-            child: Text(update.isRuStore ? 'Открыть RuStore' : 'Обновить'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _doUpdate(UpdateInfo update) async {
-    if (update.isRuStore) {
-      // Android: open RuStore directly
-      await UpdateService.instance.downloadAndInstall(update);
-      return;
-    }
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _UpdateDialog(update: update),
-    );
   }
 
   void _scrollToBottom() {
@@ -433,52 +395,6 @@ class _MessageInput extends StatelessWidget {
           ),
         ]),
       ),
-    );
-  }
-}
-
-// ── Диалог обновления ────────────────────────────────────────────
-
-class _UpdateDialog extends StatefulWidget {
-  final UpdateInfo update;
-  const _UpdateDialog({required this.update});
-
-  @override
-  State<_UpdateDialog> createState() => _UpdateDialogState();
-}
-
-class _UpdateDialogState extends State<_UpdateDialog> {
-  @override
-  void initState() {
-    super.initState();
-    UpdateService.instance.downloadProgress.addListener(_rebuild);
-    UpdateService.instance.downloadAndInstall(widget.update);
-  }
-
-  void _rebuild() => setState(() {});
-
-  @override
-  void dispose() {
-    UpdateService.instance.downloadProgress.removeListener(_rebuild);
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final progress = UpdateService.instance.downloadProgress.value;
-    return AlertDialog(
-      title: Text('Обновление ${widget.update.version}'),
-      content: Column(mainAxisSize: MainAxisSize.min, children: [
-        if (progress == null)
-          const CircularProgressIndicator()
-        else ...[
-          LinearProgressIndicator(value: progress),
-          const SizedBox(height: 8),
-          Text('${(progress * 100).toStringAsFixed(0)}%'),
-        ],
-        const SizedBox(height: 8),
-        const Text('Пожалуйста, не закрывай приложение...'),
-      ]),
     );
   }
 }

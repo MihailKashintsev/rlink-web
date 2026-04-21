@@ -84,6 +84,40 @@
 	<string>Rlink использует геолокацию для прикрепления местоположения к сообщениям</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Rlink использует геолокацию для прикрепления местоположения к сообщениям</string>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon</string>
+			</array>
+		</dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>RlinkMono</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>RlinkMono</string>
+				</array>
+			</dict>
+			<key>RlinkMirror</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>RlinkMirror</string>
+				</array>
+			</dict>
+			<key>RlinkAi</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>RlinkAi</string>
+				</array>
+			</dict>
+		</dict>
+	</dict>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIBackgroundModes</key>

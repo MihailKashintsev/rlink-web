@@ -96,6 +96,9 @@ class GroupMessage {
   final bool isOutgoing;
   final int timestamp;
   final Map<String, List<String>> reactions;
+  final String? pollJson;
+  final String? forwardFromId;
+  final String? forwardFromNick;
 
   const GroupMessage({
     required this.id,
@@ -108,6 +111,9 @@ class GroupMessage {
     required this.isOutgoing,
     required this.timestamp,
     this.reactions = const {},
+    this.pollJson,
+    this.forwardFromId,
+    this.forwardFromNick,
   });
 
   int get totalReactions {
@@ -129,6 +135,9 @@ class GroupMessage {
         'is_outgoing': isOutgoing ? 1 : 0,
         'timestamp': timestamp,
         'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
+        'poll_json': pollJson,
+        'forward_from_id': forwardFromId,
+        'forward_from_nick': forwardFromNick,
       };
 
   factory GroupMessage.fromMap(Map<String, dynamic> m) {
@@ -152,6 +161,9 @@ class GroupMessage {
       isOutgoing: (m['is_outgoing'] as int) == 1,
       timestamp: m['timestamp'] as int,
       reactions: reactions,
+      pollJson: m['poll_json'] as String?,
+      forwardFromId: m['forward_from_id'] as String?,
+      forwardFromNick: m['forward_from_nick'] as String?,
     );
   }
 }

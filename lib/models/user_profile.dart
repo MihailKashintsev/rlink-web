@@ -11,6 +11,8 @@ class UserProfile {
   final String? avatarImagePath; // локальный путь к фото аватара
   final List<String> tags;       // теги профиля (интересы)
   final String? bannerImagePath; // баннер профиля
+  /// Локальный путь к аудио «музыка в профиле».
+  final String? profileMusicPath;
 
   const UserProfile({
     required this.publicKeyHex,
@@ -21,6 +23,7 @@ class UserProfile {
     this.avatarImagePath,
     this.tags = const [],
     this.bannerImagePath,
+    this.profileMusicPath,
   });
 
   String get initials {
@@ -41,6 +44,7 @@ class UserProfile {
         if (avatarImagePath != null) 'imgPath': avatarImagePath,
         if (tags.isNotEmpty) 'tags': tags,
         if (bannerImagePath != null) 'bannerPath': bannerImagePath,
+        if (profileMusicPath != null) 'musicPath': profileMusicPath,
       };
 
   factory UserProfile.fromJson(Map<String, dynamic> j) => UserProfile(
@@ -54,6 +58,8 @@ class UserProfile {
         tags: (j['tags'] as List<dynamic>?)?.cast<String>() ?? const [],
         bannerImagePath: ImageService.instance.resolveStoredPath(
             j['bannerPath'] as String?),
+        profileMusicPath: ImageService.instance.resolveStoredPath(
+            j['musicPath'] as String?),
       );
 
   String encode() => jsonEncode(toJson());

@@ -19,6 +19,13 @@ class ChatMessage {
   final DateTime timestamp;
   final MessageStatus status;
   final Map<String, List<String>> reactions;
+  /// Одноразовый просмотр (медиа): до открытия скрываем превью у получателя.
+  final bool viewOnce;
+  final bool viewOnceOpened;
+  /// Переслано: публичный ключ автора оригинала (Ed25519 hex).
+  final String? forwardFromId;
+  /// Отображаемое имя автора оригинала (подпись над пересланным).
+  final String? forwardFromNick;
 
   const ChatMessage({
     required this.id,
@@ -37,6 +44,10 @@ class ChatMessage {
     required this.timestamp,
     this.status = MessageStatus.sent,
     this.reactions = const {},
+    this.viewOnce = false,
+    this.viewOnceOpened = false,
+    this.forwardFromId,
+    this.forwardFromNick,
   });
 
   ChatMessage copyWith({
@@ -50,6 +61,10 @@ class ChatMessage {
     double? latitude,
     double? longitude,
     Map<String, List<String>>? reactions,
+    bool? viewOnce,
+    bool? viewOnceOpened,
+    String? forwardFromId,
+    String? forwardFromNick,
   }) =>
       ChatMessage(
         id: id,
@@ -68,6 +83,10 @@ class ChatMessage {
         timestamp: timestamp,
         status: status ?? this.status,
         reactions: reactions ?? this.reactions,
+        viewOnce: viewOnce ?? this.viewOnce,
+        viewOnceOpened: viewOnceOpened ?? this.viewOnceOpened,
+        forwardFromId: forwardFromId ?? this.forwardFromId,
+        forwardFromNick: forwardFromNick ?? this.forwardFromNick,
       );
 
   Map<String, dynamic> toMap() => {
@@ -87,6 +106,10 @@ class ChatMessage {
         'timestamp': timestamp.millisecondsSinceEpoch,
         'status': status.index,
         'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
+        'view_once': viewOnce ? 1 : 0,
+        'view_once_opened': viewOnceOpened ? 1 : 0,
+        'forward_from_id': forwardFromId,
+        'forward_from_nick': forwardFromNick,
       };
 
   factory ChatMessage.fromMap(Map<String, dynamic> m) {
@@ -118,6 +141,10 @@ class ChatMessage {
       timestamp: DateTime.fromMillisecondsSinceEpoch(m['timestamp'] as int),
       status: MessageStatus.values[m['status'] as int],
       reactions: reactions,
+      viewOnce: (m['view_once'] as int?) == 1,
+      viewOnceOpened: (m['view_once_opened'] as int?) == 1,
+      forwardFromId: m['forward_from_id'] as String?,
+      forwardFromNick: m['forward_from_nick'] as String?,
     );
   }
 }

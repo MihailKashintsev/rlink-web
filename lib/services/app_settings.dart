@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -24,13 +26,19 @@ class AppSettings extends ChangeNotifier {
   static const _keyOnlineStatusMode  = 'online_status_mode'; // 0=online,1=dnd,2=busy
   static const _keyRelayEnabled      = 'relay_enabled';
   static const _keyRelayServerUrl    = 'relay_server_url';
-  static const _keyConnectionMode    = 'connection_mode';   // 0=BLE, 1=Internet, 2=Both
+  static const _keyConnectionMode    = 'connection_mode';   // 0=BLE only, 1=Internet, 2=BLE+Wi‑Fi Direct+Internet
   static const _keyMediaPriority     = 'media_priority';    // 0=BLE, 1=Internet
   static const _keyAdminPasswordHash = 'admin_password_hash';
   static const _keyBubbleStyle       = 'bubble_style';       // 0=rounded,1=square,2=minimal
   static const _keyClockFormat       = 'clock_format';       // 0=24h,1=12h
   static const _keyMessageDensity    = 'message_density';    // 0=comfortable,1=cozy,2=compact
   static const _keyShowReactionsQuickBar = 'show_reactions_quickbar';
+  static const _keyQuickReactionEmoji = 'quick_reaction_emoji';
+  static const _keyNotifyPersonal  = 'notify_personal';
+  static const _keyNotifyGroups    = 'notify_groups';
+  static const _keyNotifyChannels  = 'notify_channels';
+  static const _keyAppIconVariant  = 'app_icon_variant';   // 0=classic,1=mono,2=mirror,3=ai
+  static const _keyUseIosStyleEmoji = 'use_ios_style_emoji'; // Android: Noto Color Emoji fallback
 
   late SharedPreferences _prefs;
 
@@ -57,6 +65,12 @@ class AppSettings extends ChangeNotifier {
   int _clockFormat = 0;      // 0=24h, 1=12h
   int _messageDensity = 1;   // 0=comfortable, 1=cozy, 2=compact
   bool _showReactionsQuickBar = true;
+  String _quickReactionEmoji = '👍';
+  bool _notifyPersonal = true;
+  bool _notifyGroups = true;
+  bool _notifyChannels = true;
+  int _appIconVariant = 0;
+  bool _useIosStyleEmoji = false;
 
   ThemeMode get themeMode => _themeMode;
   int get accentColorIndex => _accentColorIndex;
@@ -81,6 +95,13 @@ class AppSettings extends ChangeNotifier {
   int get clockFormat => _clockFormat;
   int get messageDensity => _messageDensity;
   bool get showReactionsQuickBar => _showReactionsQuickBar;
+  String get quickReactionEmoji => _quickReactionEmoji;
+  bool get notifyPersonal => _notifyPersonal;
+  bool get notifyGroups => _notifyGroups;
+  bool get notifyChannels => _notifyChannels;
+  int get appIconVariant => _appIconVariant;
+  /// На Android включает шрифт Noto Color Emoji (ближе к единому виду с iOS).
+  bool get useIosStyleEmoji => _useIosStyleEmoji;
 
   /// Форматирует время по настройке часового формата.
   String formatTime(DateTime dt) {
@@ -199,6 +220,53 @@ class AppSettings extends ChangeNotifier {
     _clockFormat = (_prefs.getInt(_keyClockFormat) ?? 0).clamp(0, 1);
     _messageDensity = (_prefs.getInt(_keyMessageDensity) ?? 1).clamp(0, 2);
     _showReactionsQuickBar = _prefs.getBool(_keyShowReactionsQuickBar) ?? true;
+    _quickReactionEmoji = _prefs.getString(_keyQuickReactionEmoji) ?? '👍';
+    _notifyPersonal = _prefs.getBool(_keyNotifyPersonal) ?? true;
+    _notifyGroups = _prefs.getBool(_keyNotifyGroups) ?? true;
+    _notifyChannels = _prefs.getBool(_keyNotifyChannels) ?? true;
+    _appIconVariant = (_prefs.getInt(_keyAppIconVariant) ?? 0).clamp(0, 3);
+    _useIosStyleEmoji = Platform.isAndroid
+        ? (_prefs.getBool(_keyUseIosStyleEmoji) ?? true)
+        : false;
+  }
+
+  Future<void> setNotifyPersonal(bool v) async {
+    _notifyPersonal = v;
+    await _prefs.setBool(_keyNotifyPersonal, v);
+    notifyListeners();
+  }
+
+  Future<void> setNotifyGroups(bool v) async {
+    _notifyGroups = v;
+    await _prefs.setBool(_keyNotifyGroups, v);
+    notifyListeners();
+  }
+
+  Future<void> setNotifyChannels(bool v) async {
+    _notifyChannels = v;
+    await _prefs.setBool(_keyNotifyChannels, v);
+    notifyListeners();
+  }
+
+  Future<void> setAppIconVariant(int v) async {
+    _appIconVariant = v.clamp(0, 3);
+    await _prefs.setInt(_keyAppIconVariant, _appIconVariant);
+    notifyListeners();
+  }
+
+  Future<void> setUseIosStyleEmoji(bool v) async {
+    if (!Platform.isAndroid) return;
+    _useIosStyleEmoji = v;
+    await _prefs.setBool(_keyUseIosStyleEmoji, v);
+    notifyListeners();
+  }
+
+  Future<void> setQuickReactionEmoji(String emoji) async {
+    final e = emoji.trim();
+    if (e.isEmpty) return;
+    _quickReactionEmoji = e;
+    await _prefs.setString(_keyQuickReactionEmoji, _quickReactionEmoji);
+    notifyListeners();
   }
 
   Future<void> setBubbleStyle(int style) async {
@@ -350,11 +418,37 @@ class AppSettings extends ChangeNotifier {
   // ── Admin password (SHA-256 hash) ─────────────────────────────
   // Default password: "1234"
   static const _defaultAdminHash = '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4';
+  static const _keyAdminCfgRev = 'admin_cfg_rev';
+  static const _keyAdminCfgSealed = 'admin_cfg_sealed_box';
 
   String get adminPasswordHash =>
       _prefs.getString(_keyAdminPasswordHash) ?? _defaultAdminHash;
 
+  int get adminPasswordSyncRev => _prefs.getInt(_keyAdminCfgRev) ?? 0;
+
+  String? get adminPasswordSealedBox => _prefs.getString(_keyAdminCfgSealed);
+
   Future<void> setAdminPasswordHash(String hash) async {
     await _prefs.setString(_keyAdminPasswordHash, hash);
+  }
+
+  /// Атомарно: хэш, монотонная ревизия и sealed-бокс для офлайн-восстановления на этом устройстве.
+  Future<void> completeAdminPasswordRollout(
+      String hash, int revision, String sealedBoxJson) async {
+    await _prefs.setString(_keyAdminPasswordHash, hash);
+    await _prefs.setInt(_keyAdminCfgRev, revision);
+    await _prefs.setString(_keyAdminCfgSealed, sealedBoxJson);
+    notifyListeners();
+  }
+
+  /// Применить только если [revision] новее сохранённой ревизии.
+  Future<void> applyAdminPasswordSyncIfNewer(
+      String hash, int revision, String sealedBoxJson) async {
+    final cur = _prefs.getInt(_keyAdminCfgRev) ?? 0;
+    if (revision <= cur) return;
+    await _prefs.setString(_keyAdminPasswordHash, hash);
+    await _prefs.setInt(_keyAdminCfgRev, revision);
+    await _prefs.setString(_keyAdminCfgSealed, sealedBoxJson);
+    notifyListeners();
   }
 }

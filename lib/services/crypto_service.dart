@@ -214,6 +214,54 @@ class CryptoService {
     }
   }
 
+  /// Симметричное шифрование на ключе, выведенном из приватного Ed25519 (только эта идентичность).
+  /// Уходит в сеть как opaque blob — relay не может извлечь хэш пароля админки.
+  Future<String> sealAdminPanelSync(String plaintext) async {
+    final key = await _adminPanelSyncSecretKey();
+    final rng = Random.secure();
+    final nonce = List<int>.generate(12, (_) => rng.nextInt(256));
+    final box = await _chacha.encrypt(
+      utf8.encode(plaintext),
+      secretKey: key,
+      nonce: nonce,
+    );
+    return jsonEncode({
+      'n': base64.encode(nonce),
+      'ct': base64.encode(box.cipherText),
+      'm': base64.encode(box.mac.bytes),
+    });
+  }
+
+  Future<String?> openAdminPanelSync(String sealedJson) async {
+    try {
+      final j = jsonDecode(sealedJson) as Map<String, dynamic>;
+      final n = j['n'] as String?;
+      final ct = j['ct'] as String?;
+      final m = j['m'] as String?;
+      if (n == null || ct == null || m == null) return null;
+      final nonce = base64.decode(n);
+      final cipherText = base64.decode(ct);
+      final mac = Mac(base64.decode(m));
+      final key = await _adminPanelSyncSecretKey();
+      final plain = await _chacha.decrypt(
+        SecretBox(cipherText, nonce: nonce, mac: mac),
+        secretKey: key,
+      );
+      return utf8.decode(plain);
+    } catch (e) {
+      debugPrint('[Crypto] openAdminPanelSync failed: $e');
+      return null;
+    }
+  }
+
+  Future<SecretKey> _adminPanelSyncSecretKey() async {
+    final priv = await _identityKeyPair.extractPrivateKeyBytes();
+    final prefix = utf8.encode('rlink.admin_panel.sync.v1');
+    final combined = <int>[...prefix, ...priv];
+    final hash = await Sha256().hash(combined);
+    return SecretKey(hash.bytes);
+  }
+
   static String _bytesToHex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }

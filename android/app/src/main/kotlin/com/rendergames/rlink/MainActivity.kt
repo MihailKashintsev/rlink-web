@@ -4,7 +4,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.bluetooth.*
 import android.bluetooth.le.*
+import android.content.ComponentName
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
 import androidx.core.app.NotificationCompat
@@ -104,6 +106,21 @@ class MainActivity : FlutterActivity() {
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager?.adapter
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.rendergames.rlink/app_icon")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "setIcon") {
+                    try {
+                        val variant = call.argument<String>("variant") ?: "default"
+                        setAppIcon(variant)
+                        result.success(null)
+                    } catch (e: Exception) {
+                        result.error("ICON", e.message, null)
+                    }
+                } else {
+                    result.notImplemented()
+                }
+            }
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -129,6 +146,12 @@ class MainActivity : FlutterActivity() {
                         showMessageNotification(title, body, sound, vibration)
                         result.success(null)
                     }
+                    "clearApplicationBadge" -> {
+                        // iOS сбрасывает число на иконке нативно. На Android счётчик на иконке
+                        // обычно привязан к активным уведомлениям — не делаем cancelAll при resume,
+                        // чтобы не очищать центр уведомлений.
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -141,6 +164,44 @@ class MainActivity : FlutterActivity() {
 
         // Native square video cropping
         VideoCropPlugin.register(flutterEngine.dartExecutor.binaryMessenger)
+    }
+
+    private fun setAppIcon(variant: String) {
+        val pm = packageManager
+        val pkg = packageName
+        val def = ComponentName(pkg, "$pkg.LauncherIconDefault")
+        val mono = ComponentName(pkg, "$pkg.LauncherIconMono")
+        val mir = ComponentName(pkg, "$pkg.LauncherIconMirror")
+        val ai = ComponentName(pkg, "$pkg.LauncherIconAi")
+        val off = PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+        val on = PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        val f = PackageManager.DONT_KILL_APP
+        when (variant) {
+            "mono" -> {
+                pm.setComponentEnabledSetting(def, off, f)
+                pm.setComponentEnabledSetting(mir, off, f)
+                pm.setComponentEnabledSetting(ai, off, f)
+                pm.setComponentEnabledSetting(mono, on, f)
+            }
+            "mirror" -> {
+                pm.setComponentEnabledSetting(def, off, f)
+                pm.setComponentEnabledSetting(mono, off, f)
+                pm.setComponentEnabledSetting(ai, off, f)
+                pm.setComponentEnabledSetting(mir, on, f)
+            }
+            "ai" -> {
+                pm.setComponentEnabledSetting(def, off, f)
+                pm.setComponentEnabledSetting(mono, off, f)
+                pm.setComponentEnabledSetting(mir, off, f)
+                pm.setComponentEnabledSetting(ai, on, f)
+            }
+            else -> {
+                pm.setComponentEnabledSetting(mono, off, f)
+                pm.setComponentEnabledSetting(mir, off, f)
+                pm.setComponentEnabledSetting(ai, off, f)
+                pm.setComponentEnabledSetting(def, on, f)
+            }
+        }
     }
 
     private fun startGattServer() {

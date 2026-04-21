@@ -21,6 +21,8 @@ import '../../services/relay_service.dart';
 import '../../services/story_service.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/mesh_radar_widget.dart';
+import '../widgets/update_available_banner.dart';
+import '../../utils/message_preview_formatter.dart';
 import 'channels_screen.dart';
 import 'chat_screen.dart';
 import 'ether_screen.dart';
@@ -53,7 +55,8 @@ class ChatListScreen extends StatefulWidget {
   State<ChatListScreen> createState() => _ChatListScreenState();
 }
 
-class _ChatListScreenState extends State<ChatListScreen> {
+class _ChatListScreenState extends State<ChatListScreen>
+    with UpdateAvailableBannerMixin {
   int _currentTab = 0; // 0=Чаты, 1=Рядом, 2=Эфир
   bool _searchActive = false;
   final _searchController = TextEditingController();
@@ -61,11 +64,13 @@ class _ChatListScreenState extends State<ChatListScreen> {
   @override
   void initState() {
     super.initState();
+    registerUpdateBannerListener();
     ChatStorageService.instance.loadContacts();
   }
 
   @override
   void dispose() {
+    unregisterUpdateBannerListener();
     _searchController.dispose();
     super.dispose();
   }
@@ -465,6 +470,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   VoidCallback? _channelListener;
   VoidCallback? _bleListener;   // fires on BLE peer connect/disconnect
   VoidCallback? _contactListener; // fires when contactsNotifier updates
+  VoidCallback? _readStateListener;
 
   @override
   void initState() {
@@ -484,6 +490,8 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     ChannelService.instance.version.addListener(_channelListener!);
     BleService.instance.peersCount.addListener(_bleListener!);
     ChatStorageService.instance.contactsNotifier.addListener(_contactListener!);
+    _readStateListener = () => _debouncedLoad();
+    ChatStorageService.instance.readStateVersion.addListener(_readStateListener!);
   }
 
   void _debouncedLoad() {
@@ -499,6 +507,9 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     if (_channelListener != null) ChannelService.instance.version.removeListener(_channelListener!);
     if (_bleListener != null) BleService.instance.peersCount.removeListener(_bleListener!);
     if (_contactListener != null) ChatStorageService.instance.contactsNotifier.removeListener(_contactListener!);
+    if (_readStateListener != null) {
+      ChatStorageService.instance.readStateVersion.removeListener(_readStateListener!);
+    }
     super.dispose();
   }
 
@@ -506,6 +517,9 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     final items = <_ChatItem>[];
     final myId = CryptoService.instance.publicKeyHex;
     final showOnline = AppSettings.instance.showOnlineStatus;
+    final dmUnread = await ChatStorageService.instance.getDmUnreadCounts();
+    final groupUnread = await GroupService.instance.getGroupUnreadCounts();
+    final channelUnread = await ChannelService.instance.getChannelUnreadCounts();
 
     // 1) Личные чаты
     final summaries = await ChatStorageService.instance.getChatSummaries();
@@ -522,6 +536,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         lastMessage: s.displayText,
         lastTime: s.timestamp,
         isOnline: showOnline && BleService.instance.isPeerConnected(s.peerId),
+        unreadCount: dmUnread[s.peerId] ?? 0,
       ));
     }
 
@@ -541,6 +556,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         lastMessage: '',
         lastTime: c.addedAt,
         isOnline: showOnline && BleService.instance.isPeerConnected(c.publicKeyHex),
+        unreadCount: 0,
       ));
     }
 
@@ -556,11 +572,14 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         avatarColor: g.avatarColor,
         avatarEmoji: g.avatarEmoji,
         avatarImagePath: g.avatarImagePath,
-        lastMessage: lastMsg?.text ?? 'Группа создана',
+        lastMessage: lastMsg == null
+            ? 'Группа создана'
+            : formatGroupMessagePreview(lastMsg),
         lastTime: lastMsg != null
             ? DateTime.fromMillisecondsSinceEpoch(lastMsg.timestamp)
             : DateTime.fromMillisecondsSinceEpoch(g.createdAt),
         isOnline: false,
+        unreadCount: groupUnread[g.id] ?? 0,
       ));
     }
 
@@ -576,11 +595,14 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         avatarColor: ch.avatarColor,
         avatarEmoji: ch.avatarEmoji,
         avatarImagePath: ch.avatarImagePath,
-        lastMessage: lastPost?.text ?? 'Канал создан',
+        lastMessage: lastPost == null
+            ? 'Канал создан'
+            : formatChannelPostPreview(lastPost),
         lastTime: lastPost != null
             ? DateTime.fromMillisecondsSinceEpoch(lastPost.timestamp)
             : DateTime.fromMillisecondsSinceEpoch(ch.createdAt),
         isOnline: false,
+        unreadCount: channelUnread[ch.id] ?? 0,
       ));
     }
 
@@ -631,16 +653,26 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     if (q.isEmpty) {
       return Column(children: [
         _StoriesStrip(chatItems: _items),
-        Expanded(child: ListView.builder(
+        Expanded(
+            child: ListView.separated(
           itemCount: _items.length,
-          padding: const EdgeInsets.only(top: 4, bottom: 8),
+          padding: const EdgeInsets.only(top: 2, bottom: 8),
+          separatorBuilder: (_, __) => Divider(
+            height: 1,
+            indent: 68,
+            endIndent: 12,
+            color: Theme.of(context)
+                .dividerColor
+                .withValues(alpha: 0.22),
+          ),
           itemBuilder: (_, i) {
             final item = _items[i];
-            return _AnimatedChatCard(
-              index: i,
-              item: item,
-              onTap: () => _navigate(context, item),
-              timeLabel: _fmtTime(item.lastTime),
+            return RepaintBoundary(
+              child: _TelegramChatRow(
+                item: item,
+                onTap: () => _navigate(context, item),
+                timeLabel: _fmtTime(item.lastTime),
+              ),
             );
           },
         )),
@@ -664,16 +696,14 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   }
 }
 
-// ── Animated chat card item ─────────────────────────────────────
+// ── Строка списка чатов (в духе Telegram: плоский список, разделители) ──
 
-class _AnimatedChatCard extends StatelessWidget {
-  final int index;
+class _TelegramChatRow extends StatelessWidget {
   final _ChatItem item;
   final VoidCallback onTap;
   final String timeLabel;
 
-  const _AnimatedChatCard({
-    required this.index,
+  const _TelegramChatRow({
     required this.item,
     required this.onTap,
     required this.timeLabel,
@@ -682,137 +712,114 @@ class _AnimatedChatCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final delay = Duration(milliseconds: (index * 50).clamp(0, 400));
-    const totalDuration = Duration(milliseconds: 350);
+    final cs = theme.colorScheme;
+    final subColor = theme.brightness == Brightness.dark
+        ? const Color(0xFF8E8E93)
+        : const Color(0xFF8E8E93);
 
-    return TweenAnimationBuilder<double>(
-      key: ValueKey('chat_anim_${item.peerId}'),
-      tween: Tween(begin: 0.0, end: 1.0),
-      duration: totalDuration,
-      curve: Curves.easeOutCubic,
-      builder: (context, value, child) {
-        // Stagger: items further down the list start later
-        final delayFraction = delay.inMilliseconds / (totalDuration.inMilliseconds + 400);
-        final adjustedValue = ((value - delayFraction) / (1.0 - delayFraction)).clamp(0.0, 1.0);
-        return Transform.translate(
-          offset: Offset(30 * (1.0 - adjustedValue), 0),
-          child: Opacity(
-            opacity: adjustedValue,
-            child: child,
-          ),
-        );
-      },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(16),
-            onTap: onTap,
-            child: Ink(
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.06),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Hero(
+                tag: 'avatar_${item.peerId}',
+                child: AvatarWidget(
+                  initials: item.nickname.isNotEmpty
+                      ? item.nickname[0].toUpperCase()
+                      : '?',
+                  color: item.avatarColor,
+                  emoji: item.avatarEmoji,
+                  imagePath: item.avatarImagePath,
+                  size: 52,
+                  isOnline: item.isOnline,
+                  hasStory: item.type == _ChatItemType.personal &&
+                      StoryService.instance.hasActiveStory(item.peerId),
+                  hasUnviewedStory: item.type == _ChatItemType.personal &&
+                      StoryService.instance.hasUnviewedStory(item.peerId),
+                ),
               ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Row(
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Hero(
-                      tag: 'avatar_${item.peerId}',
-                      child: AvatarWidget(
-                        initials: item.nickname[0].toUpperCase(),
-                        color: item.avatarColor,
-                        emoji: item.avatarEmoji,
-                        imagePath: item.avatarImagePath,
-                        size: 48,
-                        isOnline: item.isOnline,
-                        hasStory: StoryService.instance.hasActiveStory(item.peerId),
-                        hasUnviewedStory:
-                            StoryService.instance.hasUnviewedStory(item.peerId),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Row(children: [
-                            if (item.type == _ChatItemType.group)
-                              Padding(
-                                padding: const EdgeInsets.only(right: 4),
-                                child: Icon(Icons.group, size: 16,
-                                    color: theme.colorScheme.primary.withValues(alpha: 0.7)),
-                              ),
-                            if (item.type == _ChatItemType.channel)
-                              Padding(
-                                padding: const EdgeInsets.only(right: 4),
-                                child: Icon(Icons.campaign, size: 16,
-                                    color: theme.colorScheme.primary.withValues(alpha: 0.7)),
-                              ),
-                            Expanded(child: Text(
-                              item.nickname,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                                fontSize: 15,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            )),
-                          ]),
-                          const SizedBox(height: 3),
-                          Text(
-                            item.lastMessage,
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (item.type == _ChatItemType.group)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 4, top: 2),
+                            child: Icon(Icons.group_outlined,
+                                size: 18, color: cs.primary.withValues(alpha: 0.75)),
+                          ),
+                        if (item.type == _ChatItemType.channel)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 4, top: 2),
+                            child: Icon(Icons.campaign_outlined,
+                                size: 18, color: cs.primary.withValues(alpha: 0.75)),
+                          ),
+                        Expanded(
+                          child: Text(
+                            item.nickname,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 16,
+                              height: 1.2,
+                            ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: theme.hintColor.withValues(alpha: 0.7),
-                              fontSize: 13,
+                          ),
+                        ),
+                        if (item.unreadCount > 0) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 7, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: cs.primary,
+                              borderRadius: BorderRadius.circular(11),
+                            ),
+                            child: Text(
+                              item.unreadCount > 99 ? '99+' : '${item.unreadCount}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: cs.onPrimary,
+                              ),
                             ),
                           ),
                         ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
+                        const SizedBox(width: 8),
                         Text(
                           timeLabel,
                           style: TextStyle(
-                            color: theme.hintColor.withValues(alpha: 0.6),
-                            fontSize: 11,
+                            fontSize: 13,
+                            color: subColor,
                             fontWeight: FontWeight.w400,
                           ),
                         ),
-                        const SizedBox(height: 6),
-                        // Unread indicator dot (shown when peer is online as a visual hint)
-                        if (item.isOnline)
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.primary,
-                              shape: BoxShape.circle,
-                            ),
-                          )
-                        else
-                          const SizedBox(width: 8, height: 8),
                       ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      item.lastMessage,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: subColor,
+                        fontSize: 15,
+                        height: 1.2,
+                      ),
                     ),
                   ],
                 ),
               ),
-            ),
+            ],
           ),
         ),
       ),
@@ -885,7 +892,8 @@ class _ChatItem {
   final String? avatarImagePath;
   final DateTime lastTime;
   final bool isOnline;
-  const _ChatItem({
+  final int unreadCount;
+  _ChatItem({
     this.type = _ChatItemType.personal,
     required this.id,
     required this.nickname,
@@ -895,6 +903,7 @@ class _ChatItem {
     required this.lastMessage,
     required this.lastTime,
     required this.isOnline,
+    this.unreadCount = 0,
   });
   // Backward compat
   String get peerId => id;
@@ -1013,12 +1022,11 @@ class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
               children: [
                 if (chatMatches.isNotEmpty) ...[
                   _searchSection('Чаты', chatMatches.length),
-                  for (int i = 0; i < chatMatches.length; i++)
-                    _AnimatedChatCard(
-                      index: i,
-                      item: chatMatches[i],
-                      onTap: () => widget.onOpenItem(chatMatches[i]),
-                      timeLabel: _fmtTimeStatic(chatMatches[i].lastTime),
+                  for (final m in chatMatches)
+                    _TelegramChatRow(
+                      item: m,
+                      onTap: () => widget.onOpenItem(m),
+                      timeLabel: _fmtTimeStatic(m.lastTime),
                     ),
                 ],
                 if (contactMatches.isNotEmpty) ...[
@@ -1187,125 +1195,134 @@ class _StoriesStrip extends StatelessWidget {
     return ValueListenableBuilder<UserProfile?>(
       valueListenable: ProfileService.instance.profileNotifier,
       builder: (context, myProfile, _) {
-        return ValueListenableBuilder<int>(
-          valueListenable: StoryService.instance.version,
-          builder: (context, _, __) {
-            final activeAuthors = StoryService.instance.activeAuthors;
-            final ownKey = myProfile?.publicKeyHex;
+        return ValueListenableBuilder<List<Contact>>(
+          valueListenable: ChatStorageService.instance.contactsNotifier,
+          builder: (context, contacts, __) {
+            final contactKeys = contacts.map((c) => c.publicKeyHex).toSet();
+            return ValueListenableBuilder<int>(
+              valueListenable: StoryService.instance.version,
+              builder: (context, _, __) {
+                final ownKey = myProfile?.publicKeyHex;
+                final activeAuthors = StoryService.instance.activeAuthors
+                    .where((id) => id == ownKey || contactKeys.contains(id))
+                    .toList();
 
-            // Only show strip if there are stories or own profile exists
-            if (activeAuthors.isEmpty && myProfile == null) {
-              return const SizedBox.shrink();
-            }
+                // Only show strip if there are stories or own profile exists
+                if (activeAuthors.isEmpty && myProfile == null) {
+                  return const SizedBox.shrink();
+                }
 
-            return SizedBox(
-              height: 96,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                children: [
-                  // ── Создать историю (всегда видна) ──────────────
-                  if (myProfile != null)
-                    _StoryAvatar(
-                      label: 'Создать',
-                      avatar: AvatarWidget(
-                        initials: myProfile.initials,
-                        color: myProfile.avatarColor,
-                        emoji: myProfile.avatarEmoji,
-                        imagePath: myProfile.avatarImagePath,
-                        size: 56,
-                        hasStory: false,
-                        hasUnviewedStory: false,
-                      ),
-                      showAddBadge: true,
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          slideRoute(
-                            StoryCreatorScreen(
-                                authorId: myProfile.publicKeyHex),
+                return SizedBox(
+                  height: 96,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    children: [
+                      // ── Создать историю (всегда видна) ──────────────
+                      if (myProfile != null)
+                        _StoryAvatar(
+                          label: 'Создать',
+                          avatar: AvatarWidget(
+                            initials: myProfile.initials,
+                            color: myProfile.avatarColor,
+                            emoji: myProfile.avatarEmoji,
+                            imagePath: myProfile.avatarImagePath,
+                            size: 56,
+                            hasStory: false,
+                            hasUnviewedStory: false,
                           ),
-                        ).then((story) {
-                          if (story is StoryItem) {
-                            GossipRouter.instance.sendStory(
-                              storyId: story.id,
-                              authorId: story.authorId,
-                              text: story.text,
-                              bgColor: story.bgColor,
-                            );
-                          }
-                        });
-                      },
-                    ),
+                          showAddBadge: true,
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              slideRoute(
+                                StoryCreatorScreen(
+                                    authorId: myProfile.publicKeyHex),
+                              ),
+                            ).then((story) {
+                              if (story is StoryItem) {
+                                GossipRouter.instance.sendStory(
+                                  storyId: story.id,
+                                  authorId: story.authorId,
+                                  text: story.text,
+                                  bgColor: story.bgColor,
+                                );
+                              }
+                            });
+                          },
+                        ),
 
-                  // ── Моя история (только когда есть активные) ────
-                  if (myProfile != null &&
-                      StoryService.instance.hasActiveStory(myProfile.publicKeyHex))
-                    _StoryAvatar(
-                      label: 'Моя история',
-                      avatar: AvatarWidget(
-                        initials: myProfile.initials,
-                        color: myProfile.avatarColor,
-                        emoji: myProfile.avatarEmoji,
-                        imagePath: myProfile.avatarImagePath,
-                        size: 56,
-                        hasStory: true,
-                        hasUnviewedStory: false,
-                      ),
-                      onTap: () {
-                        final existing = StoryService.instance
-                            .storiesFor(myProfile.publicKeyHex);
-                        if (existing.isNotEmpty) {
-                          Navigator.push(
+                      // ── Моя история (только когда есть активные) ────
+                      if (myProfile != null &&
+                          StoryService.instance.hasActiveStory(myProfile.publicKeyHex))
+                        _StoryAvatar(
+                          label: 'Моя история',
+                          avatar: AvatarWidget(
+                            initials: myProfile.initials,
+                            color: myProfile.avatarColor,
+                            emoji: myProfile.avatarEmoji,
+                            imagePath: myProfile.avatarImagePath,
+                            size: 56,
+                            hasStory: true,
+                            hasUnviewedStory: false,
+                          ),
+                          onTap: () {
+                            final existing = StoryService.instance
+                                .storiesFor(myProfile.publicKeyHex);
+                            if (existing.isNotEmpty) {
+                              Navigator.push(
+                                context,
+                                slideRoute(
+                                  StoryViewerScreen(
+                                    authorId: myProfile.publicKeyHex,
+                                    authorName: 'Я',
+                                    stories: existing,
+                                  ),
+                                ),
+                              );
+                            }
+                          },
+                        ),
+
+                      // Stories from contacts — exclude own key to avoid duplicate
+                      ...activeAuthors
+                          .where((id) => id != ownKey)
+                          .map((authorId) {
+                        final chatItem = chatItems
+                            .where((c) => c.type == _ChatItemType.personal)
+                            .cast<_ChatItem?>()
+                            .firstWhere((c) => c?.peerId == authorId, orElse: () => null);
+                        final name = chatItem?.nickname ??
+                            authorId.substring(0, authorId.length.clamp(0, 8));
+                        final stories = StoryService.instance.storiesFor(authorId);
+                        return _StoryAvatar(
+                          label: name,
+                          avatar: AvatarWidget(
+                            initials: name.isNotEmpty ? name[0].toUpperCase() : '?',
+                            color: chatItem?.avatarColor ?? 0xFF607D8B,
+                            emoji: chatItem?.avatarEmoji ?? '',
+                            imagePath: chatItem?.avatarImagePath,
+                            size: 56,
+                            hasStory: true,
+                            hasUnviewedStory:
+                                StoryService.instance.hasUnviewedStory(authorId),
+                          ),
+                          onTap: () => Navigator.push(
                             context,
                             slideRoute(
                               StoryViewerScreen(
-                                authorId: myProfile.publicKeyHex,
-                                authorName: 'Я',
-                                stories: existing,
+                                authorId: authorId,
+                                authorName: name,
+                                stories: stories,
                               ),
                             ),
-                          );
-                        }
-                      },
-                    ),
-
-                  // Stories from peers — exclude own key to avoid duplicate
-                  ...activeAuthors
-                      .where((id) => id != ownKey)
-                      .map((authorId) {
-                    final chatItem = chatItems
-                        .cast<_ChatItem?>()
-                        .firstWhere((c) => c?.peerId == authorId, orElse: () => null);
-                    final name = chatItem?.nickname ??
-                        authorId.substring(0, authorId.length.clamp(0, 8));
-                    final stories = StoryService.instance.storiesFor(authorId);
-                    return _StoryAvatar(
-                      label: name,
-                      avatar: AvatarWidget(
-                        initials: name.isNotEmpty ? name[0].toUpperCase() : '?',
-                        color: chatItem?.avatarColor ?? 0xFF607D8B,
-                        emoji: chatItem?.avatarEmoji ?? '',
-                        imagePath: chatItem?.avatarImagePath,
-                        size: 56,
-                        hasStory: true,
-                        hasUnviewedStory:
-                            StoryService.instance.hasUnviewedStory(authorId),
-                      ),
-                      onTap: () => Navigator.push(
-                        context,
-                        slideRoute(
-                          StoryViewerScreen(
-                            authorId: authorId,
-                            authorName: name,
-                            stories: stories,
                           ),
-                        ),
-                      ),
-                    );
-                  }),
-                ],
-              ),
+                        );
+                      }),
+                    ],
+                  ),
+                );
+              },
             );
           },
         );
@@ -1632,7 +1649,7 @@ class _PendingDeviceTile extends StatelessWidget {
       GossipRouter.instance.broadcastProfile(
         id: profile.publicKeyHex,
         nick: profile.nickname,
-        username: profile.username ?? '',
+        username: profile.username,
         color: profile.avatarColor,
         emoji: profile.avatarEmoji,
         x25519Key: CryptoService.instance.x25519PublicKeyBase64,

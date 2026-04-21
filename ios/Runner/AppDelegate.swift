@@ -105,6 +105,34 @@ struct RlinkActivityAttributes: ActivityAttributes {
         // Register native video crop channel
         VideoCropPlugin.register(with: m)
 
+        let appIconChannel = FlutterMethodChannel(name: "com.rendergames.rlink/app_icon", binaryMessenger: m)
+        appIconChannel.setMethodCallHandler { call, result in
+            guard call.method == "setIcon" else {
+                result(FlutterMethodNotImplemented)
+                return
+            }
+            let args = call.arguments as? [String: Any]
+            let variant = args?["variant"] as? String ?? "default"
+            guard UIApplication.shared.supportsAlternateIcons else {
+                result(nil)
+                return
+            }
+            let iconName: String?
+            switch variant {
+            case "mono": iconName = "RlinkMono"
+            case "mirror": iconName = "RlinkMirror"
+            case "ai": iconName = "RlinkAi"
+            default: iconName = nil
+            }
+            UIApplication.shared.setAlternateIconName(iconName) { err in
+                if let e = err {
+                    result(FlutterError(code: "ICON", message: e.localizedDescription, details: nil))
+                } else {
+                    result(nil)
+                }
+            }
+        }
+
         let method = FlutterMethodChannel(name: "com.rendergames.rlink/ble", binaryMessenger: m)
         method.setMethodCallHandler { [weak self] call, result in
             guard let self = self else { return }
@@ -135,6 +163,11 @@ struct RlinkActivityAttributes: ActivityAttributes {
                 result(nil)
             case "stopLiveActivity":
                 self.stopLiveActivity()
+                result(nil)
+            case "clearApplicationBadge":
+                DispatchQueue.main.async {
+                    UIApplication.shared.applicationIconBadgeNumber = 0
+                }
                 result(nil)
             case "showNotification":
                 if let a = call.arguments as? [String: Any] {

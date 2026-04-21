@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import '../../models/channel.dart';
 import '../../services/app_settings.dart';
 import '../../services/channel_service.dart';
-import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 
@@ -224,7 +223,8 @@ class _AdminScreenState extends State<AdminScreen>
                     final q = _query;
                     return c.name.toLowerCase().contains(q) ||
                         (c.description ?? '').toLowerCase().contains(q) ||
-                        c.adminId.toLowerCase().contains(q);
+                        c.adminId.toLowerCase().contains(q) ||
+                        c.universalCode.toLowerCase().contains(q);
                   }).toList();
 
             if (filtered.isEmpty) {
@@ -320,7 +320,9 @@ class _AdminScreenState extends State<AdminScreen>
       builder: (ctx) => AlertDialog(
         title: const Text('Удалить канал?'),
         content: Text(
-            'Канал "${ch.name}" будет удалён у всех пользователей сети. Действие необратимо.'),
+            'Канал "${ch.name}" будет удалён у всех по уникальному коду '
+            '${ch.universalCode.isNotEmpty ? ch.universalCode : ch.id.substring(0, 8)}… '
+            '(не по имени). Действие необратимо.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -337,8 +339,11 @@ class _AdminScreenState extends State<AdminScreen>
     if (confirm != true) return;
 
     final myKey = CryptoService.instance.publicKeyHex;
-    await GossipRouter.instance
-        .sendChannelAdminDelete(channelId: ch.id, byAdmin: myKey);
+    await GossipRouter.instance.sendChannelAdminDelete(
+      channelId: ch.id,
+      byAdmin: myKey,
+      universalCode: ch.universalCode,
+    );
     await ChannelService.instance.deleteChannel(ch.id);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -393,10 +398,11 @@ class _AdminScreenState extends State<AdminScreen>
             child: const Text('Отмена'),
           ),
           FilledButton(
-            onPressed: () {
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
               final oldHash = sha256Hex(oldCtrl.text);
               if (oldHash != AppSettings.instance.adminPasswordHash) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                messenger.showSnackBar(
                   const SnackBar(
                     content: Text('Неверный текущий пароль'),
                     backgroundColor: Colors.red,
@@ -406,7 +412,7 @@ class _AdminScreenState extends State<AdminScreen>
               }
               if (newCtrl.text.isEmpty) return;
               if (newCtrl.text != confirmCtrl.text) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                messenger.showSnackBar(
                   const SnackBar(
                     content: Text('Пароли не совпадают'),
                     backgroundColor: Colors.red,
@@ -415,31 +421,24 @@ class _AdminScreenState extends State<AdminScreen>
                 return;
               }
               final newHash = sha256Hex(newCtrl.text);
-              AppSettings.instance.setAdminPasswordHash(newHash);
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Пароль изменён — синхронизируется')),
+              final rev = DateTime.now().millisecondsSinceEpoch;
+              final inner = jsonEncode({'hash': newHash, 'rev': rev});
+              final sealed =
+                  await CryptoService.instance.sealAdminPanelSync(inner);
+              await AppSettings.instance
+                  .completeAdminPasswordRollout(newHash, rev, sealed);
+              await GossipRouter.instance.sendAdminConfigSecure(
+                adminPasswordHash: newHash,
+                revision: rev,
               );
-              // Broadcast new password hash to all contacts via relay
-              () async {
-                try {
-                  final myKey = CryptoService.instance.publicKeyHex;
-                  if (myKey.isEmpty) return;
-                  final contacts = await ChatStorageService.instance.getContacts();
-                  for (final c in contacts) {
-                    try {
-                      await GossipRouter.instance.sendAdminConfig(
-                        adminPasswordHash: newHash,
-                        fromId: myKey,
-                        recipientId: c.publicKeyHex,
-                      );
-                    } catch (_) {}
-                  }
-                  debugPrint('[Admin] Broadcasted new password hash to ${contacts.length} contacts');
-                } catch (e) {
-                  debugPrint('[Admin] Password broadcast failed: $e');
-                }
-              }();
+              if (ctx.mounted) Navigator.pop(ctx);
+              messenger.showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    'Пароль изменён — зашифрованная синхронизация с вашими устройствами',
+                  ),
+                ),
+              );
             },
             child: const Text('Сохранить'),
           ),
@@ -590,6 +589,15 @@ class _ChannelAdminTile extends StatelessWidget {
                       Text('${channel.subscriberIds.length} подписчиков',
                           style: TextStyle(
                               fontSize: 12, color: cs.onSurfaceVariant)),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Код: ${channel.universalCode.isNotEmpty ? channel.universalCode : "—"} · id ${channel.id.length >= 8 ? channel.id.substring(0, 8) : channel.id}…',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: cs.onSurfaceVariant.withValues(alpha: 0.85),
+                          fontFamily: 'monospace',
+                        ),
+                      ),
                     ],
                   ),
                 ),

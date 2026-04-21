@@ -51,7 +51,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   /// null = valid, otherwise error message
   String? get _usernameError {
     final u = _usernameController.text.trim();
-    if (u.isEmpty) return null; // optional
+    if (u.isEmpty) return null;
     if (u.length < 3) return 'Минимум 3 символа';
     if (!RegExp(r'^[a-zA-Z0-9_]+$').hasMatch(u)) {
       return 'Только буквы, цифры и _';
@@ -71,7 +71,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   Future<void> _create() async {
     final nick     = _nickController.text.trim();
-    final username = _usernameController.text.trim();
+    var username = _usernameController.text.trim().toLowerCase().replaceAll(
+        RegExp(r'[^a-z0-9_.]'), '');
 
     if (nick.length < 2) {
       _showSnack('Имя должно быть не короче 2 символов');
@@ -85,6 +86,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       _showSnack(_usernameError!);
       return;
     }
+    if (username.length < 3) {
+      final k = CryptoService.instance.publicKeyHex;
+      username = 'user_${k.length >= 10 ? k.substring(0, 10) : k}';
+    }
 
     setState(() => _loading = true);
     try {
@@ -94,7 +99,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       );
       await ProfileService.instance.updateProfile(
         nickname: nick,
-        username: username.isEmpty ? null : username,
+        username: username,
         avatarColor: _selectedColor,
         avatarEmoji: _selectedEmoji,
         avatarImagePath: _selectedImagePath,
@@ -147,7 +152,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       await GossipRouter.instance.broadcastProfile(
         id: profile.publicKeyHex,
         nick: profile.nickname,
-        username: profile.username ?? '',
+        username: profile.username,
         color: profile.avatarColor,
         emoji: profile.avatarEmoji,
         x25519Key: CryptoService.instance.x25519PublicKeyBase64,
@@ -353,7 +358,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     color: cs.onSurface,
                   ),
                   decoration: InputDecoration(
-                    hintText: 'Юзернейм (необязательно)',
+                    hintText:
+                        'Юзернейм (мин. 3 символа; пусто — сгенерируем сами)',
                     hintStyle: TextStyle(color: cs.onSurfaceVariant),
                     prefixIcon: Icon(Icons.alternate_email,
                         size: 20, color: cs.onSurfaceVariant),

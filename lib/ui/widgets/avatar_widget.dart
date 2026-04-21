@@ -3,7 +3,9 @@ import 'dart:math' as math;
 
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as epf;
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
+import '../../services/app_settings.dart';
 import '../../services/image_service.dart';
 
 class AvatarWidget extends StatelessWidget {
@@ -137,29 +139,33 @@ class AvatarEmojiPicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final useNoto =
+        Platform.isAndroid && AppSettings.instance.useIosStyleEmoji;
     return SizedBox(
       height: 280,
       child: epf.EmojiPicker(
         onEmojiSelected: (_, emoji) => onSelected(emoji.emoji),
-        config: const epf.Config(
+        config: epf.Config(
           height: 280,
-          checkPlatformCompatibility: true,
-          emojiViewConfig: epf.EmojiViewConfig(
+          checkPlatformCompatibility: !useNoto,
+          emojiTextStyle:
+              useNoto ? GoogleFonts.notoColorEmoji(fontSize: 26) : null,
+          emojiViewConfig: const epf.EmojiViewConfig(
             backgroundColor: Color(0xFF1A1A1A),
             columns: 8,
             emojiSizeMax: 26,
           ),
-          categoryViewConfig: epf.CategoryViewConfig(
+          categoryViewConfig: const epf.CategoryViewConfig(
             backgroundColor: Color(0xFF1A1A1A),
             iconColorSelected: Color(0xFF1DB954),
             indicatorColor: Color(0xFF1DB954),
             iconColor: Colors.grey,
           ),
-          bottomActionBarConfig: epf.BottomActionBarConfig(
+          bottomActionBarConfig: const epf.BottomActionBarConfig(
             backgroundColor: Color(0xFF1A1A1A),
             buttonIconColor: Colors.grey,
           ),
-          searchViewConfig: epf.SearchViewConfig(
+          searchViewConfig: const epf.SearchViewConfig(
             backgroundColor: Color(0xFF1A1A1A),
             buttonIconColor: Colors.grey,
           ),

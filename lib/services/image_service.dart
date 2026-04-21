@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 import 'package:video_compress/video_compress.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
@@ -84,6 +85,18 @@ class ImageService {
     return path;
   }
 
+  /// Сбрасывает кэш [Image.file] / [FileImage] для пути из БД (смена аватар/баннер канала).
+  void evictFileImageCache(String? storedPath) {
+    if (storedPath == null || storedPath.isEmpty) return;
+    try {
+      final r = resolveStoredPath(storedPath);
+      if (r == null) return;
+      final f = File(r);
+      if (!f.existsSync()) return;
+      PaintingBinding.instance.imageCache.evict(FileImage(f));
+    } catch (_) {}
+  }
+
   // ── Сохранение и сжатие ──────────────────────────────────────
 
   /// Сжимает изображение и сохраняет в <documents>/images/.
@@ -119,6 +132,17 @@ class ImageService {
     return result.path;
   }
 
+  /// Фото из галереи: GIF копируем без перекодирования (анимация сохраняется).
+  Future<String> saveChatImageFromPicker(String sourcePath) async {
+    if (sourcePath.toLowerCase().endsWith('.gif')) {
+      final dir = await _imagesDir();
+      final out = p.join(dir.path, '${_uuid.v4()}.gif');
+      await File(sourcePath).copy(out);
+      return out;
+    }
+    return compressAndSave(sourcePath);
+  }
+
   /// Сохраняет аватар контакта по его publicKeyHex (перезаписывает).
   Future<String> saveContactAvatar(String publicKeyHex, Uint8List data) async {
     final dir = await _imagesDir();
@@ -137,6 +161,38 @@ class ImageService {
     final path = p.join(dir.path, name);
     await File(path).writeAsBytes(data);
     return path;
+  }
+
+  String _audioExtFromMagic(Uint8List data) {
+    if (data.length >= 3 && data[0] == 0x49 && data[1] == 0x44 && data[2] == 0x33) {
+      return 'mp3';
+    }
+    if (data.length >= 12) {
+      final f = String.fromCharCodes(data.sublist(4, 8));
+      if (f == 'ftyp') return 'm4a';
+    }
+    return 'mp3';
+  }
+
+  /// Сохраняет принятую по сети «музыку профиля» контакта.
+  Future<String> saveProfileMusic(String publicKeyHex, Uint8List data) async {
+    final dir = await _imagesDir();
+    final key = publicKeyHex.length >= 16 ? publicKeyHex.substring(0, 16) : publicKeyHex;
+    final ext = _audioExtFromMagic(data);
+    final name = 'profile_music_$key.$ext';
+    final path = p.join(dir.path, name);
+    await File(path).writeAsBytes(data);
+    return path;
+  }
+
+  /// Сборка BLE-чанков для msgId `profile_music_...`.
+  Future<String?> assembleAndSaveProfileMusic(
+      String msgId, String senderPublicKey) async {
+    final assembly = _assemblies.remove(msgId);
+    if (assembly == null || !assembly.isComplete) return null;
+    final raw = assembly.assemble();
+    final data = decompress(raw);
+    return saveProfileMusic(senderPublicKey, data);
   }
 
   /// Saves a received video story to persistent storage.
@@ -278,7 +334,8 @@ class ImageService {
       bool isStory = false,
       String? fileName,
       String? storyId,
-      String fromId = ''}) {
+      String fromId = '',
+      bool viewOnce = false}) {
     // Skip if this msgId was already fully assembled via another delivery path
     if (_completedMsgIds.contains(msgId)) return;
     _assemblies.putIfAbsent(
@@ -294,6 +351,7 @@ class ImageService {
         fileName: fileName,
         storyId: storyId,
         fromId: fromId,
+        viewOnce: viewOnce,
       ),
     );
   }
@@ -304,6 +362,8 @@ class ImageService {
   bool isSquareAssembly(String msgId) => _assemblies[msgId]?.isSquare ?? false;
   bool isFileAssembly(String msgId) => _assemblies[msgId]?.isFile ?? false;
   bool isStoryAssembly(String msgId) => _assemblies[msgId]?.isStory ?? false;
+  bool isViewOnceAssembly(String msgId) =>
+      _assemblies[msgId]?.viewOnce ?? false;
   String? assemblyStoryId(String msgId) => _assemblies[msgId]?.storyId;
   String? assemblyFileName(String msgId) => _assemblies[msgId]?.fileName;
   String assemblyFromId(String msgId) => _assemblies[msgId]?.fromId ?? '';
@@ -460,6 +520,7 @@ class _ImageAssembly {
   final bool isSquare;
   final bool isFile;
   final bool isStory;
+  final bool viewOnce;
   final String? fileName;
   final String? storyId;
   final String fromId;
@@ -474,6 +535,7 @@ class _ImageAssembly {
     this.isSquare = false,
     this.isFile = false,
     this.isStory = false,
+    this.viewOnce = false,
     this.fileName,
     this.storyId,
     this.fromId = '',

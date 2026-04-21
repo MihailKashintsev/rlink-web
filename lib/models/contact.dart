@@ -12,6 +12,8 @@ class Contact {
   final DateTime? lastSeen;
   final List<String> tags;           // теги из профиля контакта
   final String? bannerImagePath;     // баннер профиля контакта
+  /// Локальный путь к треку «музыка в профиле» (после приёма с ретранслятора/BLE).
+  final String? profileMusicPath;
 
   const Contact({
     required this.publicKeyHex,
@@ -25,6 +27,7 @@ class Contact {
     this.lastSeen,
     this.tags = const [],
     this.bannerImagePath,
+    this.profileMusicPath,
   });
 
   String get initials {
@@ -44,6 +47,7 @@ class Contact {
     String? x25519Key,
     List<String>? tags,
     String? bannerImagePath,
+    String? profileMusicPath,
   }) =>
       Contact(
         publicKeyHex: publicKeyHex,
@@ -57,6 +61,7 @@ class Contact {
         lastSeen: lastSeen ?? this.lastSeen,
         tags: tags ?? this.tags,
         bannerImagePath: bannerImagePath ?? this.bannerImagePath,
+        profileMusicPath: profileMusicPath ?? this.profileMusicPath,
       );
 
   Map<String, dynamic> toMap() => {
@@ -71,6 +76,7 @@ class Contact {
         'last_seen': lastSeen?.millisecondsSinceEpoch,
         'tags': tags.isEmpty ? null : tags.join(','),
         'banner_img_path': bannerImagePath,
+        'profile_music_path': profileMusicPath,
       };
 
   factory Contact.fromMap(Map<String, dynamic> m) => Contact(
@@ -94,5 +100,7 @@ class Contact {
             const [],
         bannerImagePath: ImageService.instance.resolveStoredPath(
             m['banner_img_path'] as String?),
+        profileMusicPath: ImageService.instance.resolveStoredPath(
+            m['profile_music_path'] as String?),
       );
 }

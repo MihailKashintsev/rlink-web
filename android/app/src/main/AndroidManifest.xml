@@ -48,10 +48,13 @@
     <!-- BLE feature declaration -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
+    <!-- allowBackup: при обычном обновлении APK (тот же package + подпись + больший versionCode)
+         данные в /data/data/... сохраняются; удалять приложение не нужно. -->
     <application
         android:label="Rlink"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:requestLegacyExternalStorage="true">
 
@@ -68,12 +71,53 @@
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
+        </activity>
 
+        <!-- Смена иконки на рабочем столе (как в Telegram): только один alias активен. -->
+        <activity-alias
+            android:name=".LauncherIconDefault"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+        <activity-alias
+            android:name=".LauncherIconMono"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_mono"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".LauncherIconMirror"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_mirror"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".LauncherIconAi"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_ai"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <!-- FileProvider для установки APK на Android 7+ -->
         <provider
@@ -96,6 +140,10 @@
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="content" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
         </intent>
         <intent>
             <action android:name="android.intent.action.INSTALL_PACKAGE" />

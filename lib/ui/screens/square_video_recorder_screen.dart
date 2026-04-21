@@ -45,6 +45,9 @@ class _VideoOverlayState extends State<_VideoOverlay>
   bool _isSwitching = false;
   String? _initError;
   bool _needSettings = false; // true when permission is permanently denied
+  double _zoom = 1.0;
+  double _scaleStartZoom = 1.0;
+  double _maxZoomLevel = 1.0;
 
   late AnimationController _pulseController;
 
@@ -140,6 +143,16 @@ class _VideoOverlayState extends State<_VideoOverlay>
       imageFormatGroup: ImageFormatGroup.jpeg,
     );
     await controller.initialize();
+    try {
+      await controller.setFocusMode(FocusMode.auto);
+    } catch (_) {}
+    _zoom = 1.0;
+    try {
+      _maxZoomLevel = await controller.getMaxZoomLevel();
+      await controller.setZoomLevel(_zoom);
+    } catch (_) {
+      _maxZoomLevel = 1.0;
+    }
     if (!mounted) {
       controller.dispose();
       return;
@@ -158,7 +171,19 @@ class _VideoOverlayState extends State<_VideoOverlay>
   }
 
   Future<void> _switchCamera() async {
-    if (_cameras.length < 2 || _isRecording || _isSwitching) return;
+    if (_cameras.length < 2 || _isSwitching) return;
+    if (_isRecording) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Платформа записывает одним клипом — остановите запись, чтобы сменить камеру'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
     setState(() => _isSwitching = true);
     final next = (_selectedCamera + 1) % _cameras.length;
     try {
@@ -278,7 +303,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
                             ),
                           ),
                         // Camera switch button (top right)
-                        if (_cameras.length > 1 && !_isRecording)
+                        if (_cameras.length > 1)
                           Positioned(
                             top: 10,
                             right: 10,
@@ -501,14 +526,45 @@ class _VideoOverlayState extends State<_VideoOverlay>
     // Cover-crop: fill the square without stretching.
     // FittedBox.cover scales uniformly so the preview fills the square,
     // ClipRect trims overflow — no distortion on any aspect ratio.
-    return FittedBox(
-      fit: BoxFit.cover,
-      clipBehavior: Clip.hardEdge,
-      child: SizedBox(
-        width: ctrl.value.previewSize!.height, // preview is rotated in portrait
-        height: ctrl.value.previewSize!.width,
-        child: CameraPreview(ctrl),
-      ),
+    return LayoutBuilder(
+      builder: (ctx, constraints) {
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (d) async {
+            try {
+              final box = ctx.findRenderObject() as RenderBox?;
+              if (box == null) return;
+              final local = box.globalToLocal(d.globalPosition);
+              final nx = (local.dx / box.size.width).clamp(0.0, 1.0);
+              final ny = (local.dy / box.size.height).clamp(0.0, 1.0);
+              await ctrl.setFocusPoint(Offset(nx, ny));
+              await ctrl.setExposurePoint(Offset(nx, ny));
+            } catch (_) {}
+          },
+          onScaleStart: (_) {
+            _scaleStartZoom = _zoom;
+          },
+          onScaleUpdate: (details) async {
+            try {
+              final maxZ = _maxZoomLevel;
+              if (maxZ <= 1.01) return;
+              final next =
+                  (_scaleStartZoom * details.scale).clamp(1.0, maxZ);
+              await ctrl.setZoomLevel(next);
+              if (mounted) setState(() => _zoom = next);
+            } catch (_) {}
+          },
+          child: FittedBox(
+            fit: BoxFit.cover,
+            clipBehavior: Clip.hardEdge,
+            child: SizedBox(
+              width: ctrl.value.previewSize!.height,
+              height: ctrl.value.previewSize!.width,
+              child: CameraPreview(ctrl),
+            ),
+          ),
+        );
+      },
     );
   }
 }

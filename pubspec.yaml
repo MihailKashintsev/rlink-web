@@ -1,6 +1,8 @@
 name: rlink
 description: Rlink — Bluetooth mesh messenger
-version: 0.0.2+2
+# После смены version: сделайте `flutter build ios --config-only` и при необходимости
+# `flutter build macos --config-only`, иначе PackageInfo / Xcode могут тянуть старый номер из Generated.xcconfig.
+version: 0.0.5+7
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -49,7 +51,7 @@ dependencies:
   uuid: ^4.4.0
 
   # Fonts
-  google_fonts: ^6.2.1
+  google_fonts: ^8.0.2
 
   # Emoji picker (full unicode set)
   emoji_picker_flutter: ^4.4.0
@@ -93,6 +95,9 @@ dependencies:
   # WebSocket for relay server
   web_socket_channel: ^3.0.1
 
+  # Local notifications (personal/group/channel, even in background)
+  flutter_local_notifications: ^17.2.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -101,6 +106,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    - assets/branding/rlink_mark.png
+    - assets/branding/rlink_icon_ai.png
 
 flutter_launcher_icons:
   android: true

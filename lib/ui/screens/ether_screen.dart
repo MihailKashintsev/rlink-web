@@ -616,6 +616,7 @@ class _EtherInputState extends State<_EtherInput>
     with SingleTickerProviderStateMixin {
   int _len = 0;
   late AnimationController _sendPulse;
+  final _focusNode = FocusNode();
 
   @override
   void initState() {
@@ -633,6 +634,7 @@ class _EtherInputState extends State<_EtherInput>
   @override
   void dispose() {
     _sendPulse.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
@@ -704,16 +706,6 @@ class _EtherInputState extends State<_EtherInput>
             ),
             const SizedBox(height: 8),
             Row(children: [
-              // Кнопка скрытия клавиатуры
-              GestureDetector(
-                onTap: () => FocusScope.of(context).unfocus(),
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: Icon(Icons.keyboard_hide_outlined,
-                      size: 22,
-                      color: cs.onSurface.withValues(alpha: 0.4)),
-                ),
-              ),
               Expanded(
                 child: Container(
                   decoration: BoxDecoration(
@@ -722,6 +714,8 @@ class _EtherInputState extends State<_EtherInput>
                   ),
                   child: TextField(
                     controller: widget.controller,
+                    focusNode: _focusNode,
+                    onTapOutside: (_) => _focusNode.unfocus(),
                     maxLines: 3,
                     minLines: 1,
                     style: const TextStyle(fontSize: 14),

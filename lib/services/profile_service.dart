@@ -63,6 +63,7 @@ class ProfileService {
             avatarImagePath: _profile!.avatarImagePath,
             tags: _profile!.tags,
             bannerImagePath: _profile!.bannerImagePath,
+            profileMusicPath: _profile!.profileMusicPath,
           );
           await _write(_profile!.encode());
         }
@@ -109,6 +110,7 @@ class ProfileService {
     String? avatarImagePath,
     List<String>? tags,
     String? bannerImagePath,
+    String? profileMusicPath,
   }) async {
     if (_profile == null) throw StateError('No profile');
     // Always use the current CryptoService key to prevent divergence
@@ -122,6 +124,7 @@ class ProfileService {
       avatarImagePath: avatarImagePath ?? _profile!.avatarImagePath,
       tags: tags ?? _profile!.tags,
       bannerImagePath: bannerImagePath ?? _profile!.bannerImagePath,
+      profileMusicPath: profileMusicPath ?? _profile!.profileMusicPath,
     );
     await _write(updated.encode());
     _profile = updated;

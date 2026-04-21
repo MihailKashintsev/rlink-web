@@ -1,15 +1,19 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
-import '../../main.dart' show broadcastMyAvatar, broadcastMyBanner, sendProfileToAllContacts;
+import '../../main.dart'
+    show broadcastMyAvatar, broadcastMyBanner, broadcastMyProfileMusic, sendProfileToAllContacts;
 import '../widgets/avatar_widget.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -34,6 +38,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late String _selectedEmoji;
   String? _selectedImagePath;
   String? _bannerImagePath;
+  String? _profileMusicPath;
   late List<String> _tags;
   bool _editing = false;
   bool _saving = false;
@@ -52,6 +57,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _selectedEmoji = p.avatarEmoji;
     _selectedImagePath = p.avatarImagePath;
     _bannerImagePath = p.bannerImagePath;
+    _profileMusicPath = p.profileMusicPath;
     _tags = List<String>.from(p.tags);
   }
 
@@ -74,6 +80,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
     setState(() => _bannerImagePath = path);
   }
+
+  Future<void> _pickProfileMusic() async {
+    final r = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+      allowMultiple: false,
+    );
+    if (r == null || r.files.isEmpty) return;
+    final src = r.files.single.path;
+    if (src == null) return;
+    final dir = await getApplicationDocumentsDirectory();
+    final sub = Directory(p.join(dir.path, 'profile_audio'))..createSync(recursive: true);
+    final ext = p.extension(src).isEmpty ? '.m4a' : p.extension(src);
+    final dest = p.join(sub.path, 'me_profile${ext}');
+    await File(src).copy(dest);
+    setState(() => _profileMusicPath = dest);
+  }
+
+  void _clearProfileMusic() => setState(() => _profileMusicPath = null);
 
   void _addTag() {
     final tag = _tagController.text.trim();
@@ -98,6 +122,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       final prevProfile = ProfileService.instance.profile!;
       final prevAvatar = prevProfile.avatarImagePath;
       final prevBanner = prevProfile.bannerImagePath;
+      final prevMusic = prevProfile.profileMusicPath;
 
       final rawUsername = _usernameController.text.trim().toLowerCase()
           .replaceAll(RegExp(r'[^a-z0-9_.]'), '');
@@ -109,6 +134,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         avatarImagePath: _selectedImagePath,
         tags: _tags,
         bannerImagePath: _bannerImagePath,
+        profileMusicPath: _profileMusicPath,
       );
       setState(() {
         _editing = false;
@@ -136,6 +162,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (updated.bannerImagePath != null &&
           updated.bannerImagePath != prevBanner) {
         unawaited(broadcastMyBanner());
+      }
+      if (updated.profileMusicPath != prevMusic) {
+        unawaited(broadcastMyProfileMusic());
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -369,6 +398,48 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       : null,
                 ),
           const SizedBox(height: 12),
+
+          // Музыка в профиле (контакты получат файл при связи)
+          Builder(builder: (context) {
+            final rp = _profileMusicPath == null
+                ? null
+                : (ImageService.instance.resolveStoredPath(_profileMusicPath) ??
+                    _profileMusicPath);
+            final hasMusic = rp != null && File(rp).existsSync();
+            final sub = hasMusic
+                ? p.basename(rp)
+                : (_editing
+                    ? 'Выберите аудиофайл — контакты смогут загрузить и послушать, когда вы в сети'
+                    : 'Не выбрано');
+            return ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.library_music_outlined),
+            title: const Text('Музыка в профиле'),
+            subtitle: Text(
+              sub,
+              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+            ),
+            trailing: _editing
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_profileMusicPath != null)
+                        IconButton(
+                          icon: const Icon(Icons.clear),
+                          tooltip: 'Убрать',
+                          onPressed: _clearProfileMusic,
+                        ),
+                      IconButton(
+                        icon: const Icon(Icons.audio_file_outlined),
+                        tooltip: 'Выбрать файл',
+                        onPressed: _pickProfileMusic,
+                      ),
+                    ],
+                  )
+                : null,
+            );
+          }),
+          const SizedBox(height: 8),
 
           // Теги
           if (_editing) ...[

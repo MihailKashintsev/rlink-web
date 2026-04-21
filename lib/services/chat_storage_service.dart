@@ -7,14 +7,53 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../models/chat_message.dart';
+import '../utils/message_preview_formatter.dart';
 import '../models/contact.dart';
 import 'image_service.dart';
+
+Future<void> _backfillDmReadCursors(Database db) async {
+  final peers = await db.rawQuery(
+    'SELECT peer_id, MAX(timestamp) AS mt FROM messages GROUP BY peer_id',
+  );
+  for (final r in peers) {
+    final pid = r['peer_id'] as String;
+    final mt = r['mt'] as int;
+    final idRows = await db.rawQuery(
+      'SELECT id FROM messages WHERE peer_id = ? AND timestamp = ? '
+      'ORDER BY id DESC LIMIT 1',
+      [pid, mt],
+    );
+    final mid =
+        idRows.isNotEmpty ? (idRows.first['id'] as String?) ?? '' : '';
+    await db.insert(
+      'conversation_read_cursor',
+      {
+        'conv_key': 'dm:$pid',
+        'last_read_ts': mt,
+        'last_read_id': mid,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+}
+
+Future<void> _tryDeleteLocalMediaFile(String? path) async {
+  if (path == null || path.isEmpty) return;
+  final resolved = ImageService.instance.resolveStoredPath(path) ?? path;
+  try {
+    final f = File(resolved);
+    if (await f.exists()) await f.delete();
+  } catch (_) {}
+}
 
 class ChatStorageService {
   ChatStorageService._();
   static final ChatStorageService instance = ChatStorageService._();
 
   Database? _db;
+
+  /// Bumps when DM read cursors change — chat list refreshes unread badges.
+  final readStateVersion = ValueNotifier<int>(0);
 
   Future<void> close() async {
     await _db?.close();
@@ -42,7 +81,7 @@ class ChatStorageService {
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 11,
+      version: 16,
       onCreate: (db, v) async {
         try { await db.rawQuery('PRAGMA journal_mode = WAL'); } catch (_) {}
         await db.execute('''
@@ -57,7 +96,8 @@ class ChatStorageService {
             added_at          INTEGER NOT NULL,
             last_seen         INTEGER,
             tags              TEXT,
-            banner_img_path   TEXT
+            banner_img_path   TEXT,
+            profile_music_path TEXT
           )
         ''');
         await db.execute('''
@@ -77,11 +117,44 @@ class ChatStorageService {
             is_outgoing          INTEGER NOT NULL,
             timestamp            INTEGER NOT NULL,
             status               INTEGER NOT NULL DEFAULT 1,
-            reactions            TEXT
+            reactions            TEXT,
+            view_once            INTEGER NOT NULL DEFAULT 0,
+            view_once_opened     INTEGER NOT NULL DEFAULT 0,
+            forward_from_id      TEXT,
+            forward_from_nick    TEXT
           )
         ''');
         await db.execute(
             'CREATE INDEX idx_messages_peer ON messages(peer_id, timestamp)');
+        await db.execute('''
+          CREATE TABLE dm_chat_pins (
+            peer_id    TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            pinned_at  INTEGER NOT NULL,
+            PRIMARY KEY (peer_id, message_id)
+          )
+        ''');
+        await db.execute(
+            'CREATE INDEX idx_dm_pins_peer ON dm_chat_pins(peer_id, pinned_at)');
+        await db.execute('''
+          CREATE TABLE scheduled_dm (
+            id                   TEXT PRIMARY KEY,
+            peer_id              TEXT NOT NULL,
+            text                 TEXT NOT NULL,
+            reply_to_message_id  TEXT,
+            send_at_ms           INTEGER NOT NULL,
+            created_at           INTEGER NOT NULL
+          )
+        ''');
+        await db.execute(
+            'CREATE INDEX idx_sched_dm_at ON scheduled_dm(send_at_ms)');
+        await db.execute('''
+          CREATE TABLE conversation_read_cursor (
+            conv_key      TEXT PRIMARY KEY,
+            last_read_ts  INTEGER NOT NULL,
+            last_read_id  TEXT NOT NULL DEFAULT ''
+          )
+        ''');
       },
       onOpen: (db) async {
         try { await db.rawQuery('PRAGMA journal_mode = WAL'); } catch (_) {}
@@ -164,6 +237,67 @@ class ChatStorageService {
             await db.execute('ALTER TABLE contacts ADD COLUMN username TEXT');
           } catch (_) {}
         }
+        if (oldVersion < 12) {
+          try {
+            await db.execute(
+                'ALTER TABLE messages ADD COLUMN view_once INTEGER NOT NULL DEFAULT 0');
+          } catch (_) {}
+          try {
+            await db.execute(
+                'ALTER TABLE messages ADD COLUMN view_once_opened INTEGER NOT NULL DEFAULT 0');
+          } catch (_) {}
+        }
+        if (oldVersion < 13) {
+          await db.execute('''
+            CREATE TABLE scheduled_dm (
+              id                   TEXT PRIMARY KEY,
+              peer_id              TEXT NOT NULL,
+              text                 TEXT NOT NULL,
+              reply_to_message_id  TEXT,
+              send_at_ms           INTEGER NOT NULL,
+              created_at           INTEGER NOT NULL
+            )
+          ''');
+          await db.execute(
+              'CREATE INDEX idx_sched_dm_at ON scheduled_dm(send_at_ms)');
+        }
+        if (oldVersion < 14) {
+          try {
+            await db.execute(
+                'ALTER TABLE messages ADD COLUMN forward_from_id TEXT');
+          } catch (_) {}
+          try {
+            await db.execute(
+                'ALTER TABLE messages ADD COLUMN forward_from_nick TEXT');
+          } catch (_) {}
+          await db.execute('''
+            CREATE TABLE dm_chat_pins (
+              peer_id    TEXT NOT NULL,
+              message_id TEXT NOT NULL,
+              pinned_at  INTEGER NOT NULL,
+              PRIMARY KEY (peer_id, message_id)
+            )
+          ''');
+          await db.execute(
+              'CREATE INDEX idx_dm_pins_peer ON dm_chat_pins(peer_id, pinned_at)');
+        }
+        if (oldVersion < 15) {
+          try {
+            await db.execute(
+                'ALTER TABLE contacts ADD COLUMN profile_music_path TEXT',
+            );
+          } catch (_) {}
+        }
+        if (oldVersion < 16) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS conversation_read_cursor (
+              conv_key      TEXT PRIMARY KEY,
+              last_read_ts  INTEGER NOT NULL,
+              last_read_id  TEXT NOT NULL DEFAULT ''
+            )
+          ''');
+          await _backfillDmReadCursors(db);
+        }
       },
     );
     debugPrint('[RLINK][DB] Initialized');
@@ -214,6 +348,9 @@ class ChatStorageService {
         'avatar_img_path': contact.avatarImagePath,
         'x25519_key': contact.x25519Key,
         'last_seen': DateTime.now().millisecondsSinceEpoch,
+        'tags': contact.tags.isEmpty ? null : contact.tags.join(','),
+        'banner_img_path': contact.bannerImagePath,
+        'profile_music_path': contact.profileMusicPath,
       },
       where: 'id = ?',
       whereArgs: [contact.publicKeyHex],
@@ -255,8 +392,21 @@ class ChatStorageService {
     _contactsNotifier.value = await getContacts();
   }
 
+  Future<void> updateContactProfileMusic(String id, String musicPath) async {
+    await _db?.update(
+      'contacts',
+      {'profile_music_path': musicPath},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    _contactsNotifier.value = await getContacts();
+  }
+
   final _contactsNotifier = ValueNotifier<List<Contact>>([]);
   ValueNotifier<List<Contact>> get contactsNotifier => _contactsNotifier;
+
+  /// Увеличивается при изменении закреплений в личных чатах (UI плашки).
+  final pinsVersion = ValueNotifier<int>(0);
 
   Future<void> loadContacts() async {
     _contactsNotifier.value = await getContacts();
@@ -282,14 +432,66 @@ class ChatStorageService {
     _notifyMessages(peerId);
   }
 
+  Future<ChatMessage?> getMessageById(String messageId) async {
+    final rows = await _db?.query(
+      'messages',
+      where: 'id = ?',
+      whereArgs: [messageId],
+      limit: 1,
+    );
+    if (rows == null || rows.isEmpty) return null;
+    return ChatMessage.fromMap(rows.first);
+  }
+
+  // ── Отложенная отправка (личный чат) ───────────────────────────
+
+  Future<void> insertScheduledDm({
+    required String id,
+    required String peerId,
+    required String text,
+    String? replyToMessageId,
+    required int sendAtMs,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db?.insert('scheduled_dm', {
+      'id': id,
+      'peer_id': peerId,
+      'text': text,
+      'reply_to_message_id': replyToMessageId,
+      'send_at_ms': sendAtMs,
+      'created_at': now,
+    });
+  }
+
+  Future<List<ScheduledDmRow>> getDueScheduledMessages(int nowMs) async {
+    final rows = await _db?.query(
+      'scheduled_dm',
+      where: 'send_at_ms <= ?',
+      whereArgs: [nowMs],
+      orderBy: 'send_at_ms ASC',
+    );
+    if (rows == null) return const [];
+    return rows.map(ScheduledDmRow.fromMap).toList();
+  }
+
+  Future<void> deleteScheduledDm(String id) async {
+    await _db?.delete('scheduled_dm', where: 'id = ?', whereArgs: [id]);
+  }
+
   Future<void> deleteMessage(String messageId) async {
     final peerId = await _getPeerIdForMessage(messageId);
     if (peerId == null) return;
+    await _db?.delete(
+      'dm_chat_pins',
+      where: 'message_id = ?',
+      whereArgs: [messageId],
+    );
     await _db?.delete(
       'messages',
       where: 'id = ?',
       whereArgs: [messageId],
     );
+    pinsVersion.value++;
     _notifyMessages(peerId);
   }
 
@@ -303,6 +505,18 @@ class ChatStorageService {
     );
     if (rows == null || rows.isEmpty) return null;
     return rows.first['peer_id'] as String;
+  }
+
+  Future<void> markViewOnceOpened(String messageId) async {
+    final peerId = await _getPeerIdForMessage(messageId);
+    if (peerId == null) return;
+    await _db?.update(
+      'messages',
+      {'view_once_opened': 1},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _notifyMessages(peerId);
   }
 
   Future<void> updateMessageStatus(
@@ -382,9 +596,88 @@ class ChatStorageService {
     return rows.map(ChatMessage.fromMap).toList();
   }
 
+  /// Все исходящие сообщения, которые ещё не подтверждены ACK'ом (не delivered).
+  /// Используется для гарантированной доставки: сообщения могут быть отправлены,
+  /// но ACK мог не дойти, поэтому статус остаётся sent/sending/failed.
+  Future<List<ChatMessage>> getUndeliveredOutgoingMessages() async {
+    final deliveredIndex = MessageStatus.delivered.index;
+    final rows = await _db?.query(
+          'messages',
+          where: 'is_outgoing = 1 AND status != ?',
+          whereArgs: [deliveredIndex],
+          orderBy: 'timestamp ASC',
+        ) ??
+        [];
+    return rows.map(ChatMessage.fromMap).toList();
+  }
+
   Future<void> deleteChat(String peerId) async {
+    await _db?.delete('dm_chat_pins', where: 'peer_id = ?', whereArgs: [peerId]);
     await _db?.delete('messages', where: 'peer_id = ?', whereArgs: [peerId]);
+    await _db?.delete('conversation_read_cursor',
+        where: 'conv_key = ?', whereArgs: ['dm:$peerId']);
+    pinsVersion.value++;
+    readStateVersion.value++;
     _messagesNotifiers.remove(peerId);
+  }
+
+  /// Все личные диалоги (контакты и профиль не затрагиваются).
+  Future<void> deleteAllDirectMessages() async {
+    await _db?.delete('dm_chat_pins');
+    await _db?.delete('messages');
+    await _db?.delete('conversation_read_cursor',
+        where: "conv_key LIKE 'dm:%'");
+    pinsVersion.value++;
+    readStateVersion.value++;
+    for (final n in _messagesNotifiers.values) {
+      n.value = [];
+    }
+    _messagesNotifiers.clear();
+  }
+
+  /// Очистка личных чатов: либо полностью, либо только медиа у выбранных peer_id.
+  Future<void> clearDirectMessages({
+    required Set<String> peerIds,
+    required bool mediaOnly,
+  }) async {
+    if (_db == null || peerIds.isEmpty) return;
+    for (final pid in peerIds) {
+      if (mediaOnly) {
+        final rows = await _db!.query(
+          'messages',
+          columns: [
+            'image_path',
+            'video_path',
+            'voice_path',
+            'file_path',
+          ],
+          where: 'peer_id = ?',
+          whereArgs: [pid],
+        );
+        for (final r in rows) {
+          await _tryDeleteLocalMediaFile(r['image_path'] as String?);
+          await _tryDeleteLocalMediaFile(r['video_path'] as String?);
+          await _tryDeleteLocalMediaFile(r['voice_path'] as String?);
+          await _tryDeleteLocalMediaFile(r['file_path'] as String?);
+        }
+        await _db!.rawUpdate(
+          'UPDATE messages SET image_path=NULL, video_path=NULL, '
+          'voice_path=NULL, file_path=NULL, file_name=NULL, file_size=NULL '
+          'WHERE peer_id=?',
+          [pid],
+        );
+      } else {
+        await _db!.delete('dm_chat_pins',
+            where: 'peer_id = ?', whereArgs: [pid]);
+        await _db!.delete('messages', where: 'peer_id = ?', whereArgs: [pid]);
+        await _db!.delete('conversation_read_cursor',
+            where: 'conv_key = ?', whereArgs: ['dm:$pid']);
+        _messagesNotifiers.remove(pid);
+      }
+      _notifyMessages(pid);
+    }
+    pinsVersion.value++;
+    readStateVersion.value++;
   }
 
   /// Переносит все сообщения с [oldPeerId] на [newPeerId].
@@ -396,6 +689,12 @@ class ChatStorageService {
       {'peer_id': newPeerId},
       where: 'peer_id = ?',
       whereArgs: [oldPeerId],
+    );
+    await _db?.update(
+      'conversation_read_cursor',
+      {'conv_key': 'dm:$newPeerId'},
+      where: 'conv_key = ?',
+      whereArgs: ['dm:$oldPeerId'],
     );
     _messagesNotifiers.remove(oldPeerId);
     _notifyMessages(newPeerId);
@@ -464,6 +763,56 @@ class ChatStorageService {
     )).toList();
   }
 
+  /// Per-peer count of incoming DM messages after the read cursor.
+  Future<Map<String, int>> getDmUnreadCounts() async {
+    if (_db == null) return const {};
+    final rows = await _db!.rawQuery('''
+      SELECT m.peer_id AS pid, COUNT(*) AS c
+      FROM messages m
+      LEFT JOIN conversation_read_cursor cr ON cr.conv_key = ('dm:' || m.peer_id)
+      WHERE m.is_outgoing = 0
+      AND (
+        cr.conv_key IS NULL
+        OR m.timestamp > cr.last_read_ts
+        OR (m.timestamp = cr.last_read_ts AND m.id > cr.last_read_id)
+      )
+      GROUP BY m.peer_id
+    ''');
+    return {for (final r in rows) r['pid'] as String: (r['c'] as int?) ?? 0};
+  }
+
+  /// Marks the whole thread as read up to the latest stored message.
+  Future<void> markDmRead(String peerId) async {
+    if (_db == null) return;
+    final key = 'dm:$peerId';
+    final rows = await _db!.query(
+      'messages',
+      where: 'peer_id = ?',
+      whereArgs: [peerId],
+      orderBy: 'timestamp DESC, id DESC',
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      await _db!.delete(
+        'conversation_read_cursor',
+        where: 'conv_key = ?',
+        whereArgs: [key],
+      );
+    } else {
+      final m = ChatMessage.fromMap(rows.first);
+      await _db!.insert(
+        'conversation_read_cursor',
+        {
+          'conv_key': key,
+          'last_read_ts': m.timestamp.millisecondsSinceEpoch,
+          'last_read_id': m.id,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    readStateVersion.value++;
+  }
+
   final Map<String, ValueNotifier<List<ChatMessage>>> _messagesNotifiers = {};
 
   ValueNotifier<List<ChatMessage>> messagesNotifier(String peerId) {
@@ -483,6 +832,73 @@ class ChatStorageService {
     if (_messagesNotifiers.containsKey(peerId)) {
       notifier.value = msgs;
     }
+  }
+
+  static const _kMaxPinsPerChat = 20;
+
+  /// Id закреплённых сообщений в порядке времени сообщения (старые первые).
+  Future<List<String>> getPinnedMessageIdsChrono(String peerId) async {
+    if (_db == null) return const [];
+    final rows = await _db!.rawQuery(
+      '''
+      SELECT p.message_id AS mid FROM dm_chat_pins p
+      INNER JOIN messages m ON m.id = p.message_id AND m.peer_id = p.peer_id
+      WHERE p.peer_id = ?
+      ORDER BY m.timestamp ASC, m.id ASC
+      ''',
+      [peerId],
+    );
+    return rows.map((r) => r['mid'] as String).toList();
+  }
+
+  Future<bool> isPinned(String peerId, String messageId) async {
+    if (_db == null) return false;
+    final rows = await _db!.rawQuery(
+      'SELECT COUNT(*) AS c FROM dm_chat_pins WHERE peer_id = ? AND message_id = ?',
+      [peerId, messageId],
+    );
+    final n = (rows.isNotEmpty ? rows.first['c'] as int? : null) ?? 0;
+    return n > 0;
+  }
+
+  /// Закрепить сообщение в личном чате с [peerId]. Возвращает false если лимит.
+  Future<bool> pinDmMessage(String peerId, String messageId) async {
+    if (_db == null) return false;
+    final exists = await _db!.query(
+      'messages',
+      columns: const ['id'],
+      where: 'id = ? AND peer_id = ?',
+      whereArgs: [messageId, peerId],
+      limit: 1,
+    );
+    if (exists.isEmpty) return false;
+    final cntRows = await _db!.rawQuery(
+      'SELECT COUNT(*) AS c FROM dm_chat_pins WHERE peer_id = ?',
+      [peerId],
+    );
+    final cnt = (cntRows.isNotEmpty ? cntRows.first['c'] as int? : null) ?? 0;
+    if (cnt >= _kMaxPinsPerChat) return false;
+    await _db!.insert(
+      'dm_chat_pins',
+      {
+        'peer_id': peerId,
+        'message_id': messageId,
+        'pinned_at': DateTime.now().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    pinsVersion.value++;
+    return true;
+  }
+
+  Future<void> unpinDmMessage(String peerId, String messageId) async {
+    if (_db == null) return;
+    await _db!.delete(
+      'dm_chat_pins',
+      where: 'peer_id = ? AND message_id = ?',
+      whereArgs: [peerId, messageId],
+    );
+    pinsVersion.value++;
   }
 
   Future<void> toggleReaction(String messageId, String emoji, String fromId) async {
@@ -515,6 +931,31 @@ class ChatStorageService {
   }
 }
 
+/// Строка из `scheduled_dm` для отложенной отправки в личный чат.
+class ScheduledDmRow {
+  final String id;
+  final String peerId;
+  final String text;
+  final String? replyToMessageId;
+  final int sendAtMs;
+
+  const ScheduledDmRow({
+    required this.id,
+    required this.peerId,
+    required this.text,
+    this.replyToMessageId,
+    required this.sendAtMs,
+  });
+
+  factory ScheduledDmRow.fromMap(Map<String, dynamic> m) => ScheduledDmRow(
+        id: m['id'] as String,
+        peerId: m['peer_id'] as String,
+        text: m['text'] as String,
+        replyToMessageId: m['reply_to_message_id'] as String?,
+        sendAtMs: m['send_at_ms'] as int,
+      );
+}
+
 /// Сводка чата — возвращается из getChatSummaries() единым SQL запросом.
 class ChatSummary {
   final String peerId;
@@ -543,8 +984,12 @@ class ChatSummary {
 
   /// Текст для отображения в превью последнего сообщения.
   String get displayText {
-    if (lastText.isNotEmpty) return lastText;
-    if (lastImagePath != null) return '📷 Фото';
+    final fromText = formatMessagePreview(lastText.isEmpty ? null : lastText);
+    if (fromText.isNotEmpty) return fromText;
+    if (lastImagePath != null) {
+      if (lastImagePath!.toLowerCase().endsWith('.gif')) return '🎞 GIF';
+      return '📷 Фото';
+    }
     if (lastVoicePath != null) return '🎤 Голосовое';
     if (lastVideoPath != null) return '📹 Видео';
     return '';

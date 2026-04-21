@@ -66,8 +66,16 @@ class RelayService {
   final ValueNotifier<List<RelayPeer>> searchResults = ValueNotifier([]);
 
   /// Callback for receiving blobs
-  void Function(String fromId, String msgId, Uint8List data,
-      bool isVoice, bool isVideo, bool isSquare, bool isFile, String? fileName)? onBlobReceived;
+  void Function(
+      String fromId,
+      String msgId,
+      Uint8List data,
+      bool isVoice,
+      bool isVideo,
+      bool isSquare,
+      bool isFile,
+      String? fileName,
+      bool viewOnce)? onBlobReceived;
 
   /// Callback when a new peer comes online (publicKey) — used for avatar sync
   void Function(String publicKey)? onPeerOnline;
@@ -125,6 +133,12 @@ class RelayService {
   Future<void> connect() async {
     if (state.value == RelayState.connected ||
         state.value == RelayState.connecting) { return; }
+
+    // Режим «только Bluetooth» — relay не используем.
+    if (AppSettings.instance.connectionMode < 1) {
+      debugPrint('[RLINK][Relay] connect() skipped — BLE-only mode');
+      return;
+    }
 
     // URL захардкожен в defaultServerUrl — AppSettings.relayServerUrl
     // намеренно игнорируется, см. комментарий у defaultServerUrl.
@@ -315,6 +329,7 @@ class RelayService {
     bool isSquare = false,
     bool isFile = false,
     String? fileName,
+    bool viewOnce = false,
   }) async {
     if (!isConnected) return;
     final b64 = base64Encode(compressedData);
@@ -331,6 +346,7 @@ class RelayService {
       if (isSquare) 'sq': true,
       if (isFile) 'file': true,
       if (fileName != null) 'fname': fileName,
+      if (viewOnce) 'vo': true,
     };
     try {
       _channel?.sink.add(jsonEncode(msg));
@@ -356,6 +372,7 @@ class RelayService {
     bool isSquare = false,
     bool isFile = false,
     String? fileName,
+    bool viewOnce = false,
   }) async {
     if (!isConnected) return;
     final b64 = base64Encode(chunkData);
@@ -373,6 +390,7 @@ class RelayService {
       if (chunkIdx == 0 && isSquare) 'sq': true,
       if (chunkIdx == 0 && isFile) 'file': true,
       if (chunkIdx == 0 && fileName != null) 'fname': fileName,
+      if (chunkIdx == 0 && viewOnce) 'vo': true,
     };
     try {
       _channel?.sink.add(jsonEncode(msg));
@@ -686,9 +704,10 @@ class RelayService {
         final isSquare = (msg['sq'] as bool?) ?? false;
         final isFile = (msg['file'] as bool?) ?? false;
         final fileName = msg['fname'] as String?;
+        final viewOnce = (msg['vo'] as bool?) ?? false;
         debugPrint('[RLINK][Relay] Received blob ${bytes.length} bytes for $msgId');
         onBlobReceived?.call(from, msgId, Uint8List.fromList(bytes),
-            isVoice, isVideo, isSquare, isFile, fileName);
+            isVoice, isVideo, isSquare, isFile, fileName, viewOnce);
         return;
       }
 
@@ -705,6 +724,7 @@ class RelayService {
         assembly.isSquare = (msg['sq'] as bool?) ?? false;
         assembly.isFile = (msg['file'] as bool?) ?? false;
         assembly.fileName = msg['fname'] as String?;
+        assembly.viewOnce = (msg['vo'] as bool?) ?? false;
       }
       debugPrint('[RLINK][Relay] Blob chunk $chunkIdx/$chunkTotal '
           '(${bytes.length} bytes) for $msgId '
@@ -727,7 +747,7 @@ class RelayService {
         debugPrint('[RLINK][Relay] Assembled chunked blob ${full.length} bytes for $msgId');
         onBlobReceived?.call(from, msgId, full,
             assembly.isVoice, assembly.isVideo, assembly.isSquare,
-            assembly.isFile, assembly.fileName);
+            assembly.isFile, assembly.fileName, assembly.viewOnce);
       }
     } catch (e) {
       debugPrint('[RLINK][Relay] Failed to decode blob: $e');
@@ -783,6 +803,7 @@ class _BlobAssembly {
   bool isVideo = false;
   bool isSquare = false;
   bool isFile = false;
+  bool viewOnce = false;
   String? fileName;
   _BlobAssembly({required this.total, required this.from});
 }

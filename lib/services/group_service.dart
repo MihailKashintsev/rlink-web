@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
@@ -7,6 +9,40 @@ import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/group.dart';
+import '../models/message_poll.dart';
+import 'image_service.dart';
+
+Future<void> _backfillGroupReadCursors(Database db) async {
+  final groups =
+      await db.rawQuery('SELECT DISTINCT group_id FROM group_messages');
+  for (final r in groups) {
+    final gid = r['group_id'] as String;
+    final rows = await db.rawQuery(
+      'SELECT id, timestamp FROM group_messages WHERE group_id = ? '
+      'ORDER BY timestamp DESC, id DESC LIMIT 1',
+      [gid],
+    );
+    if (rows.isEmpty) continue;
+    await db.insert(
+      'group_read_cursor',
+      {
+        'group_id': gid,
+        'last_read_ts': rows.first['timestamp'] as int,
+        'last_read_id': rows.first['id'] as String,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+}
+
+Future<void> _tryDeleteGroupMediaFile(String? path) async {
+  if (path == null || path.isEmpty) return;
+  final resolved = ImageService.instance.resolveStoredPath(path) ?? path;
+  try {
+    final f = File(resolved);
+    if (await f.exists()) await f.delete();
+  } catch (_) {}
+}
 
 class GroupService {
   GroupService._();
@@ -21,12 +57,24 @@ class GroupService {
   /// Pending group invites (group_invite packets received).
   final pendingInvites = ValueNotifier<List<GroupInvite>>([]);
 
+  // Coalesce many rapid mutations (history sync, reactions) into
+  // a single notification per microtask.
+  bool _bumpScheduled = false;
+  void _bump() {
+    if (_bumpScheduled) return;
+    _bumpScheduled = true;
+    scheduleMicrotask(() {
+      _bumpScheduled = false;
+      version.value++;
+    });
+  }
+
   Future<void> init() async {
     final dir = await getApplicationDocumentsDirectory();
     final path = p.join(dir.path, 'groups.db');
     _db = await openDatabase(
       path,
-      version: 3,
+      version: 6,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE groups (
@@ -52,11 +100,21 @@ class GroupService {
             voice_path TEXT,
             is_outgoing INTEGER DEFAULT 0,
             timestamp INTEGER NOT NULL,
-            reactions TEXT
+            reactions TEXT,
+            poll_json TEXT,
+            forward_from_id TEXT,
+            forward_from_nick TEXT
           )
         ''');
         await db.execute(
             'CREATE INDEX idx_gm_group ON group_messages(group_id, timestamp)');
+        await db.execute('''
+          CREATE TABLE group_read_cursor (
+            group_id     TEXT PRIMARY KEY,
+            last_read_ts INTEGER NOT NULL,
+            last_read_id TEXT NOT NULL DEFAULT ''
+          )
+        ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -64,6 +122,29 @@ class GroupService {
         }
         if (oldVersion < 3) {
           await db.execute('ALTER TABLE group_messages ADD COLUMN reactions TEXT');
+        }
+        if (oldVersion < 4) {
+          await db.execute('ALTER TABLE group_messages ADD COLUMN poll_json TEXT');
+        }
+        if (oldVersion < 5) {
+          try {
+            await db.execute(
+                'ALTER TABLE group_messages ADD COLUMN forward_from_id TEXT');
+          } catch (_) {}
+          try {
+            await db.execute(
+                'ALTER TABLE group_messages ADD COLUMN forward_from_nick TEXT');
+          } catch (_) {}
+        }
+        if (oldVersion < 6) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS group_read_cursor (
+              group_id     TEXT PRIMARY KEY,
+              last_read_ts INTEGER NOT NULL,
+              last_read_id TEXT NOT NULL DEFAULT ''
+            )
+          ''');
+          await _backfillGroupReadCursors(db);
         }
       },
     );
@@ -98,7 +179,7 @@ class GroupService {
       'avatar_emoji': group.avatarEmoji,
       'created_at': group.createdAt,
     });
-    version.value++;
+    _bump();
     return group;
   }
 
@@ -118,6 +199,11 @@ class GroupService {
               createdAt: r['created_at'] as int,
             ))
         .toList();
+  }
+
+  Future<List<String>> getGroupIds() async {
+    final g = await getGroups();
+    return g.map((e) => e.id).toList();
   }
 
   Future<Group?> getGroup(String id) async {
@@ -152,7 +238,7 @@ class GroupService {
       where: 'id = ?',
       whereArgs: [group.id],
     );
-    version.value++;
+    _bump();
   }
 
   /// Promote or demote [userId] as moderator of [groupId].
@@ -191,7 +277,7 @@ class GroupService {
       'avatar_emoji': group.avatarEmoji,
       'created_at': group.createdAt,
     });
-    version.value++;
+    _bump();
   }
 
   /// Remove a member (kick). Used by creator/moderator.
@@ -206,15 +292,60 @@ class GroupService {
   /// Wipe all local data (used on full app reset).
   Future<void> resetAll() async {
     await _db?.delete('group_messages');
+    await _db?.delete('group_read_cursor');
     await _db?.delete('groups');
-    version.value++;
+    _bump();
+  }
+
+  /// Только сообщения; группы и состав участников сохраняются.
+  Future<void> deleteAllGroupMessages() async {
+    if (_db == null) return;
+    await _db!.delete('group_messages');
+    await _db!.delete('group_read_cursor');
+    _bump();
+  }
+
+  /// Очистка сообщений в выбранных группах (полностью или только медиа).
+  Future<void> clearGroupMessages({
+    required Set<String> groupIds,
+    required bool mediaOnly,
+  }) async {
+    if (_db == null || groupIds.isEmpty) return;
+    for (final gid in groupIds) {
+      if (mediaOnly) {
+        final rows = await _db!.query(
+          'group_messages',
+          columns: ['image_path', 'video_path', 'voice_path'],
+          where: 'group_id = ?',
+          whereArgs: [gid],
+        );
+        for (final r in rows) {
+          await _tryDeleteGroupMediaFile(r['image_path'] as String?);
+          await _tryDeleteGroupMediaFile(r['video_path'] as String?);
+          await _tryDeleteGroupMediaFile(r['voice_path'] as String?);
+        }
+        await _db!.rawUpdate(
+          'UPDATE group_messages SET image_path=NULL, video_path=NULL, '
+          'voice_path=NULL WHERE group_id=?',
+          [gid],
+        );
+      } else {
+        await _db!.delete('group_messages',
+            where: 'group_id = ?', whereArgs: [gid]);
+        await _db!.delete('group_read_cursor',
+            where: 'group_id = ?', whereArgs: [gid]);
+      }
+    }
+    _bump();
   }
 
   Future<void> leaveGroup(String groupId) async {
     await _db!.delete('groups', where: 'id = ?', whereArgs: [groupId]);
     await _db!.delete('group_messages',
         where: 'group_id = ?', whereArgs: [groupId]);
-    version.value++;
+    await _db!.delete('group_read_cursor',
+        where: 'group_id = ?', whereArgs: [groupId]);
+    _bump();
   }
 
   // ── Messages ───────────────────────────────────────────────────
@@ -222,7 +353,7 @@ class GroupService {
   Future<void> saveMessage(GroupMessage msg) async {
     await _db!.insert('group_messages', msg.toMap(),
         conflictAlgorithm: ConflictAlgorithm.ignore);
-    version.value++;
+    _bump();
   }
 
   Future<List<GroupMessage>> getMessages(String groupId,
@@ -273,7 +404,7 @@ class GroupService {
       where: 'id = ?',
       whereArgs: [messageId],
     );
-    version.value++;
+    _bump();
     return GroupMessage(
       id: msg.id,
       groupId: msg.groupId,
@@ -285,7 +416,54 @@ class GroupService {
       isOutgoing: msg.isOutgoing,
       timestamp: msg.timestamp,
       reactions: updated,
+      pollJson: msg.pollJson,
+      forwardFromId: msg.forwardFromId,
+      forwardFromNick: msg.forwardFromNick,
     );
+  }
+
+  Future<void> updateMessagePollJson(String messageId, String? pollJson) async {
+    if (_db == null) return;
+    await _db!.update(
+      'group_messages',
+      {'poll_json': pollJson},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _bump();
+  }
+
+  Future<void> updateMessageText(String messageId, String newText) async {
+    if (_db == null) return;
+    await _db!.update(
+      'group_messages',
+      {'text': newText},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _bump();
+  }
+
+  Future<void> mergeIncomingMessagePoll(
+      String messageId, String? incomingPj) async {
+    if (incomingPj == null || incomingPj.isEmpty) return;
+    final inc = MessagePoll.tryDecode(incomingPj);
+    if (inc == null) return;
+    final msg = await getMessage(messageId);
+    if (msg == null) return;
+    final cur = MessagePoll.tryDecode(msg.pollJson);
+    final merged = (cur ?? inc).mergeVotesFrom(inc);
+    await updateMessagePollJson(messageId, merged.encode());
+  }
+
+  Future<void> applyPollVote(
+      String messageId, String voterId, List<int> choices) async {
+    final msg = await getMessage(messageId);
+    if (msg == null) return;
+    final poll = MessagePoll.tryDecode(msg.pollJson);
+    if (poll == null) return;
+    final next = poll.withVote(voterId, choices);
+    await updateMessagePollJson(messageId, next.encode());
   }
 
   Future<GroupMessage?> getLastMessage(String groupId) async {
@@ -293,11 +471,59 @@ class GroupService {
       'group_messages',
       where: 'group_id = ?',
       whereArgs: [groupId],
-      orderBy: 'timestamp DESC',
+      orderBy: 'timestamp DESC, id DESC',
       limit: 1,
     );
     if (rows.isEmpty) return null;
     return GroupMessage.fromMap(rows.first);
+  }
+
+  /// Unread counts for groups (incoming / others' messages after read cursor).
+  Future<Map<String, int>> getGroupUnreadCounts() async {
+    if (_db == null) return const {};
+    final rows = await _db!.rawQuery('''
+      SELECT gm.group_id AS gid, COUNT(*) AS c
+      FROM group_messages gm
+      LEFT JOIN group_read_cursor gr ON gr.group_id = gm.group_id
+      WHERE gm.is_outgoing = 0
+      AND (
+        gr.group_id IS NULL
+        OR gm.timestamp > gr.last_read_ts
+        OR (gm.timestamp = gr.last_read_ts AND gm.id > gr.last_read_id)
+      )
+      GROUP BY gm.group_id
+    ''');
+    return {for (final r in rows) r['gid'] as String: (r['c'] as int?) ?? 0};
+  }
+
+  Future<void> markGroupRead(String groupId) async {
+    if (_db == null) return;
+    final rows = await _db!.query(
+      'group_messages',
+      where: 'group_id = ?',
+      whereArgs: [groupId],
+      orderBy: 'timestamp DESC, id DESC',
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      await _db!.delete(
+        'group_read_cursor',
+        where: 'group_id = ?',
+        whereArgs: [groupId],
+      );
+    } else {
+      final m = GroupMessage.fromMap(rows.first);
+      await _db!.insert(
+        'group_read_cursor',
+        {
+          'group_id': groupId,
+          'last_read_ts': m.timestamp,
+          'last_read_id': m.id,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    _bump();
   }
 
   // ── Invites ────────────────────────────────────────────────────

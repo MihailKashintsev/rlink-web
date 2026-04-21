@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../services/image_service.dart';
+
 /// Модель канала. Один админ — создатель, который ведёт канал.
 class Channel {
   final String id; // UUID канала
@@ -10,6 +12,8 @@ class Channel {
   final int avatarColor;
   final String avatarEmoji;
   final String? avatarImagePath;
+  /// Баннер «профиля» канала (локальный путь; по сети передаётся отдельным img-потоком).
+  final String? bannerImagePath;
   final String? description;
   final bool commentsEnabled; // админ может отключить комментарии
   final int createdAt;
@@ -30,6 +34,7 @@ class Channel {
     this.avatarColor = 0xFF42A5F5,
     this.avatarEmoji = '📢',
     this.avatarImagePath,
+    this.bannerImagePath,
     this.description,
     this.commentsEnabled = true,
     required this.createdAt,
@@ -56,6 +61,7 @@ class Channel {
         'color': avatarColor,
         'emoji': avatarEmoji,
         if (avatarImagePath != null) 'img': avatarImagePath,
+        if (bannerImagePath != null) 'bn': bannerImagePath,
         if (description != null) 'desc': description,
         'comments': commentsEnabled,
         'ts': createdAt,
@@ -79,6 +85,7 @@ class Channel {
         avatarColor: j['color'] as int? ?? 0xFF42A5F5,
         avatarEmoji: j['emoji'] as String? ?? '📢',
         avatarImagePath: j['img'] as String?,
+        bannerImagePath: j['bn'] as String?,
         description: j['desc'] as String?,
         commentsEnabled: j['comments'] as bool? ?? true,
         createdAt: j['ts'] as int? ?? 0,
@@ -108,6 +115,7 @@ class Channel {
     int? avatarColor,
     String? avatarEmoji,
     String? avatarImagePath,
+    String? bannerImagePath,
     String? description,
     bool? commentsEnabled,
     bool? verified,
@@ -127,6 +135,7 @@ class Channel {
         avatarColor: avatarColor ?? this.avatarColor,
         avatarEmoji: avatarEmoji ?? this.avatarEmoji,
         avatarImagePath: avatarImagePath ?? this.avatarImagePath,
+        bannerImagePath: bannerImagePath ?? this.bannerImagePath,
         description: description ?? this.description,
         commentsEnabled: commentsEnabled ?? this.commentsEnabled,
         createdAt: createdAt,
@@ -148,9 +157,14 @@ class ChannelPost {
   final String text;
   final String? imagePath;
   final String? videoPath;
+  final String? voicePath;
+  final String? filePath;
+  final String? fileName;
+  final int? fileSize;
   final int timestamp;
   final List<ChannelComment> comments;
   final Map<String, List<String>> reactions;
+  final String? pollJson;
 
   const ChannelPost({
     required this.id,
@@ -159,9 +173,14 @@ class ChannelPost {
     this.text = '',
     this.imagePath,
     this.videoPath,
+    this.voicePath,
+    this.filePath,
+    this.fileName,
+    this.fileSize,
     required this.timestamp,
     this.comments = const [],
     this.reactions = const {},
+    this.pollJson,
   });
 
   int get totalReactions {
@@ -179,9 +198,44 @@ class ChannelPost {
         'text': text,
         'image_path': imagePath,
         'video_path': videoPath,
+        'voice_path': voicePath,
+        'file_path': filePath,
+        'file_name': fileName,
+        'file_size': fileSize,
         'timestamp': timestamp,
         'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
+        'poll_json': pollJson,
       };
+
+  ChannelPost copyWith({
+    String? text,
+    String? imagePath,
+    String? videoPath,
+    String? voicePath,
+    String? filePath,
+    String? fileName,
+    int? fileSize,
+    int? timestamp,
+    List<ChannelComment>? comments,
+    Map<String, List<String>>? reactions,
+    String? pollJson,
+  }) =>
+      ChannelPost(
+        id: id,
+        channelId: channelId,
+        authorId: authorId,
+        text: text ?? this.text,
+        imagePath: imagePath ?? this.imagePath,
+        videoPath: videoPath ?? this.videoPath,
+        voicePath: voicePath ?? this.voicePath,
+        filePath: filePath ?? this.filePath,
+        fileName: fileName ?? this.fileName,
+        fileSize: fileSize ?? this.fileSize,
+        timestamp: timestamp ?? this.timestamp,
+        comments: comments ?? this.comments,
+        reactions: reactions ?? this.reactions,
+        pollJson: pollJson ?? this.pollJson,
+      );
 
   factory ChannelPost.fromMap(Map<String, dynamic> m,
       {List<ChannelComment> comments = const []}) {
@@ -194,16 +248,22 @@ class ChannelPost {
             decoded.map((k, v) => MapEntry(k, (v as List).cast<String>()));
       } catch (_) {}
     }
+    final resolve = ImageService.instance.resolveStoredPath;
     return ChannelPost(
       id: m['id'] as String,
       channelId: m['channel_id'] as String,
       authorId: m['author_id'] as String,
       text: m['text'] as String? ?? '',
-      imagePath: m['image_path'] as String?,
-      videoPath: m['video_path'] as String?,
+      imagePath: resolve(m['image_path'] as String?),
+      videoPath: resolve(m['video_path'] as String?),
+      voicePath: resolve(m['voice_path'] as String?),
+      filePath: resolve(m['file_path'] as String?),
+      fileName: m['file_name'] as String?,
+      fileSize: m['file_size'] as int?,
       timestamp: m['timestamp'] as int,
       comments: comments,
       reactions: reactions,
+      pollJson: m['poll_json'] as String?,
     );
   }
 }
@@ -214,6 +274,12 @@ class ChannelComment {
   final String postId;
   final String authorId;
   final String text;
+  final String? imagePath;
+  final String? videoPath;
+  final String? voicePath;
+  final String? filePath;
+  final String? fileName;
+  final int? fileSize;
   final int timestamp;
   final Map<String, List<String>> reactions;
 
@@ -222,6 +288,12 @@ class ChannelComment {
     required this.postId,
     required this.authorId,
     required this.text,
+    this.imagePath,
+    this.videoPath,
+    this.voicePath,
+    this.filePath,
+    this.fileName,
+    this.fileSize,
     required this.timestamp,
     this.reactions = const {},
   });
@@ -239,6 +311,12 @@ class ChannelComment {
         'post_id': postId,
         'author_id': authorId,
         'text': text,
+        'image_path': imagePath,
+        'video_path': videoPath,
+        'voice_path': voicePath,
+        'file_path': filePath,
+        'file_name': fileName,
+        'file_size': fileSize,
         'timestamp': timestamp,
         'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
       };
@@ -253,11 +331,18 @@ class ChannelComment {
             decoded.map((k, v) => MapEntry(k, (v as List).cast<String>()));
       } catch (_) {}
     }
+    final resolve = ImageService.instance.resolveStoredPath;
     return ChannelComment(
       id: m['id'] as String,
       postId: m['post_id'] as String,
       authorId: m['author_id'] as String,
       text: m['text'] as String? ?? '',
+      imagePath: resolve(m['image_path'] as String?),
+      videoPath: resolve(m['video_path'] as String?),
+      voicePath: resolve(m['voice_path'] as String?),
+      filePath: resolve(m['file_path'] as String?),
+      fileName: m['file_name'] as String?,
+      fileSize: m['file_size'] as int?,
       timestamp: m['timestamp'] as int,
       reactions: reactions,
     );

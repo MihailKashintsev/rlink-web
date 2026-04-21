@@ -10,17 +10,21 @@ import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:gal/gal.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 import '../../main.dart' show IncomingMessage, incomingMessageController;
 import '../../models/chat_message.dart';
+import '../../models/shared_collab.dart';
 import '../../models/contact.dart';
 import '../../services/app_settings.dart';
 import '../../services/ble_service.dart';
 import '../../services/block_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/outbound_dm_text.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
@@ -30,11 +34,34 @@ import '../../services/story_service.dart';
 import '../../services/typing_service.dart';
 import '../../services/relay_service.dart';
 import '../../services/media_upload_queue.dart';
+import '../../utils/channel_mentions.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/reactions.dart';
 import 'image_editor_screen.dart';
 import 'square_video_recorder_screen.dart';
 import 'story_viewer_screen.dart';
+import 'collab_compose_dialogs.dart';
+import '../widgets/shared_todo_message_card.dart';
+import '../widgets/shared_calendar_message_card.dart';
+import '../widgets/missing_local_media.dart';
+import '../widgets/rich_message_text.dart';
+
+/// Пересылка в этот чат: оригинальное сообщение и контекст автора.
+class DmForwardDraft {
+  final ChatMessage message;
+  /// Собеседник чата, из которого пересылаем (личный чат).
+  final String sourcePeerId;
+  final String originalAuthorNick;
+  /// Публичный ключ автора оригинала (Ed25519 hex).
+  final String forwardAuthorId;
+
+  const DmForwardDraft({
+    required this.message,
+    required this.sourcePeerId,
+    required this.originalAuthorNick,
+    required this.forwardAuthorId,
+  });
+}
 
 class ChatScreen extends StatefulWidget {
   final String peerId; // Ed25519 public key получателя
@@ -42,6 +69,7 @@ class ChatScreen extends StatefulWidget {
   final int peerAvatarColor;
   final String peerAvatarEmoji;
   final String? peerAvatarImagePath;
+  final DmForwardDraft? forwardDraft;
 
   const ChatScreen({
     super.key,
@@ -50,6 +78,7 @@ class ChatScreen extends StatefulWidget {
     required this.peerAvatarColor,
     this.peerAvatarEmoji = '',
     this.peerAvatarImagePath,
+    this.forwardDraft,
   });
 
   @override
@@ -80,6 +109,12 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _strangerBannerDismissed = false;
   bool _isContact = false;
   VoidCallback? _contactListener;
+  List<String> _pinnedIdsChrono = [];
+  final Set<String> _pinnedMsgIds = {};
+  String? _pinBarHighlightId;
+  bool _forwardStarted = false;
+  VoidCallback? _pinsListener;
+  bool _showScrollToBottomFab = false;
 
   /// Max blob size for single relay message (~800KB compressed).
   /// Larger data is split into relay-friendly gossip chunks (50KB each).
@@ -272,8 +307,21 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _resolvedPeerId = BleService.instance.resolvePublicKey(widget.peerId);
-    _load();
+    unawaited(_loadAndMarkRead());
     unawaited(_checkContactStatus());
+    _pinsListener = () {
+      if (mounted) unawaited(_reloadPins());
+    };
+    ChatStorageService.instance.pinsVersion.addListener(_pinsListener!);
+    _scrollController.addListener(_onScrollForPins);
+    unawaited(_reloadPins());
+    if (widget.forwardDraft != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_forwardStarted || !mounted) return;
+        _forwardStarted = true;
+        unawaited(_runPendingForward());
+      });
+    }
     _controller.addListener(_onTyping);
     // Следим за изменением маппингов BLE UUID → public key
     BleService.instance.peersCount.addListener(_onPeersChanged);
@@ -310,7 +358,12 @@ class _ChatScreenState extends State<ChatScreen> {
       }
 
       await ChatStorageService.instance.loadMessages(_resolvedPeerId);
-      if (mounted) _scrollToBottom();
+      if (mounted) {
+        _recomputePinHighlight(
+            ChatStorageService.instance.messagesNotifier(_resolvedPeerId).value);
+        _scrollToBottom();
+        unawaited(ChatStorageService.instance.markDmRead(_resolvedPeerId));
+      }
     });
   }
 
@@ -350,8 +403,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    unawaited(ChatStorageService.instance.markDmRead(_resolvedPeerId));
     _typingDebounce?.cancel();
     _sendActivity(Activity.stopped);
+    if (_pinsListener != null) {
+      ChatStorageService.instance.pinsVersion.removeListener(_pinsListener!);
+    }
+    _scrollController.removeListener(_onScrollForPins);
     _controller.removeListener(_onTyping);
     BleService.instance.peersCount.removeListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.removeListener(_onPeersChanged);
@@ -526,6 +584,498 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
   }
 
+  Future<void> _loadAndMarkRead() async {
+    await _load();
+    if (mounted) {
+      await ChatStorageService.instance.markDmRead(_resolvedPeerId);
+    }
+  }
+
+  Future<void> _reloadPins() async {
+    final ids = await ChatStorageService.instance
+        .getPinnedMessageIdsChrono(_resolvedPeerId);
+    if (!mounted) return;
+    setState(() {
+      _pinnedIdsChrono = ids;
+      _pinnedMsgIds
+        ..clear()
+        ..addAll(ids);
+      _recomputePinHighlight(
+          ChatStorageService.instance.messagesNotifier(_resolvedPeerId).value);
+    });
+  }
+
+  void _onScrollForPins() {
+    final pos = _scrollController.hasClients ? _scrollController.position : null;
+    if (pos != null) {
+      final awayFromBottom = pos.maxScrollExtent - pos.pixels;
+      final showFab = awayFromBottom > 120;
+      if (showFab != _showScrollToBottomFab) {
+        setState(() => _showScrollToBottomFab = showFab);
+      }
+    }
+    final msgs =
+        ChatStorageService.instance.messagesNotifier(_resolvedPeerId).value;
+    _recomputePinHighlight(msgs);
+  }
+
+  void _recomputePinHighlight(List<ChatMessage> messages) {
+    if (_pinnedIdsChrono.isEmpty) {
+      if (_pinBarHighlightId != null) {
+        setState(() => _pinBarHighlightId = null);
+      }
+      return;
+    }
+    const estH = 72.0;
+    final pos = _scrollController.hasClients ? _scrollController.position : null;
+    final scroll = pos?.pixels ?? 0;
+    final firstIdx =
+        (scroll / estH).floor().clamp(0, messages.isEmpty ? 0 : messages.length - 1);
+    String? bestId;
+    var bestIdx = -1;
+    for (final pid in _pinnedIdsChrono) {
+      final idx = messages.indexWhere((m) => m.id == pid);
+      if (idx < 0) continue;
+      if (idx < firstIdx && idx > bestIdx) {
+        bestIdx = idx;
+        bestId = pid;
+      }
+    }
+    bestId ??= _pinnedIdsChrono.isNotEmpty ? _pinnedIdsChrono.last : null;
+    if (bestId != _pinBarHighlightId) {
+      setState(() => _pinBarHighlightId = bestId);
+    }
+  }
+
+  Widget _buildPinnedBar(List<ChatMessage> messages) {
+    final cs = Theme.of(context).colorScheme;
+    final hid = _pinBarHighlightId;
+    ChatMessage? mFor(String? id) {
+      if (id == null) return null;
+      for (final m in messages) {
+        if (m.id == id) return m;
+      }
+      return null;
+    }
+
+    final hi = mFor(hid);
+    String preview(ChatMessage? m) {
+      if (m == null) return 'Закреплённое сообщение';
+      if (m.text.trim().isNotEmpty) {
+        final t = m.text.trim();
+        return t.length > 72 ? '${t.substring(0, 72)}…' : t;
+      }
+      if (m.imagePath != null) return '📷 Фото';
+      if (m.videoPath != null) return '📹 Видео';
+      if (m.voicePath != null) return '🎤 Голосовое';
+      if (m.filePath != null) return '📎 ${m.fileName ?? 'Файл'}';
+      return 'Сообщение';
+    }
+
+    return Material(
+      color: cs.surfaceContainerHighest.withValues(alpha: 0.92),
+      child: InkWell(
+        onTap: () async {
+          await showModalBottomSheet<void>(
+            context: context,
+            builder: (ctx) => SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text('Закреплённые',
+                        style: Theme.of(ctx)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w600)),
+                  ),
+                  ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: _pinnedIdsChrono.length,
+                      itemBuilder: (_, i) {
+                        final id = _pinnedIdsChrono[_pinnedIdsChrono.length -
+                            1 -
+                            i];
+                        final m = mFor(id);
+                        return ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.push_pin, size: 18),
+                          title: Text(
+                            preview(m),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            final idx = messages.indexWhere((e) => e.id == id);
+                            if (idx < 0 || !_scrollController.hasClients) return;
+                            const estH = 72.0;
+                            _scrollController.jumpTo(
+                                (idx * estH).clamp(
+                              0.0,
+                              _scrollController.position.maxScrollExtent,
+                            ));
+                          },
+                        );
+                      },
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(children: [
+            Icon(Icons.push_pin, size: 18, color: cs.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Закреплено · ${_pinnedIdsChrono.length}',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: cs.primary),
+                  ),
+                  Text(
+                    preview(hi),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 13, color: cs.onSurface.withValues(alpha: 0.85)),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.keyboard_arrow_up, color: cs.onSurfaceVariant),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openForwardedAuthorProfile(
+      String authorKey, String? hintNick) async {
+    final c = await ChatStorageService.instance.getContact(authorKey);
+    if (!mounted) return;
+    final nick = c?.nickname ??
+        (hintNick?.isNotEmpty == true ? hintNick! : '${authorKey.substring(0, 8)}…');
+    final color = c?.avatarColor ?? widget.peerAvatarColor;
+    final emoji = c?.avatarEmoji ?? widget.peerAvatarEmoji;
+    final img = c?.avatarImagePath ?? widget.peerAvatarImagePath;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PeerProfileScreen(
+          peerId: authorKey,
+          nickname: nick,
+          avatarColor: color,
+          avatarEmoji: emoji,
+          avatarImagePath: img,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _togglePinMessage(ChatMessage msg) async {
+    final pinned = _pinnedMsgIds.contains(msg.id);
+    if (pinned) {
+      await ChatStorageService.instance.unpinDmMessage(_resolvedPeerId, msg.id);
+      await GossipRouter.instance.sendDmPin(
+        recipientId: _resolvedPeerId,
+        messageId: msg.id,
+        add: false,
+        fromId: CryptoService.instance.publicKeyHex,
+      );
+    } else {
+      final ok = await ChatStorageService.instance
+          .pinDmMessage(_resolvedPeerId, msg.id);
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Не больше 20 закреплений в чате')),
+          );
+        }
+        return;
+      }
+      await GossipRouter.instance.sendDmPin(
+        recipientId: _resolvedPeerId,
+        messageId: msg.id,
+        add: true,
+        fromId: CryptoService.instance.publicKeyHex,
+      );
+    }
+    await _reloadPins();
+  }
+
+  Future<void> _pickForwardTargetAndNavigate(ChatMessage msg) async {
+    final peers = await ChatStorageService.instance.getChatPeerIds();
+    final targets =
+        peers.where((k) => k != _resolvedPeerId).toList();
+    if (!mounted) return;
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Нет других чатов для пересылки')),
+      );
+      return;
+    }
+    final nickMap = <String, String>{};
+    for (final c in ChatStorageService.instance.contactsNotifier.value) {
+      nickMap[c.publicKeyHex] = c.nickname;
+    }
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(title: Text('Переслать в…')),
+            for (final pid in targets)
+              ListTile(
+                leading: const Icon(Icons.person_outline),
+                title: Text(nickMap[pid] ?? '${pid.substring(0, 8)}…'),
+                onTap: () => Navigator.pop(ctx, pid),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    final authorNick = msg.isOutgoing
+        ? (ProfileService.instance.profile?.nickname ?? 'Вы')
+        : widget.peerNickname;
+    final draft = DmForwardDraft(
+      message: msg,
+      sourcePeerId: _resolvedPeerId,
+      originalAuthorNick: authorNick,
+      forwardAuthorId:
+          msg.isOutgoing ? CryptoService.instance.publicKeyHex : _resolvedPeerId,
+    );
+    final nick = nickMap[picked] ?? '${picked.substring(0, 8)}…';
+    final c = await ChatStorageService.instance.getContact(picked);
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChatScreen(
+          peerId: picked,
+          peerNickname: nick,
+          peerAvatarColor: c?.avatarColor ?? 0xFF42A5F5,
+          peerAvatarEmoji: c?.avatarEmoji ?? '👤',
+          peerAvatarImagePath: c?.avatarImagePath,
+          forwardDraft: draft,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _runPendingForward() async {
+    final d = widget.forwardDraft;
+    if (d == null) return;
+    final m = d.message;
+    final myId = CryptoService.instance.publicKeyHex;
+    final fid = d.forwardAuthorId;
+    final fnk = d.originalAuthorNick;
+    final target = _resolvedPeerId;
+    if (!_looksLikePublicKey(target)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok || !mounted) return;
+    }
+    var x25519Key = BleService.instance.getPeerX25519Key(target);
+    x25519Key ??= RelayService.instance.getPeerX25519Key(target);
+
+    Future<void> sendText(String text, String msgId) async {
+      final msg = ChatMessage(
+        id: msgId,
+        peerId: target,
+        text: text,
+        isOutgoing: true,
+        timestamp: DateTime.now(),
+        status: MessageStatus.sending,
+        forwardFromId: fid,
+        forwardFromNick: fnk,
+      );
+      await ChatStorageService.instance.saveMessage(msg);
+      if (x25519Key != null && x25519Key.isNotEmpty) {
+        final enc = await CryptoService.instance.encryptMessage(
+          plaintext: text,
+          recipientX25519KeyBase64: x25519Key,
+        );
+        await GossipRouter.instance.sendEncryptedMessage(
+          encrypted: enc,
+          senderId: myId,
+          recipientId: target,
+          messageId: msgId,
+          forwardFromId: fid,
+          forwardFromNick: fnk,
+        );
+      } else {
+        await GossipRouter.instance.sendRawMessage(
+          text: text,
+          senderId: myId,
+          recipientId: target,
+          messageId: msgId,
+          forwardFromId: fid,
+          forwardFromNick: fnk,
+        );
+      }
+      await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
+        msgId,
+        MessageStatus.sent,
+      );
+    }
+
+    try {
+      if (m.imagePath != null && File(m.imagePath!).existsSync()) {
+        final msgId = _uuid.v4();
+        final docs = await getApplicationDocumentsDirectory();
+        final ext = p.extension(m.imagePath!);
+        final dest =
+            '${docs.path}/fwd_${msgId}${ext.isNotEmpty ? ext : '.jpg'}';
+        await File(m.imagePath!).copy(dest);
+        final bytes = await File(dest).readAsBytes();
+        final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+        await GossipRouter.instance.sendImgMeta(
+          msgId: msgId,
+          totalChunks: chunks.length,
+          fromId: myId,
+          recipientId: target,
+        );
+        for (var i = 0; i < chunks.length; i++) {
+          await GossipRouter.instance.sendImgChunk(
+            msgId: msgId,
+            index: i,
+            base64Data: chunks[i],
+            fromId: myId,
+            recipientId: target,
+          );
+        }
+        final msg = ChatMessage(
+          id: msgId,
+          peerId: target,
+          text: m.text.isNotEmpty ? m.text : ' ',
+          imagePath: dest,
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: MessageStatus.sent,
+          forwardFromId: fid,
+          forwardFromNick: fnk,
+        );
+        await ChatStorageService.instance.saveMessage(msg);
+      } else if (m.videoPath != null && File(m.videoPath!).existsSync()) {
+        final msgId = _uuid.v4();
+        final docs = await getApplicationDocumentsDirectory();
+        final ext = p.extension(m.videoPath!);
+        final dest =
+            '${docs.path}/fwd_${msgId}${ext.isNotEmpty ? ext : '.mp4'}';
+        await File(m.videoPath!).copy(dest);
+        final bytes = await File(dest).readAsBytes();
+        final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+        final isSq = dest.contains('_sq') || m.videoPath!.contains('_sq');
+        await GossipRouter.instance.sendImgMeta(
+          msgId: msgId,
+          totalChunks: chunks.length,
+          fromId: myId,
+          recipientId: target,
+          isVideo: true,
+          isSquare: isSq,
+        );
+        for (var i = 0; i < chunks.length; i++) {
+          await GossipRouter.instance.sendImgChunk(
+            msgId: msgId,
+            index: i,
+            base64Data: chunks[i],
+            fromId: myId,
+            recipientId: target,
+          );
+        }
+        await ChatStorageService.instance.saveMessage(ChatMessage(
+          id: msgId,
+          peerId: target,
+          text: m.text.isNotEmpty ? m.text : ' ',
+          videoPath: dest,
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: MessageStatus.sent,
+          forwardFromId: fid,
+          forwardFromNick: fnk,
+        ));
+      } else if (m.voicePath != null && File(m.voicePath!).existsSync()) {
+        final msgId = _uuid.v4();
+        final docs = await getApplicationDocumentsDirectory();
+        final dest = '${docs.path}/fwd_voice_$msgId.m4a';
+        await File(m.voicePath!).copy(dest);
+        final bytes = await File(dest).readAsBytes();
+        final wasQueued = await _sendMedia(
+          bytes: bytes,
+          msgId: msgId,
+          myId: myId,
+          isVoice: true,
+          filePath: dest,
+        );
+        await ChatStorageService.instance.saveMessage(ChatMessage(
+          id: msgId,
+          peerId: target,
+          text: m.text.isNotEmpty ? m.text : '🎤',
+          voicePath: dest,
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          forwardFromId: fid,
+          forwardFromNick: fnk,
+        ));
+      } else if (m.filePath != null && File(m.filePath!).existsSync()) {
+        final msgId = _uuid.v4();
+        final docs = await getApplicationDocumentsDirectory();
+        final filesDir = Directory('${docs.path}/files');
+        if (!filesDir.existsSync()) filesDir.createSync(recursive: true);
+        final baseName = m.fileName ?? p.basename(m.filePath!);
+        final dest = '${filesDir.path}/fwd_${msgId}_$baseName';
+        await File(m.filePath!).copy(dest);
+        final bytes = await File(dest).readAsBytes();
+        final wasQueued = await _sendMedia(
+          bytes: bytes,
+          msgId: msgId,
+          myId: myId,
+          isFile: true,
+          fileName: m.fileName ?? baseName,
+          filePath: dest,
+        );
+        await ChatStorageService.instance.saveMessage(ChatMessage(
+          id: msgId,
+          peerId: target,
+          text: m.text.isNotEmpty ? m.text : (m.fileName ?? '📎'),
+          filePath: dest,
+          fileName: m.fileName ?? baseName,
+          fileSize: m.fileSize ?? bytes.length,
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          forwardFromId: fid,
+          forwardFromNick: fnk,
+        ));
+      } else {
+        await sendText(m.text.isNotEmpty ? m.text : ' ', _uuid.v4());
+      }
+      if (mounted) {
+        await ChatStorageService.instance.loadMessages(target);
+        _scrollToBottom();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Пересылка: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
   Future<void> _send() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
@@ -633,6 +1183,7 @@ class _ChatScreenState extends State<ChatScreen> {
           messageId: msgId,
           latitude: lat,
           longitude: lng,
+          replyToMessageId: _replyToMessageId,
         );
         debugPrint('[RLINK][Chat] Sent ENCRYPTED msg $msgId');
       } else {
@@ -678,6 +1229,156 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _composeAndSendTodo() async {
+    if (_isSending || _editingMessageId != null) return;
+    final enc = await showSharedTodoComposeDialog(context);
+    if (enc == null || !mounted) return;
+    await _sendCollabEncoded(enc);
+  }
+
+  Future<void> _composeAndSendCalendar() async {
+    if (_isSending || _editingMessageId != null) return;
+    final enc = await showSharedCalendarComposeDialog(context);
+    if (enc == null || !mounted) return;
+    await _sendCollabEncoded(enc);
+  }
+
+  Future<void> _sendCollabEncoded(String encoded) async {
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
+          );
+        }
+        return;
+      }
+    }
+    setState(() => _isSending = true);
+    try {
+      await OutboundDmText.send(
+        peerId: _resolvedPeerId,
+        fullText: encoded,
+        replyToMessageId: _replyToMessageId,
+      );
+      if (mounted) {
+        setState(() {
+          _replyToMessageId = null;
+          _replyPreviewText = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _patchSharedCollab(ChatMessage msg, String newEncoded) async {
+    await ChatStorageService.instance.editMessage(msg.id, newEncoded);
+    await GossipRouter.instance.sendEditMessage(
+      messageId: msg.id,
+      newText: newEncoded,
+      senderId: CryptoService.instance.publicKeyHex,
+      recipientId: _resolvedPeerId,
+    );
+  }
+
+  Future<void> _openChatCalendar() async {
+    final msgs = await ChatStorageService.instance.getMessages(_resolvedPeerId);
+    final events = SharedCalendarPayload.collectFromChatMessages(msgs);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('События в чате'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: events.isEmpty
+              ? const Text('Пока нет отмеченных событий.')
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: events.length,
+                  itemBuilder: (_, i) {
+                    final e = events[i];
+                    final dt = DateTime.fromMillisecondsSinceEpoch(e.startMs);
+                    return ListTile(
+                      dense: true,
+                      title: Text(e.title.isEmpty ? '(без названия)' : e.title),
+                      subtitle: Text(
+                        '${dt.day.toString().padLeft(2, '0')}.'
+                        '${dt.month.toString().padLeft(2, '0')}.${dt.year} '
+                        '${dt.hour.toString().padLeft(2, '0')}:'
+                        '${dt.minute.toString().padLeft(2, '0')}',
+                      ),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Закрыть')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _scheduleSendDialog() async {
+    if (_editingMessageId != null) return;
+    final text = _controller.text.trim();
+    if (text.isEmpty) return;
+    final now = DateTime.now();
+    final d = await showDatePicker(
+      context: context,
+      initialDate: now,
+      firstDate: DateTime(now.year, now.month, now.day),
+      lastDate: now.add(const Duration(days: 365)),
+    );
+    if (d == null || !mounted) return;
+    final t = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(now.add(const Duration(minutes: 1))),
+    );
+    if (t == null || !mounted) return;
+    final when = DateTime(d.year, d.month, d.day, t.hour, t.minute);
+    if (!when.isAfter(now)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Выберите время в будущем')),
+        );
+      }
+      return;
+    }
+    final peerStore =
+        _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
+    await ChatStorageService.instance.insertScheduledDm(
+      id: _uuid.v4(),
+      peerId: peerStore,
+      text: text,
+      replyToMessageId: _replyToMessageId,
+      sendAtMs: when.millisecondsSinceEpoch,
+    );
+    _controller.clear();
+    setState(() {
+      _replyToMessageId = null;
+      _replyPreviewText = null;
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(
+                'Сообщение запланировано: ${when.day}.${when.month}.${when.year} '
+                '${when.hour.toString().padLeft(2, '0')}:'
+                '${when.minute.toString().padLeft(2, '0')}')),
+      );
+    }
+  }
+
   /// Opens gallery to pick a photo.
   Future<void> _sendFromGallery() async {
     if (_isSending) return;
@@ -698,6 +1399,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final picked = await _picker.pickImage(source: ImageSource.gallery);
     if (picked == null || !mounted) return;
+
+    if (picked.path.toLowerCase().endsWith('.gif')) {
+      await _sendGifFromPath(picked.path, myId);
+      return;
+    }
 
     // ── Photo path ─────────────────────────────────────────────────
     final choice = await showModalBottomSheet<_ImageSendMode>(
@@ -743,6 +1449,46 @@ class _ChatScreenState extends State<ChatScreen> {
       await _sendImageCompressed(picked, myId);
     } else {
       await _sendImageAsFile(picked, myId);
+    }
+  }
+
+  /// GIF из галереи — без редактора, с сохранением анимации.
+  Future<void> _sendGifFromPath(String path, String myId) async {
+    setState(() => _isSending = true);
+    try {
+      final saved = await ImageService.instance.saveChatImageFromPicker(path);
+      final bytes = await File(saved).readAsBytes();
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+      final wasQueued = await _sendMedia(
+        bytes: bytes,
+        msgId: msgId,
+        myId: myId,
+        filePath: saved,
+      );
+      await _saveAndTrack(
+        ChatMessage(
+          id: msgId,
+          peerId: targetPeerId,
+          text: '🎞 GIF',
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          imagePath: saved,
+        ),
+        wasQueued: wasQueued,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('GIF: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
     }
   }
 
@@ -1239,6 +1985,27 @@ class _ChatScreenState extends State<ChatScreen> {
                 _startReply(msg);
               },
             ),
+            ListTile(
+              leading: Icon(
+                  _pinnedMsgIds.contains(msg.id)
+                      ? Icons.push_pin_outlined
+                      : Icons.push_pin),
+              title: Text(_pinnedMsgIds.contains(msg.id)
+                  ? 'Открепить'
+                  : 'Закрепить'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                await _togglePinMessage(msg);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.forward),
+              title: const Text('Переслать…'),
+              onTap: () {
+                Navigator.pop(ctx);
+                unawaited(_pickForwardTargetAndNavigate(msg));
+              },
+            ),
             if (msg.isOutgoing) ...[
               ListTile(
                 leading: const Icon(Icons.edit),
@@ -1300,6 +2067,21 @@ class _ChatScreenState extends State<ChatScreen> {
           avatarColor: widget.peerAvatarColor,
           avatarEmoji: widget.peerAvatarEmoji,
           avatarImagePath: widget.peerAvatarImagePath,
+        ),
+      ),
+    );
+  }
+
+  void _onRequestMissingDmMedia(ChatMessage msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          msg.isOutgoing
+              ? 'Когда собеседник будет в сети, попросите переслать файл '
+                  'или дождитесь подтяжки истории.'
+              : 'Когда собеседник будет в сети, вложение может подтянуться '
+                  'с историей; иначе попросите переслать.',
         ),
       ),
     );
@@ -1394,6 +2176,9 @@ class _ChatScreenState extends State<ChatScreen> {
               final hasBg = (AppSettings.instance.chatBgForPeer(_resolvedPeerId) ?? AppSettings.instance.chatBgForPeer('__global__')) != null;
               return [
                 const PopupMenuItem(value: 'profile', child: Text('Профиль')),
+                const PopupMenuItem(
+                    value: 'chat_cal',
+                    child: Text('Календарь чата')),
                 const PopupMenuItem(value: 'background', child: Text('Фон чата')),
                 if (hasBg)
                   const PopupMenuItem(value: 'remove_bg', child: Text('Убрать фон')),
@@ -1404,6 +2189,8 @@ class _ChatScreenState extends State<ChatScreen> {
               switch (v) {
                 case 'profile':
                   _openPeerProfile();
+                case 'chat_cal':
+                  unawaited(_openChatCalendar());
                 case 'background':
                   _pickChatBackground();
                 case 'remove_bg':
@@ -1596,7 +2383,16 @@ class _ChatScreenState extends State<ChatScreen> {
                   final messageTextById = <String, String>{
                     for (final m in messages) m.id: m.text,
                   };
-                  return ListView.builder(
+                  final pinBar = _pinnedIdsChrono.isEmpty
+                      ? null
+                      : _buildPinnedBar(messages);
+                  WidgetsBinding.instance
+                      .addPostFrameCallback((_) => _onScrollForPins());
+                  return Column(
+                    children: [
+                      if (pinBar != null) pinBar,
+                      Expanded(
+                        child: ListView.builder(
                     controller: _scrollController,
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     keyboardDismissBehavior:
@@ -1616,14 +2412,42 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ? null
                                 : messageTextById[msg.replyToMessageId],
                             onDownloadImage: _saveImageToGallery,
+                            onCollabPersist: _patchSharedCollab,
+                            onForwardedAuthorTap: _openForwardedAuthorProfile,
+                            onRequestMissingMedia: _onRequestMissingDmMedia,
                           ),
                         ),
                       ]);
                     },
+                  ),
+                      ),
+                    ],
                   );
                 },
                ),
               ),
+              if (_showScrollToBottomFab)
+                Positioned(
+                  right: 10,
+                  bottom: 10,
+                  child: Material(
+                    elevation: 3,
+                    shape: const CircleBorder(),
+                    color: Theme.of(context).colorScheme.primary,
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: _scrollToBottom,
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Icon(
+                          Icons.keyboard_arrow_down_rounded,
+                          color: Theme.of(context).colorScheme.onPrimary,
+                          size: 26,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -1686,6 +2510,9 @@ class _ChatScreenState extends State<ChatScreen> {
           maxLength: _kMaxMessageLength,
           locationActive: _pendingLat != null,
           onSend: _send,
+          onLongPressSend: _scheduleSendDialog,
+          onPickTodo: _composeAndSendTodo,
+          onPickCalendar: _composeAndSendCalendar,
           onPickImage: _sendFromGallery,
           onPickVideoGallery: _sendVideoFromGallery,
           onPickVideo: _sendVideo,
@@ -1740,17 +2567,26 @@ class _MessageBubble extends StatelessWidget {
   final ChatMessage msg;
   final String? replyPreviewText;
   final Function(String)? onDownloadImage;
+  final Future<void> Function(ChatMessage msg, String newEncoded)?
+      onCollabPersist;
+  final void Function(String authorKey, String? nickHint)?
+      onForwardedAuthorTap;
+  final void Function(ChatMessage msg)? onRequestMissingMedia;
 
   const _MessageBubble({
     required this.msg,
     this.replyPreviewText,
     this.onDownloadImage,
+    this.onCollabPersist,
+    this.onForwardedAuthorTap,
+    this.onRequestMissingMedia,
   });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final isOut = msg.isOutgoing;
+    final missing = dmMessageMissingLocalMedia(msg);
 
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0.0, end: 1.0),
@@ -1779,6 +2615,65 @@ class _MessageBubble extends StatelessWidget {
           crossAxisAlignment:
               isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
+            if (msg.forwardFromId != null &&
+                onForwardedAuthorTap != null) ...[
+              Align(
+                alignment:
+                    isOut ? Alignment.centerRight : Alignment.centerLeft,
+                child: InkWell(
+                  onTap: () => onForwardedAuthorTap!(
+                    msg.forwardFromId!,
+                    msg.forwardFromNick,
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.forward,
+                            size: 14,
+                            color: isOut
+                                ? cs.onPrimary.withValues(alpha: 0.85)
+                                : cs.primary),
+                        const SizedBox(width: 4),
+                        Flexible(
+                          child: Text(
+                            msg.forwardFromNick?.isNotEmpty == true
+                                ? msg.forwardFromNick!
+                                : '${msg.forwardFromId!.substring(0, 8)}…',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: isOut
+                                  ? cs.onPrimary.withValues(alpha: 0.9)
+                                  : cs.primary,
+                            ),
+                          ),
+                        ),
+                        Icon(Icons.open_in_new,
+                            size: 12,
+                            color: isOut
+                                ? cs.onPrimary.withValues(alpha: 0.6)
+                                : cs.primary.withValues(alpha: 0.6)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+            ],
+            if (missing) ...[
+              ClearedMediaPlaceholder(
+                isOutgoing: isOut,
+                isDirectChat: true,
+                colorScheme: cs,
+                onPressed: () => onRequestMissingMedia?.call(msg),
+              ),
+            ],
             if (msg.voicePath != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
@@ -1882,8 +2777,38 @@ class _MessageBubble extends StatelessWidget {
                   ],
                 ),
               ),
-            if (msg.text.isNotEmpty && msg.voicePath == null)
-              _RichMessageText(text: msg.text, isOut: isOut),
+            if (SharedTodoPayload.tryDecode(msg.text) != null &&
+                onCollabPersist != null)
+              SharedTodoMessageCard(
+                encoded: msg.text,
+                cs: cs,
+                isOutgoing: isOut,
+                onPersist: (enc) => onCollabPersist!(msg, enc),
+              )
+            else if (SharedCalendarPayload.tryDecode(msg.text) != null)
+              SharedCalendarMessageCard(
+                encoded: msg.text,
+                cs: cs,
+                isOutgoing: isOut,
+              )
+            else if (msg.text.isNotEmpty &&
+                msg.voicePath == null &&
+                !(missing && isSyntheticMediaCaption(msg.text)))
+              ValueListenableBuilder<List<Contact>>(
+                valueListenable: ChatStorageService.instance.contactsNotifier,
+                builder: (_, contacts, __) {
+                  return RichMessageText(
+                    text: msg.text,
+                    textColor: isOut ? cs.onPrimary : cs.onSurface,
+                    isOut: isOut,
+                    mentionLabelFor: (hex) => resolveChannelMentionDisplay(
+                      hex,
+                      contacts,
+                      ProfileService.instance.profile,
+                    ),
+                  );
+                },
+              ),
             if (msg.latitude != null && msg.longitude != null)
               _LocationChip(
                 lat: msg.latitude!,
@@ -2129,6 +3054,9 @@ class _InputBar extends StatefulWidget {
   final int maxLength;
   final bool locationActive;
   final VoidCallback onSend;
+  final VoidCallback? onLongPressSend;
+  final VoidCallback? onPickTodo;
+  final VoidCallback? onPickCalendar;
   final VoidCallback onPickImage;
   final VoidCallback onPickVideoGallery;
   final VoidCallback onPickVideo;
@@ -2145,6 +3073,9 @@ class _InputBar extends StatefulWidget {
     required this.maxLength,
     required this.locationActive,
     required this.onSend,
+    this.onLongPressSend,
+    this.onPickTodo,
+    this.onPickCalendar,
     required this.onPickImage,
     required this.onPickVideoGallery,
     required this.onPickVideo,
@@ -2161,15 +3092,22 @@ class _InputBar extends StatefulWidget {
 class _InputBarState extends State<_InputBar> {
   int _length = 0;
   final _focusNode = FocusNode();
+  /// Панель B/I/S… не перекрывает поле — открывается кнопкой при выделении.
+  bool _showFormatStrip = false;
 
   @override
   void initState() {
     super.initState();
     widget.controller.addListener(() {
-      if (mounted) setState(() => _length = widget.controller.text.length);
-    });
-    _focusNode.addListener(() {
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {
+          _length = widget.controller.text.length;
+          final sel = widget.controller.selection;
+          if (!sel.isValid || sel.isCollapsed) {
+            _showFormatStrip = false;
+          }
+        });
+      }
     });
   }
 
@@ -2200,7 +3138,6 @@ class _InputBarState extends State<_InputBar> {
     final hasText = widget.controller.text.trim().isNotEmpty;
 
     final cs = Theme.of(context).colorScheme;
-    final keyboardVisible = _focusNode.hasFocus;
     final sel = widget.controller.selection;
     final hasSelection =
         sel.isValid && sel.baseOffset != sel.extentOffset;
@@ -2214,7 +3151,7 @@ class _InputBarState extends State<_InputBar> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (hasSelection)
+            if (hasSelection && _showFormatStrip)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: Row(
@@ -2228,14 +3165,20 @@ class _InputBarState extends State<_InputBar> {
                 ),
               ),
             Row(children: [
-          if (keyboardVisible)
+          if (hasSelection)
             IconButton(
-              onPressed: () => _focusNode.unfocus(),
-              icon: const Icon(Icons.keyboard_hide_outlined),
-              color: cs.onSurfaceVariant,
+              onPressed: () =>
+                  setState(() => _showFormatStrip = !_showFormatStrip),
+              icon: Icon(
+                Icons.text_fields_rounded,
+                color: _showFormatStrip ? cs.primary : cs.onSurfaceVariant,
+                size: 22,
+              ),
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-              tooltip: 'Скрыть клавиатуру',
+              tooltip: _showFormatStrip
+                  ? 'Скрыть формат'
+                  : 'Формат выделенного текста',
             ),
           PopupMenuButton<String>(
             onSelected: (value) {
@@ -2245,6 +3188,8 @@ class _InputBarState extends State<_InputBar> {
                 case 'video_gallery': widget.onPickVideoGallery(); break;
                 case 'file': widget.onPickFile(); break;
                 case 'location': widget.onLocation(); break;
+                case 'todo': widget.onPickTodo?.call(); break;
+                case 'cal': widget.onPickCalendar?.call(); break;
               }
             },
             icon: AnimatedRotation(
@@ -2291,6 +3236,24 @@ class _InputBarState extends State<_InputBar> {
                   Text(widget.locationActive ? 'Убрать геометку' : 'Геометка'),
                 ]),
               ),
+              if (widget.onPickTodo != null)
+                const PopupMenuItem(
+                  value: 'todo',
+                  child: Row(children: [
+                    Icon(Icons.checklist_rtl, size: 20),
+                    SizedBox(width: 12),
+                    Text('Список дел'),
+                  ]),
+                ),
+              if (widget.onPickCalendar != null)
+                const PopupMenuItem(
+                  value: 'cal',
+                  child: Row(children: [
+                    Icon(Icons.event_available_outlined, size: 20),
+                    SizedBox(width: 12),
+                    Text('Событие'),
+                  ]),
+                ),
             ],
           ),
           const SizedBox(width: 4),
@@ -2309,6 +3272,7 @@ class _InputBarState extends State<_InputBar> {
                   return TextField(
                     controller: widget.controller,
                     focusNode: _focusNode,
+                    onTapOutside: (_) => _focusNode.unfocus(),
                     enabled: !widget.isRecording,
                     maxLines: sendOnEnter ? 1 : 4,
                     minLines: 1,
@@ -2347,11 +3311,44 @@ class _InputBarState extends State<_InputBar> {
             ),
           ),
           const SizedBox(width: 8),
+          GestureDetector(
+            onTap: widget.isRecording ? widget.onMicUp : widget.onMicDown,
+            onLongPressStart: (_) {
+              if (!widget.isRecording) widget.onMicDown();
+            },
+            onLongPressEnd: (_) {
+              if (widget.isRecording) widget.onMicUp();
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: widget.isRecording
+                    ? Colors.redAccent
+                    : cs.primary,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                widget.isRecording ? Icons.stop_rounded : Icons.mic_rounded,
+                color: cs.onPrimary,
+                size: 20,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
           if (hasText || widget.isSending)
             GestureDetector(
               onTap: widget.isSending || over || widget.isRecording
                   ? null
                   : widget.onSend,
+              onLongPress: (widget.onLongPressSend == null ||
+                      !hasText ||
+                      widget.isSending ||
+                      over ||
+                      widget.isRecording)
+                  ? null
+                  : widget.onLongPressSend,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 width: 44,
@@ -2372,47 +3369,21 @@ class _InputBarState extends State<_InputBar> {
               ),
             )
           else
-            Row(children: [
-              // Square video recorder button
-              GestureDetector(
-                onTap: widget.isSending ? null : widget.onPickVideo,
-                child: Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: widget.isSending
-                        ? cs.onSurface.withValues(alpha: 0.3)
-                        : cs.primary,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(Icons.videocam_rounded,
-                      color: cs.onPrimary, size: 22),
+            GestureDetector(
+              onTap: widget.isSending ? null : widget.onPickVideo,
+              child: Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: widget.isSending
+                      ? cs.onSurface.withValues(alpha: 0.3)
+                      : cs.primary,
+                  borderRadius: BorderRadius.circular(10),
                 ),
+                child: Icon(Icons.videocam_rounded,
+                    color: cs.onPrimary, size: 22),
               ),
-              const SizedBox(width: 8),
-              // Voice record button (tap to start/stop, or hold)
-              GestureDetector(
-                onTap: widget.isRecording ? widget.onMicUp : widget.onMicDown,
-                onLongPressStart: (_) { if (!widget.isRecording) widget.onMicDown(); },
-                onLongPressEnd: (_) { if (widget.isRecording) widget.onMicUp(); },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: widget.isRecording
-                        ? Colors.redAccent
-                        : cs.primary,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    widget.isRecording ? Icons.stop_rounded : Icons.mic_rounded,
-                    color: cs.onPrimary,
-                    size: 20,
-                  ),
-                ),
-              ),
-            ]),
+            ),
           ]),
         ],
         ),
@@ -3047,6 +4018,9 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
   String? _avatarPath;
   String? _bannerPath;
   List<String> _tags = const [];
+  String? _musicPath;
+  AudioPlayer? _musicPlayer;
+  bool _musicPlaying = false;
 
   @override
   void initState() {
@@ -3060,6 +4034,7 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
   @override
   void dispose() {
     ChatStorageService.instance.contactsNotifier.removeListener(_onContactsChanged);
+    _musicPlayer?.dispose();
     super.dispose();
   }
 
@@ -3074,12 +4049,15 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
     final newAvatar = ImageService.instance.resolveStoredPath(c.avatarImagePath);
     final newBanner = ImageService.instance.resolveStoredPath(c.bannerImagePath);
     // Обновляем только если реально изменилось (иначе setState впустую).
+    final newMusic =
+        ImageService.instance.resolveStoredPath(c.profileMusicPath);
     if (c.nickname == _nick &&
         c.username == (_username ?? '') &&
         c.avatarColor == _color &&
         c.avatarEmoji == _emoji &&
         newAvatar == _avatarPath &&
         newBanner == _bannerPath &&
+        newMusic == _musicPath &&
         _listEq(c.tags, _tags)) {
       return;
     }
@@ -3090,6 +4068,7 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
       _emoji = c.avatarEmoji;
       _avatarPath = newAvatar;
       _bannerPath = newBanner;
+      _musicPath = newMusic;
       _tags = c.tags;
     });
   }
@@ -3114,7 +4093,10 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
         _emoji       = contact.avatarEmoji;
         _avatarPath  = ImageService.instance.resolveStoredPath(contact.avatarImagePath);
         _bannerPath  = ImageService.instance.resolveStoredPath(contact.bannerImagePath);
+        _musicPath   = ImageService.instance.resolveStoredPath(contact.profileMusicPath);
         _tags        = contact.tags;
+      } else {
+        _musicPath = null;
       }
       _images = msgs.where((m) => m.imagePath != null).toList();
       _voices = msgs.where((m) => m.voicePath != null).toList();
@@ -3124,6 +4106,23 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
   }
 
   bool _hasLink(String text) => RegExp(r'https?://\S+').hasMatch(text);
+
+  Future<void> _toggleProfileMusic() async {
+    final path = _musicPath;
+    if (path == null || !File(path).existsSync()) return;
+    _musicPlayer ??= AudioPlayer();
+    if (_musicPlaying) {
+      await _musicPlayer!.stop();
+      if (mounted) setState(() => _musicPlaying = false);
+      return;
+    }
+    await _musicPlayer!.play(DeviceFileSource(path));
+    if (!mounted) return;
+    setState(() => _musicPlaying = true);
+    unawaited(_musicPlayer!.onPlayerComplete.first.then((_) {
+      if (mounted) setState(() => _musicPlaying = false);
+    }));
+  }
 
   Future<void> _onProfileAction(String action) async {
     if (action == 'unblock') {
@@ -3326,6 +4325,66 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
                     ),
                   ],
 
+                  const SizedBox(height: 12),
+                  ValueListenableBuilder<int>(
+                    valueListenable: RelayService.instance.presenceVersion,
+                    builder: (_, __, ___) {
+                      final hasMusic = _musicPath != null &&
+                          File(_musicPath!).existsSync();
+                      final online = RelayService.instance.isConnected &&
+                          RelayService.instance.isPeerOnline(widget.peerId);
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.music_note,
+                                  size: 20, color: cs.primary),
+                              const SizedBox(width: 8),
+                              const Text('Музыка в профиле',
+                                  style: TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          if (hasMusic)
+                            FilledButton.tonalIcon(
+                              onPressed: _toggleProfileMusic,
+                              icon: Icon(
+                                  _musicPlaying ? Icons.stop : Icons.play_arrow),
+                              label: Text(
+                                  _musicPlaying ? 'Стоп' : 'Слушать'),
+                            )
+                          else if (online)
+                            OutlinedButton.icon(
+                              onPressed: () {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Ожидайте: трек придёт с профилем, когда '
+                                      'контакт обновит приложение или откроет чат.',
+                                    ),
+                                  ),
+                                );
+                              },
+                              icon: const Icon(Icons.download_outlined),
+                              label: const Text('Загрузить трек'),
+                            )
+                          else
+                            Text(
+                              'Когда контакт будет в сети ретранслятора, '
+                              'трек сможет подтянуться с профилем.',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+
                   // ── Stories ──
                   if (stories.isNotEmpty) ...[
                     const SizedBox(height: 16),
@@ -3446,126 +4505,6 @@ class _MediaSection extends StatelessWidget {
   }
 }
 
-class _RichMessageText extends StatelessWidget {
-  final String text;
-  final bool isOut;
-
-  const _RichMessageText({required this.text, required this.isOut});
-
-  static final _urlRegex = RegExp(r'https?://\S+');
-
-  // Combined regex — order matters: longer/more specific markers first
-  // group 1: **bold**, group 2: __underline__, group 3: ~~strike~~,
-  // group 4: _italic_, group 5: ||spoiler||, otherwise URL
-  static final _fmtRegex = RegExp(
-    r'\*\*([\s\S]*?)\*\*|__([\s\S]*?)__|~~([\s\S]*?)~~|_([\s\S]*?)_|\|\|([\s\S]*?)\|\||https?://\S+',
-  );
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final textColor = isOut ? cs.onPrimary : cs.onSurface;
-    final urlMatches = _urlRegex.allMatches(text).toList();
-
-    return Column(
-      crossAxisAlignment:
-          isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-      children: [
-        _buildRichText(context, textColor),
-        ...urlMatches
-            .map((m) => _LinkPreviewCard(url: m.group(0)!, isOut: isOut)),
-      ],
-    );
-  }
-
-  Widget _buildRichText(BuildContext context, Color textColor) {
-    final cs = Theme.of(context).colorScheme;
-    final matches = _fmtRegex.allMatches(text).toList();
-
-    if (matches.isEmpty) {
-      return Text(text, style: TextStyle(color: textColor, fontSize: 15));
-    }
-
-    final spans = <InlineSpan>[];
-    int lastEnd = 0;
-    final baseStyle = TextStyle(color: textColor, fontSize: 15);
-
-    void addPlain(String s) {
-      if (s.isEmpty) return;
-      spans.add(TextSpan(text: s, style: baseStyle));
-    }
-
-    for (final match in matches) {
-      if (match.start > lastEnd) {
-        addPlain(text.substring(lastEnd, match.start));
-      }
-
-      final full = match.group(0)!;
-
-      if (match.group(1) != null) {
-        // **bold**
-        spans.add(TextSpan(
-          text: match.group(1)!,
-          style: baseStyle.copyWith(fontWeight: FontWeight.bold),
-        ));
-      } else if (match.group(2) != null) {
-        // __underline__
-        spans.add(TextSpan(
-          text: match.group(2)!,
-          style: baseStyle.copyWith(decoration: TextDecoration.underline),
-        ));
-      } else if (match.group(3) != null) {
-        // ~~strikethrough~~
-        spans.add(TextSpan(
-          text: match.group(3)!,
-          style: baseStyle.copyWith(decoration: TextDecoration.lineThrough),
-        ));
-      } else if (match.group(4) != null) {
-        // _italic_
-        spans.add(TextSpan(
-          text: match.group(4)!,
-          style: baseStyle.copyWith(fontStyle: FontStyle.italic),
-        ));
-      } else if (match.group(5) != null) {
-        // ||spoiler||
-        spans.add(WidgetSpan(
-          alignment: PlaceholderAlignment.baseline,
-          baseline: TextBaseline.alphabetic,
-          child: _SpoilerText(text: match.group(5)!, style: baseStyle),
-        ));
-      } else {
-        // URL
-        final url = full;
-        spans.add(WidgetSpan(
-          alignment: PlaceholderAlignment.baseline,
-          baseline: TextBaseline.alphabetic,
-          child: GestureDetector(
-            onTap: () => launchUrl(Uri.parse(url),
-                mode: LaunchMode.externalApplication),
-            child: Text(
-              url,
-              style: baseStyle.copyWith(
-                color: isOut
-                    ? Colors.white.withValues(alpha: 0.9)
-                    : cs.primary,
-                decoration: TextDecoration.underline,
-              ),
-            ),
-          ),
-        ));
-      }
-
-      lastEnd = match.end;
-    }
-
-    if (lastEnd < text.length) {
-      addPlain(text.substring(lastEnd));
-    }
-
-    return RichText(text: TextSpan(children: spans));
-  }
-}
-
 // ── Кнопка форматирования ──────────────────────────────────────────
 
 class _FmtBtn extends StatelessWidget {
@@ -3604,111 +4543,6 @@ class _FmtBtn extends StatelessWidget {
                     : null,
             fontSize: 15,
           ),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Спойлер ───────────────────────────────────────────────────────
-
-class _SpoilerText extends StatefulWidget {
-  final String text;
-  final TextStyle style;
-
-  const _SpoilerText({required this.text, required this.style});
-
-  @override
-  State<_SpoilerText> createState() => _SpoilerTextState();
-}
-
-class _SpoilerTextState extends State<_SpoilerText> {
-  bool _revealed = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () => setState(() => _revealed = !_revealed),
-      child: _revealed
-          ? Text(widget.text, style: widget.style)
-          : Text(
-              '▓' * widget.text.length.clamp(1, 20),
-              style: widget.style.copyWith(
-                color: widget.style.color?.withValues(alpha: 0.5),
-                letterSpacing: 1,
-              ),
-            ),
-    );
-  }
-}
-
-// ── Карточка предпросмотра ссылки ─────────────────────────────────
-
-class _LinkPreviewCard extends StatelessWidget {
-  final String url;
-  final bool isOut;
-
-  const _LinkPreviewCard({required this.url, required this.isOut});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final uri = Uri.tryParse(url);
-    final domain = uri?.host ?? url;
-
-    return GestureDetector(
-      onTap: () =>
-          launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
-      child: Container(
-        margin: const EdgeInsets.only(top: 6),
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: isOut
-              ? Colors.black.withValues(alpha: 0.15)
-              : cs.surfaceContainerHighest.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(10),
-          border: Border(
-            left: BorderSide(
-              color:
-                  isOut ? Colors.white.withValues(alpha: 0.4) : cs.primary,
-              width: 3,
-            ),
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Icon(Icons.language,
-                  size: 14,
-                  color: isOut ? Colors.white70 : cs.primary),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  domain,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: isOut ? Colors.white : cs.onSurface,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ]),
-            const SizedBox(height: 4),
-            Text(
-              url,
-              style: TextStyle(
-                fontSize: 11,
-                color: isOut
-                    ? Colors.white60
-                    : cs.onSurface.withValues(alpha: 0.5),
-              ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
         ),
       ),
     );

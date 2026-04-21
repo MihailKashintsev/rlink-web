@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:image_picker/image_picker.dart';
@@ -12,8 +13,12 @@ import 'package:path/path.dart' as p;
 
 import '../../l10n/app_l10n.dart';
 import '../../models/contact.dart';
+import '../../app_route_observer.dart';
 import '../../services/app_settings.dart';
+import '../../services/app_icon_service.dart';
+import '../widgets/message_cache_clear_dialog.dart';
 import '../../services/ble_service.dart';
+import '../../services/connection_transport.dart';
 import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
@@ -61,9 +66,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final settings = AppSettings.instance;
     final cs = Theme.of(context).colorScheme;
 
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      appBar: AppBar(title: Text(AppL10n.t('settings'))),
+      backgroundColor:
+          isDark ? const Color(0xFF0F0F0F) : const Color(0xFFE8E8E8),
+      appBar: AppBar(
+        title: Text(AppL10n.t('settings')),
+        elevation: 0,
+        scrolledUnderElevation: 0.5,
+        backgroundColor:
+            isDark ? const Color(0xFF121212) : const Color(0xFFF2F2F2),
+      ),
       body: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 28),
         children: [
 
           // ── Внешний вид ────────────────────────────────────────
@@ -136,6 +151,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     );
                   }),
                 ),
+
+                if (Platform.isIOS || Platform.isAndroid) ...[
+                  const SizedBox(height: 20),
+                  Text(AppL10n.t('settings_app_icon'),
+                      style: TextStyle(
+                          fontSize: 13, color: Theme.of(context).hintColor)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _AppIconChoiceChip(
+                        label: 'Rlink',
+                        selected: settings.appIconVariant == 0,
+                        onTap: () async {
+                          await settings.setAppIconVariant(0);
+                          await AppIconService.setVariant(0);
+                        },
+                      ),
+                      _AppIconChoiceChip(
+                        label: 'Mono',
+                        selected: settings.appIconVariant == 1,
+                        onTap: () async {
+                          await settings.setAppIconVariant(1);
+                          await AppIconService.setVariant(1);
+                        },
+                      ),
+                      _AppIconChoiceChip(
+                        label: 'Mirror',
+                        selected: settings.appIconVariant == 2,
+                        onTap: () async {
+                          await settings.setAppIconVariant(2);
+                          await AppIconService.setVariant(2);
+                        },
+                      ),
+                      _AppIconChoiceChip(
+                        label: AppL10n.t('settings_app_icon_variant_ai'),
+                        selected: settings.appIconVariant == 3,
+                        onTap: () async {
+                          await settings.setAppIconVariant(3);
+                          await AppIconService.setVariant(3);
+                        },
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),
@@ -174,6 +235,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ]),
           ),
 
+          if (Platform.isAndroid)
+            SwitchListTile(
+              secondary:
+                  Icon(Icons.emoji_emotions_outlined, color: cs.primary),
+              title: Text(AppL10n.t('settings_ios_emoji')),
+              subtitle: Text(
+                AppL10n.t('settings_ios_emoji_sub'),
+                style: const TextStyle(fontSize: 12),
+              ),
+              value: settings.useIosStyleEmoji,
+              onChanged: (v) => settings.setUseIosStyleEmoji(v),
+            ),
+
           // Compact mode
           SwitchListTile(
             secondary: Icon(Icons.compress_outlined, color: cs.primary),
@@ -187,9 +261,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // Bubble style
           ListTile(
             leading: Icon(Icons.chat_bubble_outline, color: cs.primary),
-            title: const Text('Стиль сообщений'),
+            title: Text(AppL10n.t('settings_message_style')),
             subtitle: Text(
-              ['Скруглённый', 'Квадратный', 'Минимальный'][settings.bubbleStyle],
+              [
+                AppL10n.t('settings_bubble_rounded'),
+                AppL10n.t('settings_bubble_square'),
+                AppL10n.t('settings_bubble_minimal'),
+              ][settings.bubbleStyle],
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             ),
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -218,9 +296,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // Message density
           ListTile(
             leading: Icon(Icons.density_medium, color: cs.primary),
-            title: const Text('Плотность сообщений'),
+            title: Text(AppL10n.t('settings_message_density')),
             subtitle: Text(
-              ['Свободная', 'Обычная', 'Компактная'][settings.messageDensity],
+              [
+                AppL10n.t('settings_density_relaxed'),
+                AppL10n.t('settings_density_normal'),
+                AppL10n.t('settings_density_compact'),
+              ][settings.messageDensity],
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             ),
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -240,9 +322,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // Clock format
           ListTile(
             leading: Icon(Icons.schedule, color: cs.primary),
-            title: const Text('Формат времени'),
+            title: Text(AppL10n.t('settings_time_format')),
             subtitle: Text(
-              settings.clockFormat == 0 ? '24-часовой' : '12-часовой (AM/PM)',
+              settings.clockFormat == 0
+                  ? AppL10n.t('settings_clock_24h')
+                  : AppL10n.t('settings_clock_12h'),
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             ),
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -267,12 +351,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // Reaction quick bar toggle
           SwitchListTile(
             secondary: Icon(Icons.emoji_emotions_outlined, color: cs.primary),
-            title: const Text('Быстрая панель реакций'),
+            title: Text(AppL10n.t('settings_reaction_quick_bar')),
             subtitle: Text(
-                'Показывать 6 эмодзи по долгому нажатию вместо полного списка',
+                AppL10n.t('settings_reaction_quick_bar_sub'),
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
             value: settings.showReactionsQuickBar,
             onChanged: (v) => settings.setShowReactionsQuickBar(v),
+          ),
+
+          // Quick reaction emoji (double tap on message)
+          ListTile(
+            leading: Icon(Icons.touch_app_outlined, color: cs.primary),
+            title: Text(AppL10n.t('settings_quick_reaction_double_tap')),
+            subtitle: Text(
+              '${AppL10n.t('settings_quick_reaction_now')}${settings.quickReactionEmoji}',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
+            trailing: Text(settings.quickReactionEmoji,
+                style: const TextStyle(fontSize: 22)),
+            onTap: () async {
+              final ctrl =
+                  TextEditingController(text: settings.quickReactionEmoji);
+              final picked = await showDialog<String>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: Text(AppL10n.t('settings_quick_reaction_title')),
+                  content: TextField(
+                    controller: ctrl,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      hintText: AppL10n.t('settings_quick_reaction_hint'),
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: Text(AppL10n.t('cancel')),
+                    ),
+                    FilledButton(
+                      onPressed: () =>
+                          Navigator.pop(ctx, ctrl.text.trim()),
+                      child: Text(AppL10n.t('save')),
+                    ),
+                  ],
+                ),
+              );
+              final e = (picked ?? '').trim();
+              if (e.isNotEmpty) {
+                await settings.setQuickReactionEmoji(e);
+              }
+            },
           ),
 
           // Chat background
@@ -330,6 +459,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ? (v) => settings.setNotifVibration(v)
                 : null,
           ),
+          SwitchListTile(
+            secondary: Icon(Icons.chat_bubble_outline,
+                color: settings.notifyPersonal && settings.notificationsEnabled
+                    ? cs.primary
+                    : Theme.of(context).hintColor),
+            title: Text(AppL10n.t('settings_notif_personal')),
+            value: settings.notifyPersonal,
+            onChanged: settings.notificationsEnabled
+                ? (v) => settings.setNotifyPersonal(v)
+                : null,
+          ),
+          SwitchListTile(
+            secondary: Icon(Icons.groups_2_outlined,
+                color: settings.notifyGroups && settings.notificationsEnabled
+                    ? cs.primary
+                    : Theme.of(context).hintColor),
+            title: Text(AppL10n.t('settings_notif_groups')),
+            value: settings.notifyGroups,
+            onChanged: settings.notificationsEnabled
+                ? (v) => settings.setNotifyGroups(v)
+                : null,
+          ),
+          SwitchListTile(
+            secondary: Icon(Icons.campaign_outlined,
+                color: settings.notifyChannels && settings.notificationsEnabled
+                    ? cs.primary
+                    : Theme.of(context).hintColor),
+            title: Text(AppL10n.t('settings_notif_channels')),
+            value: settings.notifyChannels,
+            onChanged: settings.notificationsEnabled
+                ? (v) => settings.setNotifyChannels(v)
+                : null,
+          ),
 
           // ── Конфиденциальность ─────────────────────────────────
           _SectionHeader(AppL10n.t('settings_privacy')),
@@ -356,15 +518,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
 
           // ── Статус в сети ──────────────────────────────────────
-          const _SectionHeader('Статус в сети'),
+          _SectionHeader(AppL10n.t('settings_section_presence')),
           _OnlineStatusSelector(
             current: settings.onlineStatusMode,
             onChanged: (mode) => settings.setOnlineStatusMode(mode),
           ),
 
           // ── Разрешения ─────────────────────────────────────────
-          const _SectionHeader('Разрешения'),
+          _SectionHeader(AppL10n.t('settings_section_permissions')),
           const _PermissionsSection(),
+
+          // ── Память / кэш ───────────────────────────────────────
+          _SectionHeader(AppL10n.t('settings_section_memory')),
+          ListTile(
+            leading: Icon(Icons.delete_sweep_outlined, color: cs.error),
+            title: Text(AppL10n.t('settings_clear_convo_cache')),
+            subtitle: Text(
+              AppL10n.t('settings_clear_convo_cache_sub'),
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
+            onTap: () => showMessageCacheClearDialog(context),
+          ),
 
           // ── Сообщения ──────────────────────────────────────────
           _SectionHeader(AppL10n.t('settings_messaging')),
@@ -421,14 +595,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
 
           // ── Сеть ──────────────────────────────────────────────
-          const _SectionHeader('Сеть'),
+          _SectionHeader(AppL10n.t('settings_section_network')),
 
           // Тип связи
           ListTile(
             leading: Icon(Icons.swap_horiz_rounded, color: cs.primary),
-            title: const Text('Тип связи'),
+            title: Text(AppL10n.t('settings_connection_type')),
             subtitle: Text(
-              const ['Только Bluetooth', 'Только Интернет', 'Оба канала'][settings.connectionMode],
+              [
+                AppL10n.t('conn_mode_ble_only'),
+                AppL10n.t('conn_mode_internet_only'),
+                AppL10n.t('conn_mode_all'),
+              ][settings.connectionMode],
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             ),
           ),
@@ -439,33 +617,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: Icons.bluetooth,
                 label: 'BLE',
                 selected: settings.connectionMode == 0,
-                onTap: () => settings.setConnectionMode(0),
+                onTap: () async {
+                  await settings.setConnectionMode(0);
+                  await applyConnectionTransport();
+                },
               ),
               const SizedBox(width: 8),
               _NetChip(
                 icon: Icons.wifi,
-                label: 'Интернет',
+                label: AppL10n.t('net_label_internet'),
                 selected: settings.connectionMode == 1,
-                onTap: () => settings.setConnectionMode(1),
+                onTap: () async {
+                  await settings.setConnectionMode(1);
+                  await applyConnectionTransport();
+                },
               ),
               const SizedBox(width: 8),
               _NetChip(
                 icon: Icons.sync_alt_rounded,
-                label: 'Оба',
+                label: AppL10n.t('net_label_both'),
                 selected: settings.connectionMode == 2,
-                onTap: () => settings.setConnectionMode(2),
+                onTap: () async {
+                  await settings.setConnectionMode(2);
+                  await applyConnectionTransport();
+                },
               ),
             ]),
           ),
+          if (Platform.isAndroid && settings.connectionMode == 2)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                AppL10n.t('wifi_direct_note_android'),
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ),
           const SizedBox(height: 12),
 
           // Приоритет медиа / файлов
           if (settings.connectionMode == 2) ...[
             ListTile(
               leading: Icon(Icons.perm_media_outlined, color: cs.primary),
-              title: const Text('Приоритет для медиа'),
+              title: Text(AppL10n.t('settings_media_priority')),
               subtitle: Text(
-                settings.mediaPriority == 0 ? 'Отправлять через Bluetooth' : 'Отправлять через Интернет',
+                settings.mediaPriority == 0
+                    ? AppL10n.t('media_send_via_bt')
+                    : AppL10n.t('media_send_via_internet'),
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
               ),
             ),
@@ -481,7 +678,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 const SizedBox(width: 8),
                 _NetChip(
                   icon: Icons.wifi,
-                  label: 'Интернет',
+                  label: AppL10n.t('net_label_internet'),
                   selected: settings.mediaPriority == 1,
                   onTap: () => settings.setMediaPriority(1),
                 ),
@@ -509,12 +706,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               : Colors.red,
                     ),
                     title: Text(connected
-                        ? 'Сервер подключён'
+                        ? AppL10n.t('relay_server_connected')
                         : connecting
-                            ? 'Подключение...'
-                            : 'Сервер недоступен'),
+                            ? AppL10n.t('relay_server_connecting')
+                            : AppL10n.t('relay_server_unavailable')),
                     subtitle: Text(
-                      connected ? 'Онлайн: $count пользователей' : 'Нет соединения с ретранслятором',
+                      connected
+                          ? AppL10n.t('relay_online').replaceAll('{n}', '$count')
+                          : AppL10n.t('relay_no_connection'),
                       style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                     ),
                     trailing: connecting
@@ -524,7 +723,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           )
                         : IconButton(
                             icon: const Icon(Icons.refresh, size: 20),
-                            tooltip: connected ? 'Переподключиться' : 'Подключиться',
+                            tooltip: connected
+                                ? AppL10n.t('tool_reconnect')
+                                : AppL10n.t('tool_connect'),
                             onPressed: () => RelayService.instance.reconnect(),
                           ),
                   ),
@@ -549,7 +750,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (context.mounted) {
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('История очищена')),
+                    SnackBar(content: Text(AppL10n.t('snack_history_cleared'))),
                   );
                 }
               },
@@ -571,7 +772,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (context.mounted) {
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Контакты удалены')),
+                    SnackBar(content: Text(AppL10n.t('snack_contacts_deleted'))),
                   );
                 }
               },
@@ -625,10 +826,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onTap: _handleVersionTap,
               child: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 24),
-                child: Text(
-                  'Rlink v0.0.2 • BLE mesh messenger',
-                  style: TextStyle(
-                      color: Theme.of(context).hintColor, fontSize: 12),
+                child: FutureBuilder<PackageInfo>(
+                  future: PackageInfo.fromPlatform(),
+                  builder: (context, snap) {
+                    final v = snap.data?.version ?? '0.0.5';
+                    return Text(
+                      'Rlink v$v • ${AppL10n.t('footer_ble_mesh')}',
+                      style: TextStyle(
+                          color: Theme.of(context).hintColor, fontSize: 12),
+                    );
+                  },
                 ),
               ),
             ),
@@ -661,25 +868,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Доступ'),
+        title: Text(AppL10n.t('admin_access_title')),
         content: TextField(
           controller: ctrl,
           obscureText: true,
           autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Пароль',
-            border: OutlineInputBorder(),
+          decoration: InputDecoration(
+            labelText: AppL10n.t('admin_password_label'),
+            border: const OutlineInputBorder(),
           ),
           onSubmitted: (_) => _checkAdminPassword(ctx, ctrl.text),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отмена'),
+            child: Text(AppL10n.t('cancel')),
           ),
           FilledButton(
             onPressed: () => _checkAdminPassword(ctx, ctrl.text),
-            child: const Text('Войти'),
+            child: Text(AppL10n.t('admin_login')),
           ),
         ],
       ),
@@ -690,8 +897,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final hash = sha256Hex(input);
     if (hash != AppSettings.instance.adminPasswordHash) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Неверный пароль'),
+        SnackBar(
+          content: Text(AppL10n.t('admin_wrong_password')),
           backgroundColor: Colors.red,
         ),
       );
@@ -731,14 +938,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 8),
             ...AppL10n.supportedLocales.map((locale) {
               final selected = settings.locale == locale.code;
+              final cs = Theme.of(context).colorScheme;
+              final Widget? subtitle;
+              if (locale.showPartialUiHint) {
+                subtitle = Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      AppL10n.t('locale_ui_partial_note'),
+                      style: TextStyle(
+                        fontSize: 11,
+                        height: 1.25,
+                        color: cs.tertiary,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      locale.name,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).hintColor,
+                      ),
+                    ),
+                  ],
+                );
+              } else if (locale.code != 'system') {
+                subtitle = Text(
+                  locale.name,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).hintColor,
+                  ),
+                );
+              } else {
+                subtitle = null;
+              }
               return ListTile(
                 title: Text(locale.nativeName),
-                subtitle: locale.code != 'system'
-                    ? Text(locale.name,
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: Theme.of(context).hintColor))
-                    : null,
+                subtitle: subtitle,
+                isThreeLine: locale.showPartialUiHint,
                 trailing: selected
                     ? Icon(Icons.check_rounded,
                         color: Theme.of(context).colorScheme.primary)
@@ -963,6 +1201,43 @@ class _ThemeChip extends StatelessWidget {
   }
 }
 
+class _AppIconChoiceChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Future<void> Function() onTap;
+
+  const _AppIconChoiceChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return GestureDetector(
+      onTap: () => onTap(),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? cs.primary : cs.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(20),
+          border: selected ? null : Border.all(color: cs.outlineVariant),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            color: selected ? cs.onPrimary : cs.onSurfaceVariant,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _NetChip extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -1052,12 +1327,12 @@ class _ChatBgTile extends StatelessWidget {
         if (bgPath != null)
           IconButton(
             icon: const Icon(Icons.delete_outline, color: Colors.red),
-            tooltip: 'Убрать фон',
+            tooltip: AppL10n.t('settings_chat_bg_remove_tooltip'),
             onPressed: () => settings.setChatBgForPeer('__global__', null),
           ),
         IconButton(
           icon: const Icon(Icons.photo_library_outlined),
-          tooltip: 'Выбрать из галереи',
+          tooltip: AppL10n.t('settings_chat_bg_pick_tooltip'),
           onPressed: () => _pickBg(context),
         ),
       ]),
@@ -1096,24 +1371,38 @@ class _OnlineStatusSelector extends StatelessWidget {
 
   const _OnlineStatusSelector({required this.current, required this.onChanged});
 
-  static const _statuses = [
-    (icon: Icons.circle, color: Color(0xFF4CAF50), label: 'В сети', sub: 'Доступен для сообщений'),
-    (icon: Icons.circle, color: Color(0xFFFFC107), label: 'Не беспокоить', sub: 'В сети, но занят'),
-    (icon: Icons.circle, color: Color(0xFFF44336), label: 'Занят', sub: 'Не писать'),
-  ];
-
   @override
   Widget build(BuildContext context) {
+    final statuses = [
+      (
+        icon: Icons.circle,
+        color: const Color(0xFF4CAF50),
+        label: AppL10n.t('online_status_green'),
+        sub: AppL10n.t('online_status_green_sub'),
+      ),
+      (
+        icon: Icons.circle,
+        color: const Color(0xFFFFC107),
+        label: AppL10n.t('online_status_yellow'),
+        sub: AppL10n.t('online_status_yellow_sub'),
+      ),
+      (
+        icon: Icons.circle,
+        color: const Color(0xFFF44336),
+        label: AppL10n.t('online_status_red'),
+        sub: AppL10n.t('online_status_red_sub'),
+      ),
+    ];
     return Column(
       children: [
-        for (var i = 0; i < _statuses.length; i++)
+        for (var i = 0; i < statuses.length; i++)
           RadioListTile<int>(
             value: i,
             groupValue: current,
             onChanged: (v) { if (v != null) onChanged(v); },
-            secondary: Icon(_statuses[i].icon, color: _statuses[i].color, size: 14),
-            title: Text(_statuses[i].label),
-            subtitle: Text(_statuses[i].sub,
+            secondary: Icon(statuses[i].icon, color: statuses[i].color, size: 14),
+            title: Text(statuses[i].label),
+            subtitle: Text(statuses[i].sub,
                 style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
             dense: true,
           ),
@@ -1122,7 +1411,7 @@ class _OnlineStatusSelector extends StatelessWidget {
           child: Row(children: [
             Icon(Icons.circle, color: Colors.grey.shade500, size: 10),
             const SizedBox(width: 8),
-            Text('Серый — автоматически, когда не в сети',
+            Text(AppL10n.t('online_status_gray_hint'),
                 style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
           ]),
         ),
@@ -1142,46 +1431,109 @@ class _PermissionsSection extends StatefulWidget {
 }
 
 class _PermissionsSectionState extends State<_PermissionsSection>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, RouteAware {
   final Map<Permission, PermissionStatus> _statuses = {};
   bool _loading = true;
+  Timer? _pollTimer;
+  PageRoute<dynamic>? _subscribedRoute;
 
-  static List<(Permission, String, IconData)> get _permissions => [
+  static List<(Permission, IconData)> get _permissions => [
     if (Platform.isAndroid) ...[
-      (Permission.bluetoothScan, 'Bluetooth сканирование', Icons.bluetooth_searching),
-      (Permission.bluetoothConnect, 'Bluetooth подключение', Icons.bluetooth_connected),
-      (Permission.bluetoothAdvertise, 'Bluetooth реклама', Icons.settings_bluetooth),
+      (Permission.bluetoothScan, Icons.bluetooth_searching),
+      (Permission.bluetoothConnect, Icons.bluetooth_connected),
+      (Permission.bluetoothAdvertise, Icons.settings_bluetooth),
     ],
-    if (Platform.isIOS)
-      (Permission.bluetooth, 'Bluetooth', Icons.bluetooth),
-    (Permission.locationWhenInUse, 'Геолокация', Icons.location_on_outlined),
-    (Permission.microphone, 'Микрофон', Icons.mic_outlined),
-    (Permission.camera, 'Камера', Icons.camera_alt_outlined),
-    (Permission.notification, 'Уведомления', Icons.notifications_outlined),
-    (Permission.photos, 'Фото', Icons.photo_library_outlined),
+    if (Platform.isIOS) (Permission.bluetooth, Icons.bluetooth),
+    (Permission.locationWhenInUse, Icons.location_on_outlined),
+    (Permission.microphone, Icons.mic_outlined),
+    (Permission.camera, Icons.camera_alt_outlined),
+    (Permission.notification, Icons.notifications_outlined),
+    (Permission.photos, Icons.photo_library_outlined),
     if (Platform.isAndroid)
-      (Permission.nearbyWifiDevices, 'Wi-Fi устройства', Icons.wifi),
+      (Permission.nearbyWifiDevices, Icons.wifi),
   ];
+
+  static String _permissionLabel(Permission p) {
+    switch (p) {
+      case Permission.bluetoothScan:
+        return AppL10n.t('perm_bluetooth_scan');
+      case Permission.bluetoothConnect:
+        return AppL10n.t('perm_bluetooth_connect');
+      case Permission.bluetoothAdvertise:
+        return AppL10n.t('perm_bluetooth_advertise');
+      case Permission.bluetooth:
+        return AppL10n.t('perm_bluetooth');
+      case Permission.locationWhenInUse:
+        return AppL10n.t('perm_location');
+      case Permission.microphone:
+        return AppL10n.t('perm_microphone');
+      case Permission.camera:
+        return AppL10n.t('perm_camera');
+      case Permission.notification:
+        return AppL10n.t('perm_notification');
+      case Permission.photos:
+        return AppL10n.t('perm_photos');
+      case Permission.nearbyWifiDevices:
+        return AppL10n.t('perm_wifi_devices');
+      default:
+        return p.toString();
+    }
+  }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadStatuses();
+    _pollTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      if (mounted) _loadStatuses();
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute<dynamic> && route != _subscribedRoute) {
+      if (_subscribedRoute != null) {
+        appRouteObserver.unsubscribe(this);
+      }
+      _subscribedRoute = route;
+      appRouteObserver.subscribe(this, route);
+    }
   }
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
+    appRouteObserver.unsubscribe(this);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
+  void didPopNext() => _refreshAfterRouteVisible();
+
+  @override
+  void didPush() => _refreshAfterRouteVisible();
+
+  void _refreshAfterRouteVisible() {
+    if (!mounted) return;
+    _loadStatuses();
+    Future.delayed(const Duration(milliseconds: 450), () {
+      if (mounted) _loadStatuses();
+    });
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Когда пользователь вернулся из системных настроек — перечитываем статусы.
-    // Задержка 600 мс нужна на iOS: ОС не сразу обновляет кэш permission_handler.
+    // После системных настроек iOS иногда отстаёт кэш permission_handler —
+    // делаем два опроса с задержкой.
     if (state == AppLifecycleState.resumed && mounted) {
-      Future.delayed(const Duration(milliseconds: 600), () {
+      Future.delayed(const Duration(milliseconds: 800), () {
+        if (mounted) _loadStatuses();
+      });
+      Future.delayed(const Duration(milliseconds: 2600), () {
         if (mounted) _loadStatuses();
       });
     }
@@ -1189,7 +1541,7 @@ class _PermissionsSectionState extends State<_PermissionsSection>
 
   Future<void> _loadStatuses() async {
     final results = <Permission, PermissionStatus>{};
-    for (final (perm, _, _) in _permissions) {
+    for (final (perm, _) in _permissions) {
       try {
         // Используем actual текущий статус от ОС (без кеша).
         results[perm] = await perm.status;
@@ -1230,7 +1582,7 @@ class _PermissionsSectionState extends State<_PermissionsSection>
     final cs = Theme.of(context).colorScheme;
     final items = <Widget>[];
 
-    for (final (perm, label, icon) in _permissions) {
+    for (final (perm, icon) in _permissions) {
       final status = _statuses[perm];
       if (status == null) continue; // недоступно на этой платформе
 
@@ -1241,29 +1593,29 @@ class _PermissionsSectionState extends State<_PermissionsSection>
       final Color subtitleColor;
       switch (kind) {
         case 'granted':
-          subtitleText = 'Разрешено';
+          subtitleText = AppL10n.t('perm_status_granted');
           subtitleColor = Colors.green;
           break;
         case 'limited':
-          subtitleText = 'Разрешено частично';
+          subtitleText = AppL10n.t('perm_status_limited');
           subtitleColor = Colors.green;
           break;
         case 'permanent':
-          subtitleText = 'Запрещено — откройте настройки';
+          subtitleText = AppL10n.t('perm_status_permanent');
           subtitleColor = Colors.redAccent;
           break;
         case 'restricted':
-          subtitleText = 'Недоступно (ограничено системой)';
+          subtitleText = AppL10n.t('perm_status_restricted');
           subtitleColor = Colors.grey;
           break;
         default:
-          subtitleText = 'Не разрешено';
+          subtitleText = AppL10n.t('perm_status_denied');
           subtitleColor = Colors.orange;
       }
 
       items.add(ListTile(
         leading: Icon(icon, color: allowed ? cs.primary : Colors.grey),
-        title: Text(label),
+        title: Text(_permissionLabel(perm)),
         subtitle: Text(
           subtitleText,
           style: TextStyle(fontSize: 12, color: subtitleColor),
@@ -1284,10 +1636,15 @@ class _PermissionsSectionState extends State<_PermissionsSection>
                       final result = await perm.request();
                       if (mounted) {
                         setState(() => _statuses[perm] = result);
+                        Future.delayed(const Duration(milliseconds: 400), () {
+                          if (mounted) _loadStatuses();
+                        });
                       }
                     },
                     child: Text(
-                      kind == 'permanent' ? 'Открыть' : 'Разрешить',
+                      kind == 'permanent'
+                          ? AppL10n.t('perm_open')
+                          : AppL10n.t('perm_grant'),
                       style: const TextStyle(fontSize: 12),
                     ),
                   ),
@@ -1305,7 +1662,7 @@ class _PermissionsSectionState extends State<_PermissionsSection>
             child: OutlinedButton.icon(
               onPressed: _loadStatuses,
               icon: const Icon(Icons.refresh, size: 18),
-              label: const Text('Проверить разрешения'),
+              label: Text(AppL10n.t('perm_refresh_list')),
               style: OutlinedButton.styleFrom(
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -1318,7 +1675,7 @@ class _PermissionsSectionState extends State<_PermissionsSection>
             child: OutlinedButton.icon(
               onPressed: () => openAppSettings(),
               icon: const Icon(Icons.settings_outlined, size: 18),
-              label: const Text('Настройки ОС'),
+              label: Text(AppL10n.t('perm_os_settings')),
               style: OutlinedButton.styleFrom(
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -1410,14 +1767,14 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
               ),
             ),
             const SizedBox(height: 12),
-            Text('Найти собеседника',
+            Text(AppL10n.t('peer_search_title'),
                 style: Theme.of(context).textTheme.titleMedium
                     ?.copyWith(fontWeight: FontWeight.w600)),
             const SizedBox(height: 4),
             Text(
               relayConnected
-                  ? 'Поиск по никнейму, короткому коду или ключу'
-                  : 'Введи полный публичный ключ (relay не подключён)',
+                  ? AppL10n.t('peer_search_sub_connected')
+                  : AppL10n.t('peer_search_sub_disconnected'),
               style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
             ),
             const SizedBox(height: 12),
@@ -1429,7 +1786,7 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                 autofocus: true,
                 style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
                 decoration: InputDecoration(
-                  hintText: 'Никнейм, код или ключ...',
+                  hintText: AppL10n.t('peer_search_hint'),
                   hintStyle: TextStyle(
                     color: Theme.of(context).hintColor,
                     fontFamily: 'sans-serif',
@@ -1476,8 +1833,8 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                         const SizedBox(height: 8),
                         Text(
                           relayConnected
-                              ? 'Никого не найдено в сети'
-                              : 'Relay не подключён — поиск недоступен',
+                              ? AppL10n.t('peer_not_found_online')
+                              : AppL10n.t('peer_relay_off_no_search'),
                           style: TextStyle(
                             color: Theme.of(context).hintColor, fontSize: 13),
                         ),
@@ -1486,7 +1843,7 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                           FilledButton.icon(
                             onPressed: _openDirect,
                             icon: const Icon(Icons.chat_bubble_outline, size: 18),
-                            label: const Text('Открыть чат по ключу'),
+                            label: Text(AppL10n.t('peer_open_chat_by_key')),
                             style: FilledButton.styleFrom(
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
@@ -1541,9 +1898,9 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                               ),
                             ),
                             const SizedBox(width: 4),
-                            Text('в сети',
+                            Text(AppL10n.t('peer_online'),
                                 style: TextStyle(
-                                  fontSize: 11, color: cs.onSurfaceVariant)),
+                                    fontSize: 11, color: cs.onSurfaceVariant)),
                           ],
                         ),
                         onTap: () => widget.onOpenChat(
@@ -1565,7 +1922,7 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                 child: TextButton.icon(
                   onPressed: _openDirect,
                   icon: const Icon(Icons.arrow_forward_rounded, size: 18),
-                  label: const Text('Открыть чат напрямую по ключу'),
+                  label: Text(AppL10n.t('peer_open_direct_by_key')),
                 ),
               ),
             const SizedBox(height: 16),
