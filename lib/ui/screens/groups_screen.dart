@@ -1,18 +1,22 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../models/group.dart';
 import '../../models/chat_message.dart';
 import '../../models/contact.dart';
 import '../../models/shared_collab.dart';
 import '../../models/message_poll.dart';
+import '../../services/app_settings.dart';
 import '../../services/crypto_service.dart';
 import '../widgets/animated_transitions.dart';
 import '../../services/broadcast_outbox_service.dart';
@@ -20,7 +24,11 @@ import '../../services/gossip_router.dart';
 import '../../services/group_service.dart';
 import '../../services/notification_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/embedded_video_pause_bus.dart';
+import '../../services/voice_service.dart';
 import '../../services/image_service.dart';
+import '../../services/sticker_collection_service.dart';
+import '../../services/invite_dm_service.dart';
 import '../../services/profile_service.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/reactions.dart';
@@ -32,6 +40,11 @@ import '../widgets/missing_local_media.dart';
 import '../../utils/channel_mentions.dart';
 import 'collab_compose_dialogs.dart';
 import 'chat_screen.dart';
+import '../mention_nav.dart';
+import 'image_editor_screen.dart';
+import '../widgets/forward_target_sheet.dart';
+import '../widgets/media_gallery_send_sheet.dart';
+import 'square_video_recorder_screen.dart';
 
 class GroupsScreen extends StatefulWidget {
   const GroupsScreen({super.key});
@@ -207,6 +220,55 @@ class _GroupTile extends StatelessWidget {
 
 // ── Group chat screen ────────────────────────────────────────────
 
+class _GroupFmtBtn extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  final bool bold;
+  final bool italic;
+  final bool strikethrough;
+  final bool underline;
+
+  const _GroupFmtBtn({
+    required this.label,
+    required this.onTap,
+    this.bold = false,
+    this.italic = false,
+    this.strikethrough = false,
+    this.underline = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: Material(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: bold ? FontWeight.w800 : FontWeight.w500,
+                fontStyle: italic ? FontStyle.italic : FontStyle.normal,
+                decoration: underline
+                    ? TextDecoration.underline
+                    : strikethrough
+                        ? TextDecoration.lineThrough
+                        : TextDecoration.none,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class GroupChatScreen extends StatefulWidget {
   final Group group;
   const GroupChatScreen({super.key, required this.group});
@@ -225,19 +287,41 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   late Group _group;
   final _focusNode = FocusNode();
   bool _showScrollToBottomFab = false;
+  bool _showFormatStrip = false;
+  int _length = 0;
+  static const _kMaxGroupMsgLen = 12000;
 
   String get _myId => CryptoService.instance.publicKeyHex;
+  bool get _composeHasText => _controller.text.trim().isNotEmpty;
+  bool get _composeOver => _length > _kMaxGroupMsgLen;
   bool get _isCreator => _group.creatorId == _myId;
+
+  void _onAppSettingsChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void initState() {
     super.initState();
     _group = widget.group;
+    AppSettings.instance.addListener(_onAppSettingsChanged);
     unawaited(_loadAndMarkRead());
     GroupService.instance.version.addListener(_load);
     _scrollController.addListener(_onScrollFab);
     _requestHistoryDelta();
     NotificationService.instance.currentRoute.value = 'group:${_group.id}';
+    _controller.addListener(_onComposeChanged);
+  }
+
+  void _onComposeChanged() {
+    if (!mounted) return;
+    final sel = _controller.selection;
+    setState(() {
+      _length = _controller.text.length;
+      if (!sel.isValid || sel.isCollapsed) {
+        _showFormatStrip = false;
+      }
+    });
   }
 
   Future<void> _requestHistoryDelta() async {
@@ -252,9 +336,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   @override
   void dispose() {
+    AppSettings.instance.removeListener(_onAppSettingsChanged);
     unawaited(GroupService.instance.markGroupRead(_group.id));
     _scrollController.removeListener(_onScrollFab);
     GroupService.instance.version.removeListener(_load);
+    _controller.removeListener(_onComposeChanged);
     _controller.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
@@ -417,7 +503,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   Future<void> _send() async {
     final text = _controller.text.trim();
-    if (text.isEmpty || _isSending) return;
+    if (text.isEmpty || _isSending || _composeOver) return;
 
     setState(() => _isSending = true);
     _controller.clear();
@@ -557,27 +643,30 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
-  Future<void> _sendImage() async {
+  Future<void> _sendGroupSquareVideo() async {
     if (_isSending) return;
-    final picked = await _picker.pickImage(source: ImageSource.gallery);
-    if (picked == null || !mounted) return;
-
-    setState(() { _isSending = true; _sendProgress = 0.0; });
+    if (!mounted) return;
+    final raw = await showSquareVideoRecorder(context);
+    if (raw == null || !mounted) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
     try {
-      final myId = CryptoService.instance.publicKeyHex;
+      final myId = _myId;
+      final path = await ImageService.instance.saveVideo(raw, isSquare: true);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final msgId = const Uuid().v4();
       final now = DateTime.now().millisecondsSinceEpoch;
 
-      // Compress image
-      final path = await ImageService.instance.saveChatImageFromPicker(picked.path);
-      final bytes = await File(path).readAsBytes();
-      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-
-      // Send via gossip (broadcast, no specific recipient)
       await GossipRouter.instance.sendImgMeta(
         msgId: msgId,
         totalChunks: chunks.length,
         fromId: myId,
+        isAvatar: false,
+        isVideo: true,
+        isSquare: true,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -589,32 +678,95 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
       }
 
-      // Save locally
       final msg = GroupMessage(
         id: msgId,
-        groupId: widget.group.id,
+        groupId: _group.id,
         senderId: myId,
-        text: '📷',
-        imagePath: path,
+        text: '⬛',
+        videoPath: path,
         isOutgoing: true,
         timestamp: now,
       );
       await GroupService.instance.saveMessage(msg);
-
       await BroadcastOutboxService.instance.enqueueGroupMessage(
-        groupId: widget.group.id,
+        groupId: _group.id,
         senderId: myId,
-        text: '📷',
+        text: '⬛',
         messageId: msgId,
         timestamp: now,
-        hasImage: true,
+        hasVideo: true,
       );
-
       _scrollToBottom();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
+          SnackBar(
+              content: Text('Квадратик: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() { _isSending = false; _sendProgress = 0.0; });
+    }
+  }
+
+  Future<void> _sendGroupVideoFromGallery() async {
+    if (_isSending) return;
+    final picked = await _picker.pickVideo(source: ImageSource.gallery);
+    if (picked == null || !mounted) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final myId = _myId;
+      final path =
+          await ImageService.instance.saveVideo(picked.path, isSquare: false);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final msgId = const Uuid().v4();
+      final now = DateTime.now().millisecondsSinceEpoch;
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        isAvatar: false,
+        isVideo: true,
+        isSquare: false,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+
+      final msg = GroupMessage(
+        id: msgId,
+        groupId: _group.id,
+        senderId: myId,
+        text: '📹',
+        videoPath: path,
+        isOutgoing: true,
+        timestamp: now,
+      );
+      await GroupService.instance.saveMessage(msg);
+      await BroadcastOutboxService.instance.enqueueGroupMessage(
+        groupId: _group.id,
+        senderId: myId,
+        text: '📹',
+        messageId: msgId,
+        timestamp: now,
+        hasVideo: true,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Видео: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -852,6 +1004,394 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
+  Future<void> _openGroupMediaGallery() async {
+    if (_isSending) return;
+    if (!mounted) return;
+    await showMediaGallerySendSheet(
+      context,
+      onPhotoPath: _groupGalleryPhoto,
+      onGifPath: _groupGalleryGif,
+      onVideoPath: _groupGalleryVideo,
+      onStickerCropped: _groupGalleryStickerCrop,
+      onStickerFromLibrary: _groupGalleryStickerLib,
+      onFilePath: _groupGalleryFile,
+    );
+  }
+
+  Future<void> _groupGalleryGif(String rawPath) async {
+    if (_isSending) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final myId = _myId;
+      final path =
+          await ImageService.instance.saveChatImageFromPicker(rawPath);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final msgId = const Uuid().v4();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+      final cap = _controller.text.trim();
+      final msg = GroupMessage(
+        id: msgId,
+        groupId: widget.group.id,
+        senderId: myId,
+        text: cap.isEmpty ? '🎞 GIF' : cap,
+        imagePath: path,
+        isOutgoing: true,
+        timestamp: now,
+      );
+      await GroupService.instance.saveMessage(msg);
+      await BroadcastOutboxService.instance.enqueueGroupMessage(
+        groupId: widget.group.id,
+        senderId: myId,
+        text: msg.text,
+        messageId: msgId,
+        timestamp: now,
+        hasImage: true,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('GIF: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _groupGalleryPhoto(String rawPath) async {
+    if (_isSending) return;
+    if (rawPath.toLowerCase().endsWith('.gif')) {
+      await _groupGalleryGif(rawPath);
+      return;
+    }
+    final editedBytes = await Navigator.push<Uint8List>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ImageEditorScreen(imagePath: rawPath),
+      ),
+    );
+    if (editedBytes == null || !mounted) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final myId = _myId;
+      final tmpDir = await getTemporaryDirectory();
+      final tmpFile = File(
+        '${tmpDir.path}/grp_gal_${DateTime.now().millisecondsSinceEpoch}.png');
+      await tmpFile.writeAsBytes(editedBytes);
+      final path = await ImageService.instance.compressAndSave(tmpFile.path);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final msgId = const Uuid().v4();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+      final msg = GroupMessage(
+        id: msgId,
+        groupId: widget.group.id,
+        senderId: myId,
+        text: _controller.text.trim().isEmpty ? '📷' : _controller.text.trim(),
+        imagePath: path,
+        isOutgoing: true,
+        timestamp: now,
+      );
+      await GroupService.instance.saveMessage(msg);
+      await BroadcastOutboxService.instance.enqueueGroupMessage(
+        groupId: widget.group.id,
+        senderId: myId,
+        text: msg.text,
+        messageId: msgId,
+        timestamp: now,
+        hasImage: true,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _groupGalleryVideo(String rawPath) async {
+    if (_isSending) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final myId = _myId;
+      final path =
+          await ImageService.instance.saveVideo(rawPath, isSquare: false);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final msgId = const Uuid().v4();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        isAvatar: false,
+        isVideo: true,
+        isSquare: false,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+      final msg = GroupMessage(
+        id: msgId,
+        groupId: widget.group.id,
+        senderId: myId,
+        text: '📹',
+        videoPath: path,
+        isOutgoing: true,
+        timestamp: now,
+      );
+      await GroupService.instance.saveMessage(msg);
+      await BroadcastOutboxService.instance.enqueueGroupMessage(
+        groupId: widget.group.id,
+        senderId: myId,
+        text: '📹',
+        messageId: msgId,
+        timestamp: now,
+        hasVideo: true,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Видео: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _groupPublishStickerPath(String path) async {
+    final myId = _myId;
+    final bytes = await File(path).readAsBytes();
+    final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+    final msgId = const Uuid().v4();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await GossipRouter.instance.sendImgMeta(
+      msgId: msgId,
+      totalChunks: chunks.length,
+      fromId: myId,
+      isSticker: true,
+    );
+    for (var i = 0; i < chunks.length; i++) {
+      await GossipRouter.instance.sendImgChunk(
+        msgId: msgId,
+        index: i,
+        base64Data: chunks[i],
+        fromId: myId,
+      );
+      if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+    }
+    final cap = _controller.text.trim();
+    final msg = GroupMessage(
+      id: msgId,
+      groupId: widget.group.id,
+      senderId: myId,
+      text: cap.isEmpty ? ' ' : cap,
+      imagePath: path,
+      isOutgoing: true,
+      timestamp: now,
+    );
+    await GroupService.instance.saveMessage(msg);
+    await BroadcastOutboxService.instance.enqueueGroupMessage(
+      groupId: widget.group.id,
+      senderId: myId,
+      text: msg.text,
+      messageId: msgId,
+      timestamp: now,
+      hasImage: true,
+    );
+    _scrollToBottom();
+  }
+
+  Future<void> _groupGalleryStickerCrop(Uint8List bytes) async {
+    if (_isSending) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final path = await ImageService.instance.saveStickerFromBytes(bytes);
+      unawaited(
+          StickerCollectionService.instance.registerAbsoluteStickerPath(path));
+      await _groupPublishStickerPath(path);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Стикер: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _groupGalleryStickerLib(String absPath) async {
+    if (_isSending) return;
+    if (!File(absPath).existsSync()) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      await _groupPublishStickerPath(absPath);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Стикер: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _groupGalleryFile(String srcPath) async {
+    if (_isSending) return;
+    if (!File(srcPath).existsSync()) return;
+    final originalName = p.basename(srcPath);
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final myId = _myId;
+      final msgId = const Uuid().v4();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final docsDir = await getApplicationDocumentsDirectory();
+      final filesDir = Directory('${docsDir.path}/files');
+      if (!filesDir.existsSync()) filesDir.createSync(recursive: true);
+      final destPath =
+          '${filesDir.path}/${DateTime.now().millisecondsSinceEpoch}_$originalName';
+      await File(srcPath).copy(destPath);
+      final fileBytes = await File(destPath).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(fileBytes);
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: myId,
+        isAvatar: false,
+        isFile: true,
+        fileName: originalName,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+      final msg = GroupMessage(
+        id: msgId,
+        groupId: widget.group.id,
+        senderId: myId,
+        text: '\u{1F4CE} $originalName',
+        isOutgoing: true,
+        timestamp: now,
+      );
+      await GroupService.instance.saveMessage(msg);
+      await BroadcastOutboxService.instance.enqueueGroupMessage(
+        groupId: widget.group.id,
+        senderId: myId,
+        text: msg.text,
+        messageId: msgId,
+        timestamp: now,
+        hasFile: true,
+        fileName: originalName,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Файл: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
   void _inviteMember() async {
     final contacts = ChatStorageService.instance.contactsNotifier.value;
     if (contacts.isEmpty) {
@@ -899,6 +1439,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                           avatarColor: group.avatarColor,
                           avatarEmoji: group.avatarEmoji,
                           createdAt: group.createdAt,
+                        );
+                        await InviteDmService.sendGroupInviteDm(
+                          targetPublicKey: c.publicKeyHex,
+                          payload: {
+                            'groupId': group.id,
+                            'groupName': group.name,
+                            'inviterId': CryptoService.instance.publicKeyHex,
+                            'inviterNick': myProfile?.nickname ?? '',
+                            'creatorId': group.creatorId,
+                            'memberIds': group.memberIds,
+                            'avatarColor': group.avatarColor,
+                            'avatarEmoji': group.avatarEmoji,
+                            'createdAt': group.createdAt,
+                          },
                         );
                         if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
@@ -1190,41 +1744,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   Future<void> _forwardGroupMessageToDm(GroupMessage m) async {
-    final peers = await ChatStorageService.instance.getChatPeerIds();
-    final targets = peers.toList();
-    if (!mounted) return;
-    if (targets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Нет личных чатов для пересылки')),
-      );
-      return;
-    }
-    final nickMap = <String, String>{};
-    for (final c in ChatStorageService.instance.contactsNotifier.value) {
-      nickMap[c.publicKeyHex] = c.nickname;
-    }
     final origId = m.forwardFromId ?? m.senderId;
     final origNick = m.forwardFromNick ?? _nickFor(m.senderId);
-    final picked = await showModalBottomSheet<String>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            const ListTile(title: Text('Переслать в личный чат…')),
-            for (final pid in targets)
-              ListTile(
-                leading: const Icon(Icons.person_outline),
-                title: Text(nickMap[pid] ?? '${pid.substring(0, 8)}…'),
-                onTap: () => Navigator.pop(ctx, pid),
-              ),
-          ],
-        ),
-      ),
-    );
+    final picked = await showForwardDmTargetSheet(context);
     if (picked == null || !mounted) return;
-    final nick = nickMap[picked] ?? '${picked.substring(0, 8)}…';
-    final c = await ChatStorageService.instance.getContact(picked);
+    final c = await ChatStorageService.instance.getContact(picked.peerId);
     if (!mounted) return;
     final draft = DmForwardDraft(
       message: _syntheticChatFromGroup(m),
@@ -1236,11 +1760,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => ChatScreen(
-          peerId: picked,
-          peerNickname: nick,
-          peerAvatarColor: c?.avatarColor ?? 0xFF42A5F5,
-          peerAvatarEmoji: c?.avatarEmoji ?? '👤',
-          peerAvatarImagePath: c?.avatarImagePath,
+          peerId: picked.peerId,
+          peerNickname: c?.nickname ?? picked.nickname,
+          peerAvatarColor: c?.avatarColor ?? picked.avatarColor,
+          peerAvatarEmoji: c?.avatarEmoji ?? picked.avatarEmoji,
+          peerAvatarImagePath: c?.avatarImagePath ?? picked.avatarImagePath,
           forwardDraft: draft,
         ),
       ),
@@ -1261,7 +1785,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.forward),
-              title: const Text('Переслать в личный чат…'),
+              title: const Text('Переслать…'),
               onTap: () => Navigator.pop(ctx, 'fwd'),
             ),
           ],
@@ -1296,6 +1820,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final sel = _controller.selection;
+    final hasSelection =
+        sel.isValid && sel.baseOffset != sel.extentOffset;
+    final near = _length > _kMaxGroupMsgLen * 0.8;
+    final over = _composeOver;
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -1435,16 +1964,64 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 children: [
                   if (_isSending && _sendProgress > 0)
                     LinearProgressIndicator(value: _sendProgress),
+                  if (hasSelection && _showFormatStrip)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 6, 8, 0),
+                      child: Row(
+                        children: [
+                          _GroupFmtBtn(
+                              label: 'B',
+                              bold: true,
+                              onTap: () => _wrapSelection('**', '**')),
+                          _GroupFmtBtn(
+                              label: 'I',
+                              italic: true,
+                              onTap: () => _wrapSelection('_', '_')),
+                          _GroupFmtBtn(
+                              label: 'S',
+                              strikethrough: true,
+                              onTap: () => _wrapSelection('~~', '~~')),
+                          _GroupFmtBtn(
+                              label: 'U',
+                              underline: true,
+                              onTap: () => _wrapSelection('__', '__')),
+                          _GroupFmtBtn(
+                              label: '||',
+                              onTap: () => _wrapSelection('||', '||')),
+                        ],
+                      ),
+                    ),
                   Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                   child: Row(children: [
+                    if (hasSelection)
+                      IconButton(
+                        onPressed: () => setState(
+                            () => _showFormatStrip = !_showFormatStrip),
+                        icon: Icon(
+                          Icons.text_fields_rounded,
+                          color: _showFormatStrip
+                              ? cs.primary
+                              : cs.onSurfaceVariant,
+                          size: 22,
+                        ),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                            minWidth: 36, minHeight: 36),
+                        tooltip: _showFormatStrip
+                            ? 'Скрыть формат'
+                            : 'Формат выделенного текста',
+                      ),
                     PopupMenuButton<String>(
                       onSelected: (value) {
                         if (_isSending) return;
                         switch (value) {
-                          case 'photo':
-                            _sendImage();
+                          case 'square_video':
+                            unawaited(_sendGroupSquareVideo());
+                            break;
+                          case 'video':
+                            unawaited(_sendGroupVideoFromGallery());
                             break;
                           case 'poll':
                             _sendPoll();
@@ -1473,14 +2050,21 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14)),
                       itemBuilder: (_) {
-                        final cs = Theme.of(context).colorScheme;
                         return [
                           const PopupMenuItem(
-                            value: 'photo',
+                            value: 'square_video',
                             child: Row(children: [
-                              Icon(Icons.photo_library_outlined, size: 20),
+                              Icon(Icons.crop_square, size: 20),
                               SizedBox(width: 12),
-                              Text('Фото'),
+                              Text('Квадратик'),
+                            ]),
+                          ),
+                          const PopupMenuItem(
+                            value: 'video',
+                            child: Row(children: [
+                              Icon(Icons.video_library_outlined, size: 20),
+                              SizedBox(width: 12),
+                              Text('Видео из галереи'),
                             ]),
                           ),
                           const PopupMenuItem(
@@ -1507,22 +2091,33 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                               Text('Событие'),
                             ]),
                           ),
-                          if (Platform.isWindows ||
-                              Platform.isMacOS ||
-                              Platform.isLinux)
-                            PopupMenuItem(
-                              value: 'file',
-                              child: Row(children: [
-                                Icon(Icons.attach_file_outlined,
-                                    size: 20, color: cs.onSurface),
-                                const SizedBox(width: 12),
-                                const Text('Файл'),
-                              ]),
-                            ),
+                          const PopupMenuItem(
+                            value: 'file',
+                            child: Row(children: [
+                              Icon(Icons.attach_file_outlined, size: 20),
+                              SizedBox(width: 12),
+                              Text('Файл'),
+                            ]),
+                          ),
                         ];
                       },
                     ),
-                    const SizedBox(width: 4),
+                    IconButton(
+                      onPressed:
+                          _isSending ? null : () => unawaited(_openGroupMediaGallery()),
+                      icon: Icon(
+                        Icons.photo_library_outlined,
+                        color: _isSending
+                            ? cs.onSurface.withValues(alpha: 0.3)
+                            : cs.onSurfaceVariant,
+                        size: 24,
+                      ),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                          minWidth: 36, minHeight: 36),
+                      tooltip: 'Галерея медиа',
+                    ),
+                    const SizedBox(width: 2),
                     Expanded(
                       child: Container(
                         decoration: BoxDecoration(
@@ -1536,50 +2131,72 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                           focusNode: _focusNode,
                           onTapOutside: (_) => _focusNode.unfocus(),
                           contextMenuBuilder: _buildContextMenu,
-                          decoration: const InputDecoration(
+                          maxLines: AppSettings.instance.sendOnEnter ? 1 : 4,
+                          minLines: 1,
+                          decoration: InputDecoration(
                             hintText: 'Сообщение...',
                             border: InputBorder.none,
-                            contentPadding: EdgeInsets.symmetric(
+                            contentPadding: const EdgeInsets.symmetric(
                                 horizontal: 16, vertical: 10),
+                            suffix: near
+                                ? Text(
+                                    '${_kMaxGroupMsgLen - _length}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: over
+                                          ? Colors.red
+                                          : cs.onSurfaceVariant,
+                                    ),
+                                  )
+                                : null,
                           ),
                           style: const TextStyle(fontSize: 15),
-                          textInputAction: TextInputAction.send,
-                          onSubmitted: (_) => _send(),
+                          textInputAction: AppSettings.instance.sendOnEnter
+                              ? TextInputAction.send
+                              : TextInputAction.newline,
+                          onSubmitted: AppSettings.instance.sendOnEnter
+                              ? (_) {
+                                  if (!_composeOver) _send();
+                                }
+                              : null,
                         ),
                       ),
                     ),
                     const SizedBox(width: 8),
-                    GestureDetector(
-                      onTap: _isSending ? null : _send,
-                      child: Container(
-                        width: 44,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          color: _isSending
-                              ? Theme.of(context)
-                                  .colorScheme
-                                  .onSurface
-                                  .withValues(alpha: 0.3)
-                              : Theme.of(context).colorScheme.primary,
-                          shape: BoxShape.circle,
-                        ),
-                        child: _isSending
-                            ? Padding(
-                                padding: const EdgeInsets.all(12),
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
+                    if (_composeHasText || _isSending)
+                      GestureDetector(
+                        onTap: _isSending || over || !_composeHasText
+                            ? null
+                            : _send,
+                        child: Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: _isSending || over || !_composeHasText
+                                ? Theme.of(context)
+                                    .colorScheme
+                                    .onSurface
+                                    .withValues(alpha: 0.3)
+                                : Theme.of(context).colorScheme.primary,
+                            shape: BoxShape.circle,
+                          ),
+                          child: _isSending
+                              ? Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onPrimary,
+                                  ),
+                                )
+                              : Icon(Icons.send_rounded,
                                   color: Theme.of(context)
                                       .colorScheme
                                       .onPrimary,
-                                ),
-                              )
-                            : Icon(Icons.send_rounded,
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .onPrimary,
-                                size: 20),
+                                  size: 20),
+                        ),
                       ),
-                    ),
                   ]),
                 ),
                 ],
@@ -1714,12 +2331,27 @@ class _GroupBubble extends StatelessWidget {
                   padding: const EdgeInsets.only(bottom: 4),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: Image.file(
-                      File(msg.imagePath!),
-                      width: 200,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                    ),
+                    child: Builder(builder: (_) {
+                      final isSticker =
+                          p.basename(msg.imagePath!).startsWith('stk_');
+                      return Image.file(
+                        File(msg.imagePath!),
+                        width: isSticker ? 132 : 200,
+                        height: isSticker ? 132 : null,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                      );
+                    }),
+                  ),
+                ),
+              if (!missing &&
+                  msg.videoPath != null &&
+                  msg.videoPath!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: _GroupInlineVideo(
+                    storedPath: msg.videoPath!,
+                    isOutgoing: msg.isOutgoing,
                   ),
                 ),
               if (MessagePoll.tryDecode(msg.pollJson) case final poll?)
@@ -1749,7 +2381,7 @@ class _GroupBubble extends StatelessWidget {
                   !(missing && isSyntheticMediaCaption(msg.text)))
                 ValueListenableBuilder<List<Contact>>(
                   valueListenable: ChatStorageService.instance.contactsNotifier,
-                  builder: (_, contacts, __) {
+                  builder: (ctx, contacts, __) {
                     return RichMessageText(
                       text: msg.text,
                       textColor: msg.isOutgoing ? cs.onPrimary : cs.onSurface,
@@ -1759,6 +2391,7 @@ class _GroupBubble extends StatelessWidget {
                         contacts,
                         ProfileService.instance.profile,
                       ),
+                      onMentionTap: (hex) => openDmFromMentionKey(ctx, hex),
                     );
                   },
                 ),
@@ -1875,6 +2508,287 @@ class _GroupInviteCard extends StatelessWidget {
             ),
           ]),
         ),
+      ),
+    );
+  }
+}
+
+/// Видео в группе: квадратик (1:1) или ролик из галереи.
+class _GroupInlineVideo extends StatefulWidget {
+  final String storedPath;
+  final bool isOutgoing;
+
+  const _GroupInlineVideo({
+    required this.storedPath,
+    required this.isOutgoing,
+  });
+
+  @override
+  State<_GroupInlineVideo> createState() => _GroupInlineVideoState();
+}
+
+class _GroupInlineVideoState extends State<_GroupInlineVideo> {
+  VideoPlayerController? _ctrl;
+  bool _initialized = false;
+  bool _playing = false;
+  int _embedPauseGen = 0;
+
+  void _onEmbedPauseBus() {
+    if (!mounted) return;
+    final g = EmbeddedVideoPauseBus.instance.generation.value;
+    if (g != _embedPauseGen) {
+      _embedPauseGen = g;
+      try {
+        _ctrl?.pause();
+      } catch (_) {}
+      setState(() => _playing = false);
+    }
+  }
+
+  String? get _abs {
+    final r = ImageService.instance.resolveStoredPath(widget.storedPath);
+    return (r != null && File(r).existsSync()) ? r : null;
+  }
+
+  bool get _isSquare => widget.storedPath.endsWith('_sq.mp4');
+
+  @override
+  void initState() {
+    super.initState();
+    _embedPauseGen = EmbeddedVideoPauseBus.instance.generation.value;
+    EmbeddedVideoPauseBus.instance.generation.addListener(_onEmbedPauseBus);
+    final p = _abs;
+    if (p != null) _init(p);
+  }
+
+  @override
+  void didUpdateWidget(_GroupInlineVideo oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.storedPath != widget.storedPath) {
+      _ctrl?.dispose();
+      _ctrl = null;
+      _initialized = false;
+      _playing = false;
+      final p = _abs;
+      if (p != null) _init(p);
+    }
+  }
+
+  Future<void> _init(String path) async {
+    final ctrl = VideoPlayerController.file(File(path));
+    try {
+      await ctrl.initialize();
+      if (_isSquare) {
+        ctrl.setLooping(true);
+      } else {
+        await ctrl.seekTo(Duration.zero);
+      }
+      if (mounted) {
+        setState(() {
+          _ctrl = ctrl;
+          _initialized = true;
+        });
+      } else {
+        ctrl.dispose();
+      }
+    } catch (e) {
+      debugPrint('[GroupVideo] $e');
+      ctrl.dispose();
+    }
+  }
+
+  @override
+  void dispose() {
+    EmbeddedVideoPauseBus.instance.generation.removeListener(_onEmbedPauseBus);
+    _ctrl?.dispose();
+    super.dispose();
+  }
+
+  void _toggleSquare() {
+    if (_ctrl == null || !_initialized) return;
+    if (_playing) {
+      _ctrl!.pause();
+      setState(() => _playing = false);
+      return;
+    }
+    EmbeddedVideoPauseBus.instance.bump();
+    unawaited(VoiceService.instance.stopPlayback());
+    _embedPauseGen = EmbeddedVideoPauseBus.instance.generation.value;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _ctrl == null) return;
+      _ctrl!.play();
+      setState(() => _playing = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = _abs;
+    if (p == null) {
+      return Container(
+        width: 120,
+        height: 120,
+        decoration: BoxDecoration(
+          color: Colors.black87,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Icon(Icons.videocam_off_outlined,
+            color: Colors.white38, size: 32),
+      );
+    }
+    if (_isSquare) {
+      return GestureDetector(
+        onTap: _toggleSquare,
+        child: SizedBox(
+          width: 160,
+          height: 160,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (_initialized && _ctrl != null)
+                  FittedBox(
+                    fit: BoxFit.cover,
+                    child: SizedBox(
+                      width: _ctrl!.value.size.width,
+                      height: _ctrl!.value.size.height,
+                      child: VideoPlayer(_ctrl!),
+                    ),
+                  )
+                else
+                  Container(
+                    color: const Color(0xFF1A1A1A),
+                    child: const Center(
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white54),
+                      ),
+                    ),
+                  ),
+                if (!_playing)
+                  Container(
+                    color: Colors.black.withValues(alpha: 0.25),
+                    child: const Center(
+                      child: Icon(Icons.play_circle_fill,
+                          color: Colors.white, size: 52),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final ar = (_initialized && _ctrl != null && _ctrl!.value.aspectRatio > 0)
+        ? _ctrl!.value.aspectRatio
+        : 16 / 9;
+    const w = 220.0;
+    final h = (w / ar).clamp(80.0, 280.0);
+    return GestureDetector(
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _GroupVideoFullScreen(path: p),
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          width: w,
+          height: h,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Container(color: const Color(0xFF111111)),
+              if (_initialized && _ctrl != null)
+                FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(
+                    width: _ctrl!.value.size.width,
+                    height: _ctrl!.value.size.height,
+                    child: VideoPlayer(_ctrl!),
+                  ),
+                ),
+              Container(color: Colors.black.withValues(alpha: 0.28)),
+              const Center(
+                child: Icon(Icons.play_circle_fill,
+                    color: Colors.white, size: 54),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GroupVideoFullScreen extends StatefulWidget {
+  final String path;
+  const _GroupVideoFullScreen({required this.path});
+
+  @override
+  State<_GroupVideoFullScreen> createState() => _GroupVideoFullScreenState();
+}
+
+class _GroupVideoFullScreenState extends State<_GroupVideoFullScreen> {
+  VideoPlayerController? _ctrl;
+  int _embedPauseGen = 0;
+
+  void _onEmbedPauseBus() {
+    if (!mounted) return;
+    final g = EmbeddedVideoPauseBus.instance.generation.value;
+    if (g != _embedPauseGen) {
+      _embedPauseGen = g;
+      try {
+        _ctrl?.pause();
+      } catch (_) {}
+      setState(() {});
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _embedPauseGen = EmbeddedVideoPauseBus.instance.generation.value;
+    EmbeddedVideoPauseBus.instance.generation.addListener(_onEmbedPauseBus);
+    final c = VideoPlayerController.file(File(widget.path));
+    c.initialize().then((_) {
+      if (mounted) {
+        setState(() => _ctrl = c);
+        c.play();
+      } else {
+        c.dispose();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    EmbeddedVideoPauseBus.instance.generation.removeListener(_onEmbedPauseBus);
+    _ctrl?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = _ctrl;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: Center(
+        child: c != null && c.value.isInitialized
+            ? AspectRatio(
+                aspectRatio: c.value.aspectRatio,
+                child: VideoPlayer(c),
+              )
+            : const CircularProgressIndicator(color: Colors.white54),
       ),
     );
   }

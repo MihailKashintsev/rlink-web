@@ -10,8 +10,24 @@ import 'package:uuid/uuid.dart';
 
 import '../models/channel.dart';
 import '../models/message_poll.dart';
+import '../utils/reaction_limit.dart';
 import 'gossip_router.dart';
 import 'image_service.dart';
+import 'account_sync_publish.dart';
+import 'crypto_service.dart';
+
+Map<String, String> _staffLabelsFromDb(String? raw) {
+  if (raw == null || raw.isEmpty || raw == '{}') return const {};
+  try {
+    final m = jsonDecode(raw) as Map<String, dynamic>;
+    return m.map((k, v) => MapEntry(k, v.toString()));
+  } catch (_) {
+    return const {};
+  }
+}
+
+String _staffLabelsToDb(Map<String, String> m) =>
+    m.isEmpty ? '{}' : jsonEncode(m);
 
 Future<void> _backfillChannelReadCursors(Database db) async {
   final chans =
@@ -76,7 +92,7 @@ class ChannelService {
     final path = p.join(dir.path, 'channels.db');
     _db = await openDatabase(
       path,
-      version: 11,
+      version: 15,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE channels (
@@ -85,6 +101,9 @@ class ChannelService {
             admin_id TEXT NOT NULL,
             subscribers TEXT NOT NULL,
             moderators TEXT DEFAULT '',
+            link_admins TEXT DEFAULT '',
+            sign_staff_posts INTEGER DEFAULT 0,
+            staff_labels_json TEXT DEFAULT '{}',
             avatar_color INTEGER DEFAULT 0xFF42A5F5,
             avatar_emoji TEXT DEFAULT '📢',
             avatar_img_path TEXT,
@@ -98,7 +117,10 @@ class ChannelService {
             blocked INTEGER DEFAULT 0,
             username TEXT DEFAULT '',
             universal_code TEXT DEFAULT '',
-            is_public INTEGER DEFAULT 1
+            is_public INTEGER DEFAULT 1,
+            drive_backup_enabled INTEGER DEFAULT 0,
+            drive_backup_rev INTEGER DEFAULT 0,
+            drive_file_id TEXT
           )
         ''');
         await db.execute('''
@@ -115,9 +137,22 @@ class ChannelService {
             file_size INTEGER,
             timestamp INTEGER NOT NULL,
             reactions TEXT,
-            poll_json TEXT
+            poll_json TEXT,
+            view_count INTEGER DEFAULT 0,
+            forward_count INTEGER DEFAULT 0,
+            staff_label TEXT,
+            is_sticker INTEGER DEFAULT 0
           )
         ''');
+        await db.execute('''
+          CREATE TABLE channel_post_viewers (
+            post_id TEXT NOT NULL,
+            viewer_id TEXT NOT NULL,
+            PRIMARY KEY (post_id, viewer_id)
+          )
+        ''');
+        await db.execute(
+            'CREATE INDEX idx_cpv_post ON channel_post_viewers(post_id)');
         await db.execute('''
           CREATE TABLE channel_comments (
             id TEXT PRIMARY KEY,
@@ -247,6 +282,65 @@ class ChannelService {
           ''');
           await _backfillChannelReadCursors(db);
         }
+        if (oldVersion < 12) {
+          try {
+            await db.execute(
+                'ALTER TABLE channel_posts ADD COLUMN view_count INTEGER DEFAULT 0');
+          } catch (_) {}
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS channel_post_viewers (
+              post_id TEXT NOT NULL,
+              viewer_id TEXT NOT NULL,
+              PRIMARY KEY (post_id, viewer_id)
+            )
+          ''');
+          try {
+            await db.execute(
+                'CREATE INDEX IF NOT EXISTS idx_cpv_post ON channel_post_viewers(post_id)');
+          } catch (_) {}
+        }
+        if (oldVersion < 13) {
+          try {
+            await db.execute(
+                'ALTER TABLE channel_posts ADD COLUMN forward_count INTEGER DEFAULT 0');
+          } catch (_) {}
+        }
+        if (oldVersion < 14) {
+          try {
+            await db.execute(
+                "ALTER TABLE channels ADD COLUMN link_admins TEXT DEFAULT ''");
+          } catch (_) {}
+          try {
+            await db.execute(
+                'ALTER TABLE channels ADD COLUMN sign_staff_posts INTEGER DEFAULT 0');
+          } catch (_) {}
+          try {
+            await db.execute(
+                "ALTER TABLE channels ADD COLUMN staff_labels_json TEXT DEFAULT '{}'");
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE channel_posts ADD COLUMN staff_label TEXT');
+          } catch (_) {}
+        }
+        if (oldVersion < 15) {
+          try {
+            await db.execute(
+                'ALTER TABLE channels ADD COLUMN drive_backup_enabled INTEGER DEFAULT 0');
+          } catch (_) {}
+          try {
+            await db.execute(
+                'ALTER TABLE channels ADD COLUMN drive_backup_rev INTEGER DEFAULT 0');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE channels ADD COLUMN drive_file_id TEXT');
+          } catch (_) {}
+        }
+        if (oldVersion < 16) {
+          try {
+            await db.execute(
+                'ALTER TABLE channel_posts ADD COLUMN is_sticker INTEGER DEFAULT 0');
+          } catch (_) {}
+        }
       },
     );
   }
@@ -292,6 +386,9 @@ class ChannelService {
       'admin_id': channel.adminId,
       'subscribers': channel.subscriberIds.join(','),
       'moderators': channel.moderatorIds.join(','),
+      'link_admins': channel.linkAdminIds.join(','),
+      'sign_staff_posts': channel.signStaffPosts ? 1 : 0,
+      'staff_labels_json': _staffLabelsToDb(channel.staffLabels),
       'avatar_color': channel.avatarColor,
       'avatar_emoji': channel.avatarEmoji,
       'avatar_img_path': channel.avatarImagePath,
@@ -302,8 +399,12 @@ class ChannelService {
       'username': channel.username,
       'universal_code': channel.universalCode,
       'is_public': channel.isPublic ? 1 : 0,
+      'drive_backup_enabled': channel.driveBackupEnabled ? 1 : 0,
+      'drive_backup_rev': channel.driveBackupRev,
+      'drive_file_id': channel.driveFileId,
     });
     _bump();
+    unawaited(publishAccountChannelSubscriptions());
     return channel;
   }
 
@@ -385,6 +486,11 @@ class ChannelService {
           [cid],
         );
       } else {
+        await _db!.rawDelete(
+          'DELETE FROM channel_post_viewers WHERE post_id IN '
+          '(SELECT id FROM channel_posts WHERE channel_id = ?)',
+          [cid],
+        );
         await _db!.delete(
           'channel_comments',
           where: 'post_id IN (SELECT id FROM channel_posts WHERE channel_id = ?)',
@@ -412,6 +518,12 @@ class ChannelService {
         adminId: r['admin_id'] as String,
         subscriberIds: (r['subscribers'] as String).split(',').where((s) => s.isNotEmpty).toList(),
         moderatorIds: ((r['moderators'] as String?) ?? '').split(',').where((s) => s.isNotEmpty).toList(),
+        linkAdminIds: ((r['link_admins'] as String?) ?? '')
+            .split(',')
+            .where((s) => s.isNotEmpty)
+            .toList(),
+        signStaffPosts: (r['sign_staff_posts'] as int?) == 1,
+        staffLabels: _staffLabelsFromDb(r['staff_labels_json'] as String?),
         avatarColor: r['avatar_color'] as int? ?? 0xFF42A5F5,
         avatarEmoji: r['avatar_emoji'] as String? ?? '📢',
         avatarImagePath: r['avatar_img_path'] as String?,
@@ -426,6 +538,9 @@ class ChannelService {
         username: (r['username'] as String?) ?? '',
         universalCode: (r['universal_code'] as String?) ?? '',
         isPublic: (r['is_public'] as int?) != 0,
+        driveBackupEnabled: (r['drive_backup_enabled'] as int?) == 1,
+        driveBackupRev: (r['drive_backup_rev'] as int?) ?? 0,
+        driveFileId: r['drive_file_id'] as String?,
       );
 
   Future<void> updateChannel(Channel ch) async {
@@ -436,6 +551,9 @@ class ChannelService {
         'name': ch.name,
         'subscribers': ch.subscriberIds.join(','),
         'moderators': ch.moderatorIds.join(','),
+        'link_admins': ch.linkAdminIds.join(','),
+        'sign_staff_posts': ch.signStaffPosts ? 1 : 0,
+        'staff_labels_json': _staffLabelsToDb(ch.staffLabels),
         'avatar_color': ch.avatarColor,
         'avatar_emoji': ch.avatarEmoji,
         'avatar_img_path': ch.avatarImagePath,
@@ -449,6 +567,9 @@ class ChannelService {
         'username': ch.username,
         'universal_code': ch.universalCode,
         'is_public': ch.isPublic ? 1 : 0,
+        'drive_backup_enabled': ch.driveBackupEnabled ? 1 : 0,
+        'drive_backup_rev': ch.driveBackupRev,
+        'drive_file_id': ch.driveFileId,
       },
       where: 'id = ?',
       whereArgs: [ch.id],
@@ -484,6 +605,32 @@ class ChannelService {
     return updated;
   }
 
+  /// Админы «ссылок» — публикуют наравне с модераторами.
+  Future<Channel?> setLinkAdmin(String channelId, String userId, bool isLink) async {
+    final ch = await getChannel(channelId);
+    if (ch == null) return null;
+    final links = List<String>.from(ch.linkAdminIds);
+    if (isLink) {
+      if (!links.contains(userId)) links.add(userId);
+    } else {
+      links.remove(userId);
+    }
+    final updated = ch.copyWith(linkAdminIds: links);
+    await updateChannel(updated);
+    return updated;
+  }
+
+  Future<void> updatePostStaffLabel(String postId, String? staffLabel) async {
+    if (_db == null) return;
+    await _db!.update(
+      'channel_posts',
+      {'staff_label': staffLabel},
+      where: 'id = ?',
+      whereArgs: [postId],
+    );
+    _bump();
+  }
+
   /// Слияние `channel_meta` gossip: отсутствующие в пакете поля не затираются.
   Future<void> applyChannelMetaFromPayload(Map<String, dynamic> p) async {
     if (_db == null) return;
@@ -510,12 +657,38 @@ class ChannelService {
       return existing?.moderatorIds ?? const [];
     }
 
+    List<String> links() {
+      if (p.containsKey('linkAdminIds')) {
+        final raw = p['linkAdminIds'] as List<dynamic>?;
+        return raw?.cast<String>() ?? const [];
+      }
+      return existing?.linkAdminIds ?? const [];
+    }
+
+    bool signStaff() {
+      if (p.containsKey('signStaffPosts')) {
+        return p['signStaffPosts'] as bool? ?? false;
+      }
+      return existing?.signStaffPosts ?? false;
+    }
+
+    Map<String, String> labels() {
+      if (p.containsKey('staffLabels') && p['staffLabels'] is Map) {
+        final m = p['staffLabels'] as Map;
+        return m.map((k, v) => MapEntry(k.toString(), v.toString()));
+      }
+      return existing?.staffLabels ?? const {};
+    }
+
     final ch = Channel(
       id: channelId,
       name: name,
       adminId: adminId,
       subscriberIds: subs(),
       moderatorIds: mods(),
+      linkAdminIds: links(),
+      signStaffPosts: signStaff(),
+      staffLabels: labels(),
       avatarColor: p.containsKey('avatarColor')
           ? (p['avatarColor'] as int? ?? 0xFF42A5F5)
           : (existing?.avatarColor ?? 0xFF42A5F5),
@@ -556,6 +729,13 @@ class ChannelService {
       isPublic: p.containsKey('isPublic')
           ? (p['isPublic'] as bool? ?? true)
           : (existing?.isPublic ?? true),
+      driveBackupEnabled: p.containsKey('driveBackup')
+          ? (p['driveBackup'] as bool? ?? false)
+          : (existing?.driveBackupEnabled ?? false),
+      driveBackupRev: p.containsKey('driveBackupRev')
+          ? ((p['driveBackupRev'] as num?)?.toInt() ?? 0)
+          : (existing?.driveBackupRev ?? 0),
+      driveFileId: existing?.driveFileId,
     );
     await saveChannelFromBroadcast(ch);
   }
@@ -573,6 +753,9 @@ class ChannelService {
       'admin_id': ch.adminId,
       'subscribers': ch.subscriberIds.join(','),
       'moderators': ch.moderatorIds.join(','),
+      'link_admins': ch.linkAdminIds.join(','),
+      'sign_staff_posts': ch.signStaffPosts ? 1 : 0,
+      'staff_labels_json': _staffLabelsToDb(ch.staffLabels),
       'avatar_color': ch.avatarColor,
       'avatar_emoji': ch.avatarEmoji,
       'avatar_img_path': ch.avatarImagePath,
@@ -587,6 +770,9 @@ class ChannelService {
       'username': ch.username,
       'universal_code': ch.universalCode,
       'is_public': ch.isPublic ? 1 : 0,
+      'drive_backup_enabled': ch.driveBackupEnabled ? 1 : 0,
+      'drive_backup_rev': ch.driveBackupRev,
+      'drive_file_id': ch.driveFileId,
     });
     _bump();
   }
@@ -632,6 +818,7 @@ class ChannelService {
     if (ch.subscriberIds.contains(userId)) return;
     await updateChannel(
         ch.copyWith(subscriberIds: [...ch.subscriberIds, userId]));
+    unawaited(publishAccountChannelSubscriptions());
   }
 
   Future<void> unsubscribe(String channelId, String userId) async {
@@ -639,11 +826,90 @@ class ChannelService {
     if (ch == null) return;
     await updateChannel(ch.copyWith(
         subscriberIds: ch.subscriberIds.where((s) => s != userId).toList()));
+    unawaited(publishAccountChannelSubscriptions());
+  }
+
+  /// Передача владения каналом (только текущий [adminId]).
+  /// [newAdminId] должен быть в подписчиках. Бывший владелец остаётся в подписчиках.
+  Future<Channel?> transferOwnership({
+    required String channelId,
+    required String newAdminId,
+    required String currentAdminId,
+  }) async {
+    final ch = await getChannel(channelId);
+    if (ch == null || ch.adminId != currentAdminId) return null;
+    if (newAdminId == currentAdminId) return null;
+    if (!ch.subscriberIds.contains(newAdminId)) return null;
+
+    final subs = List<String>.from(ch.subscriberIds);
+    if (!subs.contains(currentAdminId)) subs.add(currentAdminId);
+
+    var mods = List<String>.from(ch.moderatorIds);
+    mods.remove(newAdminId);
+    mods.remove(currentAdminId);
+
+    var links = List<String>.from(ch.linkAdminIds);
+    links.remove(newAdminId);
+    links.remove(currentAdminId);
+
+    final staffLabels = Map<String, String>.from(ch.staffLabels);
+    staffLabels.remove(newAdminId);
+
+    final updated = ch.copyWith(
+      adminId: newAdminId,
+      subscriberIds: subs,
+      moderatorIds: mods,
+      linkAdminIds: links,
+      staffLabels: staffLabels,
+    );
+    await updateChannel(updated);
+    unawaited(updated.broadcastGossipMeta());
+    unawaited(publishAccountChannelSubscriptions());
+    return updated;
+  }
+
+  /// Каналы, где [userId] — подписчик или админ (для синхронизации аккаунта).
+  Future<List<String>> subscribedChannelIdsForAccountSync(String userId) async {
+    if (_db == null || userId.isEmpty) return [];
+    final rows = await _db!.query('channels');
+    final out = <String>[];
+    for (final r in rows) {
+      final ch = _channelFromRow(r);
+      if (ch.adminId == userId || ch.subscriberIds.contains(userId)) {
+        out.add(ch.id);
+      }
+    }
+    return out;
+  }
+
+  /// Подписать на каналы из облачного снимка (канал уже должен быть в локальной БД).
+  Future<void> mergeSubscriptionsFromSync(
+      String userId, List<String> channelIds) async {
+    var any = false;
+    for (final id in channelIds.toSet()) {
+      final ch = await getChannel(id);
+      if (ch == null) continue;
+      if (ch.adminId == userId || ch.subscriberIds.contains(userId)) continue;
+      await updateChannel(
+          ch.copyWith(subscriberIds: [...ch.subscriberIds, userId]));
+      any = true;
+    }
+    if (any) _bump();
+  }
+
+  Future<void> incrementPostForwardCount(String postId) async {
+    if (_db == null) return;
+    await _db!.rawUpdate(
+      'UPDATE channel_posts SET forward_count = COALESCE(forward_count, 0) + 1 WHERE id = ?',
+      [postId],
+    );
+    _bump();
   }
 
   /// Посты и комментарии всех каналов (метаданные каналов остаются — можно запросить историю снова).
   Future<void> deleteAllPostsAndComments() async {
     if (_db == null) return;
+    await _db!.delete('channel_post_viewers');
     await _db!.delete('channel_comments');
     await _db!.delete('channel_posts');
     await _db!.delete('channel_read_cursor');
@@ -654,6 +920,8 @@ class ChannelService {
     final posts = await _db!.query('channel_posts',
         columns: ['id'], where: 'channel_id = ?', whereArgs: [channelId]);
     for (final post in posts) {
+      await _db!.delete('channel_post_viewers',
+          where: 'post_id = ?', whereArgs: [post['id']]);
       await _db!.delete('channel_comments',
           where: 'post_id = ?', whereArgs: [post['id']]);
     }
@@ -806,6 +1074,28 @@ class ChannelService {
     return posts.reversed.toList();
   }
 
+  /// Посты новее [sinceTs] в хронологическом порядке (для ответа на history_req).
+  Future<List<ChannelPost>> getPostsNewerThan(
+    String channelId,
+    int sinceTs, {
+    int limit = 300,
+  }) async {
+    if (_db == null) return [];
+    final rows = await _db!.query(
+      'channel_posts',
+      where: 'channel_id = ? AND timestamp > ?',
+      whereArgs: [channelId, sinceTs],
+      orderBy: 'timestamp ASC',
+      limit: limit,
+    );
+    final posts = <ChannelPost>[];
+    for (final r in rows) {
+      final comments = await getComments(r['id'] as String);
+      posts.add(ChannelPost.fromMap(r, comments: comments));
+    }
+    return posts;
+  }
+
   Future<ChannelPost?> getLastPost(String channelId) async {
     if (_db == null) return null;
     final rows = await _db!.query(
@@ -866,6 +1156,8 @@ class ChannelService {
   }
 
   Future<void> deletePost(String postId) async {
+    await _db!.delete('channel_post_viewers',
+        where: 'post_id = ?', whereArgs: [postId]);
     await _db!.delete('channel_posts', where: 'id = ?', whereArgs: [postId]);
     await _db!.delete('channel_comments',
         where: 'post_id = ?', whereArgs: [postId]);
@@ -894,6 +1186,97 @@ class ChannelService {
     if (_db == null) return;
     await _db!.delete('channel_comments',
         where: 'id = ?', whereArgs: [commentId]);
+    _bump();
+  }
+
+  /// Снимок постов и комментариев для шифрованного бэкапа (сырые поля БД, без resolve путей).
+  Future<Map<String, dynamic>> buildChannelBackupSnapshot(String channelId) async {
+    if (_db == null) throw StateError('ChannelService DB not initialized');
+    final rows = await _db!.query(
+      'channel_posts',
+      where: 'channel_id = ?',
+      whereArgs: [channelId],
+      orderBy: 'timestamp ASC',
+    );
+    final posts = <Map<String, dynamic>>[];
+    for (final r in rows) {
+      final pid = r['id'] as String;
+      final crows = await _db!.query(
+        'channel_comments',
+        where: 'post_id = ?',
+        whereArgs: [pid],
+        orderBy: 'timestamp ASC',
+      );
+      posts.add({
+        'post': Map<String, dynamic>.from(r),
+        'comments': crows.map((c) => Map<String, dynamic>.from(c)).toList(),
+      });
+    }
+    return {
+      'v': 1,
+      'type': 'rlink_channel_backup',
+      'channelId': channelId,
+      'exportedAt': DateTime.now().millisecondsSinceEpoch,
+      'posts': posts,
+    };
+  }
+
+  /// Слияние снимка в локальную БД: снимок полный — посты канала, которых нет в JSON, удаляются.
+  Future<void> importChannelBackupSnapshot(
+      String channelId, Map<String, dynamic> json) async {
+    if (_db == null) return;
+    final posts = json['posts'] as List<dynamic>?;
+    if (posts == null) return;
+    await _db!.transaction((txn) async {
+      final snapshotPostIds = <String>{};
+      for (final item in posts) {
+        final m = item as Map<String, dynamic>;
+        final pmap = Map<String, dynamic>.from(m['post'] as Map);
+        if (pmap['channel_id'] != channelId) continue;
+        snapshotPostIds.add(pmap['id'] as String);
+      }
+
+      final localRows = await txn.query(
+        'channel_posts',
+        columns: ['id'],
+        where: 'channel_id = ?',
+        whereArgs: [channelId],
+      );
+      for (final r in localRows) {
+        final id = r['id'] as String;
+        if (!snapshotPostIds.contains(id)) {
+          await txn.delete('channel_post_viewers',
+              where: 'post_id = ?', whereArgs: [id]);
+          await txn.delete('channel_comments',
+              where: 'post_id = ?', whereArgs: [id]);
+          await txn.delete('channel_posts',
+              where: 'id = ?', whereArgs: [id]);
+        }
+      }
+
+      for (final item in posts) {
+        final m = item as Map<String, dynamic>;
+        final pmap = Map<String, dynamic>.from(m['post'] as Map);
+        if (pmap['channel_id'] != channelId) continue;
+        await txn.insert(
+          'channel_posts',
+          pmap,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        final pid = pmap['id'] as String;
+        await txn.delete('channel_comments',
+            where: 'post_id = ?', whereArgs: [pid]);
+        final cl = m['comments'] as List<dynamic>? ?? const [];
+        for (final c in cl) {
+          final cm = Map<String, dynamic>.from(c as Map);
+          await txn.insert(
+            'channel_comments',
+            cm,
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+      }
+    });
     _bump();
   }
 
@@ -935,7 +1318,9 @@ class ChannelService {
     if (img == null &&
         vid == null &&
         vo == null &&
-        fp == null) return;
+        fp == null) {
+      return;
+    }
     final post = await getPost(postId);
     if (post == null) {
       if (img != null) _pendingPostImagePaths[postId] = img;
@@ -946,15 +1331,19 @@ class ChannelService {
       if (fs != null) _pendingPostFileSizes[postId] = fs;
       return;
     }
+    final mergedImg = img ?? post.imagePath;
+    final stickerFromName = mergedImg != null &&
+        p.basename(mergedImg).startsWith('stk_');
     await _db!.update(
       'channel_posts',
       {
-        'image_path': img ?? post.imagePath,
+        'image_path': mergedImg,
         'video_path': vid ?? post.videoPath,
         'voice_path': vo ?? post.voicePath,
         'file_path': fp ?? post.filePath,
         'file_name': fn ?? post.fileName,
         'file_size': fs ?? post.fileSize,
+        'is_sticker': (post.isSticker || stickerFromName) ? 1 : 0,
       },
       where: 'id = ?',
       whereArgs: [postId],
@@ -975,26 +1364,32 @@ class ChannelService {
     if (imagePath == null &&
         videoPath == null &&
         voicePath == null &&
-        filePath == null) return;
-    final post = await getPost(postId);
-    if (post == null) {
-      if (imagePath != null) _pendingPostImagePaths[postId] = imagePath!;
-      if (videoPath != null) _pendingPostVideoPaths[postId] = videoPath!;
-      if (voicePath != null) _pendingPostVoicePaths[postId] = voicePath!;
-      if (filePath != null) _pendingPostFilePaths[postId] = filePath!;
-      if (fileName != null) _pendingPostFileNames[postId] = fileName!;
-      if (fileSize != null) _pendingPostFileSizes[postId] = fileSize!;
+        filePath == null) {
       return;
     }
+    final post = await getPost(postId);
+    if (post == null) {
+      if (imagePath != null) _pendingPostImagePaths[postId] = imagePath;
+      if (videoPath != null) _pendingPostVideoPaths[postId] = videoPath;
+      if (voicePath != null) _pendingPostVoicePaths[postId] = voicePath;
+      if (filePath != null) _pendingPostFilePaths[postId] = filePath;
+      if (fileName != null) _pendingPostFileNames[postId] = fileName;
+      if (fileSize != null) _pendingPostFileSizes[postId] = fileSize;
+      return;
+    }
+    final mergedImg = imagePath ?? post.imagePath;
+    final stickerFromName = mergedImg != null &&
+        p.basename(mergedImg).startsWith('stk_');
     await _db!.update(
       'channel_posts',
       {
-        'image_path': imagePath ?? post.imagePath,
+        'image_path': mergedImg,
         'video_path': videoPath ?? post.videoPath,
         'voice_path': voicePath ?? post.voicePath,
         'file_path': filePath ?? post.filePath,
         'file_name': fileName ?? post.fileName,
         'file_size': fileSize ?? post.fileSize,
+        'is_sticker': (post.isSticker || stickerFromName) ? 1 : 0,
       },
       where: 'id = ?',
       whereArgs: [postId],
@@ -1012,7 +1407,9 @@ class ChannelService {
     if (img == null &&
         vid == null &&
         vo == null &&
-        fp == null) return;
+        fp == null) {
+      return;
+    }
     final c = await getComment(commentId);
     if (c == null) {
       if (img != null) _pendingCommentImagePaths[commentId] = img;
@@ -1051,21 +1448,23 @@ class ChannelService {
     if (imagePath == null &&
         videoPath == null &&
         voicePath == null &&
-        filePath == null) return;
+        filePath == null) {
+      return;
+    }
     final c = await getComment(commentId);
     if (c == null) {
       if (imagePath != null) {
-        _pendingCommentImagePaths[commentId] = imagePath!;
+        _pendingCommentImagePaths[commentId] = imagePath;
       }
       if (videoPath != null) {
-        _pendingCommentVideoPaths[commentId] = videoPath!;
+        _pendingCommentVideoPaths[commentId] = videoPath;
       }
       if (voicePath != null) {
-        _pendingCommentVoicePaths[commentId] = voicePath!;
+        _pendingCommentVoicePaths[commentId] = voicePath;
       }
-      if (filePath != null) _pendingCommentFilePaths[commentId] = filePath!;
-      if (fileName != null) _pendingCommentFileNames[commentId] = fileName!;
-      if (fileSize != null) _pendingCommentFileSizes[commentId] = fileSize!;
+      if (filePath != null) _pendingCommentFilePaths[commentId] = filePath;
+      if (fileName != null) _pendingCommentFileNames[commentId] = fileName;
+      if (fileSize != null) _pendingCommentFileSizes[commentId] = fileSize;
       return;
     }
     await _db!.update(
@@ -1102,6 +1501,7 @@ class ChannelService {
         totalChunks: chunks.length,
         fromId: aid,
         isAvatar: false,
+        isSticker: post.isSticker,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -1118,13 +1518,14 @@ class ChannelService {
     if (vid != null && File(vid).existsSync()) {
       final bytes = await File(vid).readAsBytes();
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final isSquareVideo = p.basename(vid).endsWith('_sq.mp4');
       await GossipRouter.instance.sendImgMeta(
         msgId: post.id,
         totalChunks: chunks.length,
         fromId: aid,
         isAvatar: false,
         isVideo: true,
-        isSquare: true,
+        isSquare: isSquareVideo,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -1217,13 +1618,14 @@ class ChannelService {
     if (vid != null && File(vid).existsSync()) {
       final bytes = await File(vid).readAsBytes();
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final isSquareVideo = p.basename(vid).endsWith('_sq.mp4');
       await GossipRouter.instance.sendImgMeta(
         msgId: c.id,
         totalChunks: chunks.length,
         fromId: authorId,
         isAvatar: false,
         isVideo: true,
-        isSquare: true,
+        isSquare: isSquareVideo,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -1299,12 +1701,13 @@ class ChannelService {
     final post = ChannelPost.fromMap(rows.first);
     final updated = <String, List<String>>{};
     post.reactions.forEach((k, v) => updated[k] = List<String>.from(v));
-    final list = updated.putIfAbsent(emoji, () => <String>[]);
-    if (list.contains(reactorId)) {
+    final list = updated[emoji];
+    if (list != null && list.contains(reactorId)) {
       list.remove(reactorId);
       if (list.isEmpty) updated.remove(emoji);
     } else {
-      list.add(reactorId);
+      if (!reactionAddAllowed(updated, emoji, reactorId)) return;
+      updated.putIfAbsent(emoji, () => <String>[]).add(reactorId);
     }
     await _db!.update(
       'channel_posts',
@@ -1329,12 +1732,13 @@ class ChannelService {
     final comment = ChannelComment.fromMap(rows.first);
     final updated = <String, List<String>>{};
     comment.reactions.forEach((k, v) => updated[k] = List<String>.from(v));
-    final list = updated.putIfAbsent(emoji, () => <String>[]);
-    if (list.contains(reactorId)) {
+    final list = updated[emoji];
+    if (list != null && list.contains(reactorId)) {
       list.remove(reactorId);
       if (list.isEmpty) updated.remove(emoji);
     } else {
-      list.add(reactorId);
+      if (!reactionAddAllowed(updated, emoji, reactorId)) return;
+      updated.putIfAbsent(emoji, () => <String>[]).add(reactorId);
     }
     await _db!.update(
       'channel_comments',
@@ -1343,6 +1747,52 @@ class ChannelService {
       whereArgs: [commentId],
     );
     _bump();
+  }
+
+  /// Учитывает просмотр поста [postId] пользователем [viewerId] (один раз на пару).
+  /// При [rebroadcast] рассылает gossip, чтобы другие узлы увидели тот же счётчик.
+  Future<void> recordPostView(String postId, String viewerId,
+      {bool rebroadcast = true}) async {
+    if (_db == null) return;
+    if (viewerId.isEmpty) return;
+    final postExists = await _db!.query(
+      'channel_posts',
+      columns: const ['id'],
+      where: 'id = ?',
+      whereArgs: [postId],
+      limit: 1,
+    );
+    if (postExists.isEmpty) return;
+
+    var inserted = false;
+    await _db!.transaction((txn) async {
+      final existing = await txn.query(
+        'channel_post_viewers',
+        columns: const ['post_id'],
+        where: 'post_id = ? AND viewer_id = ?',
+        whereArgs: [postId, viewerId],
+        limit: 1,
+      );
+      if (existing.isNotEmpty) return;
+      await txn.insert('channel_post_viewers', {
+        'post_id': postId,
+        'viewer_id': viewerId,
+      });
+      await txn.rawUpdate(
+        'UPDATE channel_posts SET view_count = COALESCE(view_count, 0) + 1 WHERE id = ?',
+        [postId],
+      );
+      inserted = true;
+    });
+    if (!inserted) return;
+    _bump();
+    if (rebroadcast) {
+      for (var i = 0; i < 2; i++) {
+        await GossipRouter.instance
+            .sendChannelPostView(postId: postId, viewerId: viewerId);
+        if (i < 1) await Future.delayed(const Duration(milliseconds: 300));
+      }
+    }
   }
 
   Future<ChannelPost?> getPost(String postId) async {
@@ -1381,6 +1831,7 @@ class ChannelService {
 
   /// Wipe all local data (used on full app reset).
   Future<void> resetAll() async {
+    await _db?.delete('channel_post_viewers');
     await _db?.delete('channel_comments');
     await _db?.delete('channel_posts');
     await _db?.delete('channel_read_cursor');
@@ -1433,6 +1884,48 @@ class ChannelService {
     final list = List<ChannelInvite>.from(pendingChannelInvites.value);
     list.removeWhere((i) => i.channelId == channelId);
     pendingChannelInvites.value = list;
+  }
+
+  /// Повторная рассылка аватара/баннера (новый подписчик мог пропустить старый broadcast).
+  Future<void> rebroadcastChannelVisualAssets(Channel ch) async {
+    final me = CryptoService.instance.publicKeyHex;
+    if (me.isEmpty || ch.adminId != me) return;
+
+    Future<void> send(String msgId, String? rawPath) async {
+      if (rawPath == null) return;
+      final rp = ImageService.instance.resolveStoredPath(rawPath);
+      if (rp == null || !File(rp).existsSync()) return;
+      final bytes = await File(rp).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      await GossipRouter.instance.sendImgMeta(
+        msgId: msgId,
+        totalChunks: chunks.length,
+        fromId: me,
+        isAvatar: false,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: msgId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: me,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+      }
+    }
+
+    await send(channelAvatarBroadcastMsgId(ch.id), ch.avatarImagePath);
+    await send(channelBannerBroadcastMsgId(ch.id), ch.bannerImagePath);
+  }
+
+  /// Вызывается при приходе gossip о новой подписке: устройство админа вновь шлёт обложки.
+  Future<void> maybeRebroadcastChannelVisualsAfterRemoteSubscribe(
+      String channelId) async {
+    final me = CryptoService.instance.publicKeyHex;
+    if (me.isEmpty) return;
+    final ch = await getChannel(channelId);
+    if (ch == null || ch.adminId != me) return;
+    await rebroadcastChannelVisualAssets(ch);
   }
 }
 

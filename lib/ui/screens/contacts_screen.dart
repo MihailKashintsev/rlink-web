@@ -11,6 +11,7 @@ import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
 import '../widgets/avatar_widget.dart';
 import 'chat_screen.dart';
+import 'contact_edit_screen.dart';
 
 class ContactsScreen extends StatefulWidget {
   final String searchQuery;
@@ -509,9 +510,12 @@ class _ContactTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final subtitle = contact.username.isNotEmpty
+    final baseSub = contact.username.isNotEmpty
         ? '#${contact.username}'
         : '${contact.publicKeyHex.substring(0, contact.publicKeyHex.length.clamp(0, 16))}...';
+    final subtitle = contact.statusEmoji.isEmpty
+        ? baseSub
+        : '${contact.statusEmoji} · $baseSub';
     return ListTile(
       leading: AvatarWidget(
         initials: contact.nickname.isNotEmpty
@@ -572,36 +576,10 @@ class _ContactTile extends StatelessWidget {
   }
 
   void _editContact(BuildContext context) {
-    final nickCtrl = TextEditingController(text: contact.nickname);
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Редактировать контакт'),
-        content: TextField(
-          controller: nickCtrl,
-          decoration: const InputDecoration(labelText: 'Имя'),
-          autofocus: true,
-          textCapitalization: TextCapitalization.words,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final newNick = nickCtrl.text.trim();
-              if (newNick.isNotEmpty && newNick != contact.nickname) {
-                await ChatStorageService.instance.saveContact(
-                  contact.copyWith(nickname: newNick),
-                );
-              }
-              if (!context.mounted) return;
-              Navigator.pop(context);
-            },
-            child: const Text('Сохранить'),
-          ),
-        ],
+    Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => ContactEditScreen(contact: contact),
       ),
     );
   }

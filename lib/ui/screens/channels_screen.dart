@@ -8,6 +8,7 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
@@ -17,7 +18,10 @@ import '../../models/chat_message.dart';
 import '../../models/contact.dart';
 import '../../models/message_poll.dart';
 import '../../utils/channel_mentions.dart';
+import '../../utils/rlink_deep_link.dart';
+import '../../services/app_settings.dart';
 import '../../services/broadcast_outbox_service.dart';
+import '../../services/channel_backup_service.dart';
 import '../../services/channel_service.dart';
 import '../../services/notification_service.dart';
 import '../../services/crypto_service.dart';
@@ -25,7 +29,10 @@ import '../../services/gossip_router.dart';
 import '../../services/profile_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/image_service.dart';
+import '../../services/sticker_collection_service.dart';
+import '../../services/invite_dm_service.dart';
 import '../../services/voice_service.dart';
+import '../../services/embedded_video_pause_bus.dart';
 import '../widgets/animated_transitions.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/reactions.dart';
@@ -33,9 +40,15 @@ import '../widgets/rich_message_text.dart';
 import '../widgets/poll_message_card.dart';
 import '../widgets/missing_local_media.dart';
 import '../widgets/channel_feed_image.dart';
+import '../widgets/desktop_image_picker.dart';
+import '../widgets/media_gallery_send_sheet.dart';
 import 'image_editor_screen.dart';
+import 'square_video_recorder_screen.dart';
 import 'channel_profile_screen.dart';
+import 'channel_profile_edit_dialog.dart';
 import 'chat_screen.dart' show ChatScreen, DmForwardDraft;
+import '../mention_nav.dart';
+import '../widgets/forward_target_sheet.dart';
 
 // ══════════════════════════════════════════════════════════════════
 // Forward / упоминания (канал)
@@ -110,54 +123,29 @@ Future<void> _pickForwardChannelContent(
   required ChatMessage forwardMessage,
   required String forwardAuthorId,
   required String originalAuthorNick,
+  required String channelId,
 }) async {
-  final peers = await ChatStorageService.instance.getChatPeerIds();
-  if (!context.mounted) return;
-  if (peers.isEmpty) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Нет чатов для пересылки')),
-    );
-    return;
-  }
-  final nickMap = <String, String>{};
-  for (final c in ChatStorageService.instance.contactsNotifier.value) {
-    nickMap[c.publicKeyHex] = c.nickname;
-  }
-  final picked = await showModalBottomSheet<String>(
-    context: context,
-    builder: (ctx) => SafeArea(
-      child: ListView(
-        shrinkWrap: true,
-        children: [
-          const ListTile(title: Text('Переслать в…')),
-          for (final pid in peers)
-            ListTile(
-              leading: const Icon(Icons.person_outline),
-              title: Text(nickMap[pid] ?? '${pid.substring(0, 8)}…'),
-              onTap: () => Navigator.pop(ctx, pid),
-            ),
-        ],
-      ),
-    ),
-  );
+  final picked = await showForwardDmTargetSheet(context);
   if (picked == null || !context.mounted) return;
-  final nick = nickMap[picked] ?? '${picked.substring(0, 8)}…';
-  final contact = await ChatStorageService.instance.getContact(picked);
+  unawaited(ChannelService.instance
+      .incrementPostForwardCount(forwardMessage.id));
+  final contact = await ChatStorageService.instance.getContact(picked.peerId);
   if (!context.mounted) return;
   Navigator.push(
     context,
     MaterialPageRoute(
       builder: (_) => ChatScreen(
-        peerId: picked,
-        peerNickname: nick,
-        peerAvatarColor: contact?.avatarColor ?? 0xFF42A5F5,
-        peerAvatarEmoji: contact?.avatarEmoji ?? '👤',
-        peerAvatarImagePath: contact?.avatarImagePath,
+        peerId: picked.peerId,
+        peerNickname: contact?.nickname ?? picked.nickname,
+        peerAvatarColor: contact?.avatarColor ?? picked.avatarColor,
+        peerAvatarEmoji: contact?.avatarEmoji ?? picked.avatarEmoji,
+        peerAvatarImagePath: contact?.avatarImagePath ?? picked.avatarImagePath,
         forwardDraft: DmForwardDraft(
           message: forwardMessage,
           sourcePeerId: '',
           originalAuthorNick: originalAuthorNick,
           forwardAuthorId: forwardAuthorId,
+          forwardChannelId: channelId,
         ),
       ),
     ),
@@ -223,6 +211,36 @@ Future<void> _showContactMentionPicker(
   }
 }
 
+/// Только голос и/или квадратик, без осмысленного текста и других вложений.
+bool _channelPostMediaOnlyVoiceOrSquare(ChannelPost post,
+    {required bool missing}) {
+  if (missing) return false;
+  if (post.staffLabel != null && post.staffLabel!.trim().isNotEmpty) {
+    return false;
+  }
+  final t = post.text.trim();
+  final hasRealText = t.isNotEmpty && !isSyntheticMediaCaption(post.text);
+  if (hasRealText) return false;
+  if (post.imagePath != null) return false;
+  if (post.filePath != null) return false;
+  if (post.pollJson != null && MessagePoll.tryDecode(post.pollJson) != null) {
+    return false;
+  }
+  return post.voicePath != null || post.videoPath != null;
+}
+
+bool _channelCommentMediaOnlyVoiceOrSquare(ChannelComment comment,
+    {required bool missing}) {
+  if (missing) return false;
+  final t = comment.text.trim();
+  final hasRealText =
+      t.isNotEmpty && !isSyntheticMediaCaption(comment.text);
+  if (hasRealText) return false;
+  if (comment.imagePath != null) return false;
+  if (comment.filePath != null) return false;
+  return comment.voicePath != null || comment.videoPath != null;
+}
+
 // ══════════════════════════════════════════════════════════════════
 // 1. ChannelsScreen — list of channels with search
 // ══════════════════════════════════════════════════════════════════
@@ -237,6 +255,7 @@ class ChannelsScreen extends StatefulWidget {
 
 class _ChannelsScreenState extends State<ChannelsScreen> {
   List<Channel> _channels = [];
+  int _loadGen = 0;
 
   @override
   void initState() {
@@ -251,9 +270,12 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
     super.dispose();
   }
 
-  void _load() async {
-    final channels = await ChannelService.instance.getChannels();
-    if (mounted) setState(() => _channels = channels);
+  void _load() {
+    final gen = ++_loadGen;
+    ChannelService.instance.getChannels().then((channels) {
+      if (!mounted || gen != _loadGen) return;
+      setState(() => _channels = channels);
+    });
   }
 
   @override
@@ -262,7 +284,12 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
     final q = widget.searchQuery.toLowerCase().trim();
     final filtered = q.isEmpty
         ? _channels
-        : _channels.where((ch) => ch.name.toLowerCase().contains(q)).toList();
+        : _channels.where((ch) {
+            final n = ch.name.toLowerCase();
+            final u = ch.username.toLowerCase();
+            final c = ch.universalCode.toLowerCase();
+            return n.contains(q) || u.contains(q) || c.contains(q);
+          }).toList();
 
     return Scaffold(
       body: ValueListenableBuilder<List<ChannelInvite>>(
@@ -378,18 +405,7 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
                 description:
                     descCtrl.text.trim().isEmpty ? null : descCtrl.text.trim(),
               );
-              await GossipRouter.instance.broadcastChannelMeta(
-                channelId: ch.id,
-                name: ch.name,
-                adminId: ch.adminId,
-                avatarColor: ch.avatarColor,
-                avatarEmoji: ch.avatarEmoji,
-                description: ch.description,
-                commentsEnabled: ch.commentsEnabled,
-                createdAt: ch.createdAt,
-                verified: ch.verified,
-                verifiedBy: ch.verifiedBy,
-              );
+              await ch.broadcastGossipMeta();
               if (mounted) _openChannel(ch);
             },
             child: const Text('Создать'),
@@ -482,7 +498,8 @@ class ChannelViewScreen extends StatefulWidget {
   State<ChannelViewScreen> createState() => _ChannelViewScreenState();
 }
 
-class _ChannelViewScreenState extends State<ChannelViewScreen> {
+class _ChannelViewScreenState extends State<ChannelViewScreen>
+    with WidgetsBindingObserver {
   List<ChannelPost> _posts = [];
   late Channel _channel;
   final _postCtrl = TextEditingController();
@@ -495,6 +512,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
   bool _isRecording = false;
   final _recordingSecondsNotifier = ValueNotifier<double>(0);
   Timer? _recordingTimer;
+  Timer? _historyPollTimer;
 
   String get _myId => CryptoService.instance.publicKeyHex;
   bool get _isAdmin => _channel.adminId == _myId;
@@ -504,6 +522,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _channel = widget.channel;
     unawaited(_loadAndMarkRead());
     ChannelService.instance.version.addListener(_load);
@@ -511,7 +530,16 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
     // Подтягиваем новые посты из P2P-сети подписчиков. Отвечают все, у кого
     // есть история; дедуп по postId на приёме.
     _requestHistoryDelta();
+    _historyPollTimer =
+        Timer.periodic(const Duration(minutes: 2), (_) => _requestHistoryDelta());
     NotificationService.instance.currentRoute.value = 'channel:${_channel.id}';
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _requestHistoryDelta();
+    }
   }
 
   Future<void> _requestHistoryDelta() async {
@@ -531,62 +559,10 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
     });
   }
 
-  Future<void> _broadcastVisualAssetBytes({
-    required String msgId,
-    required Uint8List rawFileBytes,
-  }) async {
-    final chunks = ImageService.instance.splitToBase64Chunks(rawFileBytes);
-    final myId = _myId;
-    await GossipRouter.instance.sendImgMeta(
-      msgId: msgId,
-      totalChunks: chunks.length,
-      fromId: myId,
-      isAvatar: false,
-    );
-    for (var i = 0; i < chunks.length; i++) {
-      await GossipRouter.instance.sendImgChunk(
-        msgId: msgId,
-        index: i,
-        base64Data: chunks[i],
-        fromId: myId,
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 40));
-    }
-  }
-
-  Future<void> _syncChannelVisualsAfterEdit({
-    required Channel updated,
-    required String? prevAvatarPath,
-    required String? prevBannerPath,
-  }) async {
-    if (updated.avatarImagePath != prevAvatarPath &&
-        updated.avatarImagePath != null) {
-      final rp =
-          ImageService.instance.resolveStoredPath(updated.avatarImagePath);
-      if (rp != null && File(rp).existsSync()) {
-        final bytes = await File(rp).readAsBytes();
-        await _broadcastVisualAssetBytes(
-          msgId: ChannelService.channelAvatarBroadcastMsgId(updated.id),
-          rawFileBytes: bytes,
-        );
-      }
-    }
-    if (updated.bannerImagePath != prevBannerPath &&
-        updated.bannerImagePath != null) {
-      final rp =
-          ImageService.instance.resolveStoredPath(updated.bannerImagePath);
-      if (rp != null && File(rp).existsSync()) {
-        final bytes = await File(rp).readAsBytes();
-        await _broadcastVisualAssetBytes(
-          msgId: ChannelService.channelBannerBroadcastMsgId(updated.id),
-          rawFileBytes: bytes,
-        );
-      }
-    }
-  }
-
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _historyPollTimer?.cancel();
     unawaited(ChannelService.instance.markChannelRead(_channel.id));
     _feedScrollController.removeListener(_onFeedScroll);
     _feedScrollController.dispose();
@@ -639,6 +615,19 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
     });
   }
 
+  /// Резерв на Drive после публикации поста владельцем (если включён).
+  void _maybeAutoDriveBackupAfterOwnerPost() {
+    unawaited(() async {
+      try {
+        await ChannelBackupService.instance
+            .publishBackupIfAdminDriveEnabled(_channel.id);
+        if (mounted) await _load();
+      } catch (e, st) {
+        debugPrint('[RLINK][Drive] auto backup: $e\n$st');
+      }
+    }());
+  }
+
   // ── Text post ───────────────────────────────────────────────
 
   Future<void> _createPost() async {
@@ -654,6 +643,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
       parts.add(t.substring(i, end));
     }
 
+    final staffLabel = _channel.staffLabelForNewPost(_myId);
     for (final partText in parts) {
       final postId = _uuid.v4();
       final now = DateTime.now().millisecondsSinceEpoch;
@@ -664,6 +654,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         authorId: _myId,
         text: partText,
         timestamp: now,
+        staffLabel: staffLabel,
       );
       await ChannelService.instance.savePost(post);
 
@@ -673,8 +664,10 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         authorId: _myId,
         text: partText,
         timestamp: now,
+        staffLabel: staffLabel,
       );
     }
+    _maybeAutoDriveBackupAfterOwnerPost();
   }
 
   Future<MessagePoll?> _showPollEditor() async {
@@ -796,6 +789,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
     final postId = _uuid.v4();
     final now = DateTime.now().millisecondsSinceEpoch;
     final pj = poll.encode();
+    final staffLabel = _channel.staffLabelForNewPost(_myId);
     final post = ChannelPost(
       id: postId,
       channelId: _channel.id,
@@ -803,6 +797,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
       text: '',
       timestamp: now,
       pollJson: pj,
+      staffLabel: staffLabel,
     );
     await ChannelService.instance.savePost(post);
     await BroadcastOutboxService.instance.enqueueChannelPost(
@@ -812,161 +807,14 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
       text: '',
       timestamp: now,
       pollJson: pj,
+      staffLabel: staffLabel,
     );
-  }
-
-  // ── Image post ──────────────────────────────────────────────
-
-  Future<void> _pickAndSendImage() async {
-    if (_isSending) return;
-
-    final picked = await _picker.pickImage(source: ImageSource.gallery);
-    if (picked == null || !mounted) return;
-
-    if (picked.path.toLowerCase().endsWith('.gif')) {
-      setState(() {
-        _isSending = true;
-        _sendProgress = 0.0;
-      });
-      try {
-        final path =
-            await ImageService.instance.saveChatImageFromPicker(picked.path);
-        final bytes = await File(path).readAsBytes();
-        final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-        final postId = _uuid.v4();
-        await GossipRouter.instance.sendImgMeta(
-          msgId: postId,
-          totalChunks: chunks.length,
-          fromId: _myId,
-          isAvatar: false,
-        );
-        for (var i = 0; i < chunks.length; i++) {
-          await GossipRouter.instance.sendImgChunk(
-            msgId: postId,
-            index: i,
-            base64Data: chunks[i],
-            fromId: _myId,
-          );
-          if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
-        }
-        final cap = _postCtrl.text.trim();
-        final post = ChannelPost(
-          id: postId,
-          channelId: _channel.id,
-          authorId: _myId,
-          text: cap.isEmpty ? '🎞 GIF' : cap,
-          imagePath: path,
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-        );
-        await ChannelService.instance.savePost(post);
-        await BroadcastOutboxService.instance.enqueueChannelPost(
-          channelId: _channel.id,
-          postId: postId,
-          authorId: _myId,
-          text: post.text,
-          timestamp: post.timestamp,
-          hasImage: true,
-        );
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('GIF: $e'), backgroundColor: Colors.red),
-          );
-        }
-      } finally {
-        if (mounted) {
-          setState(() {
-            _isSending = false;
-            _sendProgress = 0.0;
-          });
-        }
-      }
-      return;
-    }
-
-    final editedBytes = await Navigator.push<Uint8List>(
-      context,
-      MaterialPageRoute(
-          builder: (_) => ImageEditorScreen(imagePath: picked.path)),
-    );
-    if (editedBytes == null || !mounted) return;
-
-    final quality = await _showQualityPicker();
-    if (quality == null || !mounted) return;
-
-    setState(() {
-      _isSending = true;
-      _sendProgress = 0.0;
-    });
-    try {
-      final tmpDir = await getTemporaryDirectory();
-      final tmpFile = File(
-          '${tmpDir.path}/ch_edit_${DateTime.now().millisecondsSinceEpoch}.png');
-      await tmpFile.writeAsBytes(editedBytes);
-      final path = await ImageService.instance.compressAndSave(
-        tmpFile.path,
-        quality: quality.quality,
-        maxSize: quality.maxSize,
-      );
-      final bytes = await File(path).readAsBytes();
-      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-      final postId = _uuid.v4();
-
-      // Broadcast image via chunks (reusing img_meta / img_chunk protocol)
-      await GossipRouter.instance.sendImgMeta(
-        msgId: postId,
-        totalChunks: chunks.length,
-        fromId: _myId,
-        isAvatar: false,
-      );
-      for (var i = 0; i < chunks.length; i++) {
-        await GossipRouter.instance.sendImgChunk(
-          msgId: postId,
-          index: i,
-          base64Data: chunks[i],
-          fromId: _myId,
-        );
-        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
-      }
-
-      // Save post locally
-      final post = ChannelPost(
-        id: postId,
-        channelId: _channel.id,
-        authorId: _myId,
-        text: _postCtrl.text.trim(),
-        imagePath: path,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-      );
-      await ChannelService.instance.savePost(post);
-
-      await BroadcastOutboxService.instance.enqueueChannelPost(
-        channelId: _channel.id,
-        postId: postId,
-        authorId: _myId,
-        text: post.text,
-        timestamp: post.timestamp,
-        hasImage: true,
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isSending = false;
-          _sendProgress = 0.0;
-        });
-      }
-    }
+    _maybeAutoDriveBackupAfterOwnerPost();
   }
 
   // ── Video post (gallery) ──────────────────────────────────────
 
-  Future<void> _pickAndSendVideo() async {
+  Future<void> _pickAndSendVideoFromGallery() async {
     if (_isSending) return;
     if (!mounted) return;
 
@@ -1002,6 +850,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
       }
 
+      final staffLabel = _channel.staffLabelForNewPost(_myId);
       final post = ChannelPost(
         id: postId,
         channelId: _channel.id,
@@ -1009,6 +858,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         text: '',
         videoPath: path,
         timestamp: DateTime.now().millisecondsSinceEpoch,
+        staffLabel: staffLabel,
       );
       await ChannelService.instance.savePost(post);
 
@@ -1019,12 +869,87 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         text: '',
         timestamp: post.timestamp,
         hasVideo: true,
+        staffLabel: staffLabel,
       );
+      _maybeAutoDriveBackupAfterOwnerPost();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
               content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  /// Квадратное быстрое видео («квадратик»), как в личном чате.
+  Future<void> _recordAndSendSquarePost() async {
+    if (_isSending) return;
+    if (!mounted) return;
+    final raw = await showSquareVideoRecorder(context);
+    if (raw == null || !mounted) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final path = await ImageService.instance.saveVideo(raw, isSquare: true);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final postId = _uuid.v4();
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: postId,
+        totalChunks: chunks.length,
+        fromId: _myId,
+        isAvatar: false,
+        isVideo: true,
+        isSquare: true,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: postId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: _myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+
+      final staffLabel = _channel.staffLabelForNewPost(_myId);
+      final post = ChannelPost(
+        id: postId,
+        channelId: _channel.id,
+        authorId: _myId,
+        text: '',
+        videoPath: path,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        staffLabel: staffLabel,
+      );
+      await ChannelService.instance.savePost(post);
+
+      await BroadcastOutboxService.instance.enqueueChannelPost(
+        channelId: _channel.id,
+        postId: postId,
+        authorId: _myId,
+        text: '',
+        timestamp: post.timestamp,
+        hasVideo: true,
+        staffLabel: staffLabel,
+      );
+      _maybeAutoDriveBackupAfterOwnerPost();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Квадратик: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -1111,6 +1036,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
       }
 
+      final staffLabel = _channel.staffLabelForNewPost(_myId);
       final post = ChannelPost(
         id: postId,
         channelId: _channel.id,
@@ -1120,6 +1046,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         filePath: destPath,
         fileName: originalName,
         fileSize: fileBytes.length,
+        staffLabel: staffLabel,
       );
       await ChannelService.instance.savePost(post);
 
@@ -1131,7 +1058,455 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         timestamp: post.timestamp,
         hasFile: true,
         fileName: originalName,
+        staffLabel: staffLabel,
       );
+      _maybeAutoDriveBackupAfterOwnerPost();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Ошибка файла: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  // ── Медиа-галерея (как в личном чате) ───────────────────────
+
+  Future<void> _openChannelMediaGallery() async {
+    if (_isSending) return;
+    if (!mounted) return;
+    await showMediaGallerySendSheet(
+      context,
+      onPhotoPath: _channelGalleryPhoto,
+      onGifPath: _channelGalleryGifPath,
+      onVideoPath: _channelGalleryVideoPath,
+      onStickerCropped: _channelGalleryStickerFromCrop,
+      onStickerFromLibrary: _channelGalleryStickerFromLibrary,
+      onFilePath: _channelGalleryFilePath,
+    );
+  }
+
+  Future<void> _channelGalleryGifPath(String rawPath) async {
+    if (_isSending) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final path =
+          await ImageService.instance.saveChatImageFromPicker(rawPath);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final postId = _uuid.v4();
+      await GossipRouter.instance.sendImgMeta(
+        msgId: postId,
+        totalChunks: chunks.length,
+        fromId: _myId,
+        isAvatar: false,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: postId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: _myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+      final cap = _postCtrl.text.trim();
+      final staffLabel = _channel.staffLabelForNewPost(_myId);
+      final post = ChannelPost(
+        id: postId,
+        channelId: _channel.id,
+        authorId: _myId,
+        text: cap.isEmpty ? '🎞 GIF' : cap,
+        imagePath: path,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        staffLabel: staffLabel,
+      );
+      await ChannelService.instance.savePost(post);
+      await BroadcastOutboxService.instance.enqueueChannelPost(
+        channelId: _channel.id,
+        postId: postId,
+        authorId: _myId,
+        text: post.text,
+        timestamp: post.timestamp,
+        hasImage: true,
+        staffLabel: staffLabel,
+      );
+      _maybeAutoDriveBackupAfterOwnerPost();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('GIF: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _channelGalleryPhoto(String rawPath) async {
+    if (_isSending) return;
+    if (rawPath.toLowerCase().endsWith('.gif')) {
+      await _channelGalleryGifPath(rawPath);
+      return;
+    }
+    final editedBytes = await Navigator.push<Uint8List>(
+      context,
+      MaterialPageRoute(
+          builder: (_) => ImageEditorScreen(imagePath: rawPath)),
+    );
+    if (editedBytes == null || !mounted) return;
+
+    final quality = await _showQualityPicker();
+    if (quality == null || !mounted) return;
+
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final tmpDir = await getTemporaryDirectory();
+      final tmpFile = File(
+          '${tmpDir.path}/ch_gal_${DateTime.now().millisecondsSinceEpoch}.png');
+      await tmpFile.writeAsBytes(editedBytes);
+      final path = await ImageService.instance.compressAndSave(
+        tmpFile.path,
+        quality: quality.quality,
+        maxSize: quality.maxSize,
+      );
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final postId = _uuid.v4();
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: postId,
+        totalChunks: chunks.length,
+        fromId: _myId,
+        isAvatar: false,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: postId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: _myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+
+      final staffLabel = _channel.staffLabelForNewPost(_myId);
+      final post = ChannelPost(
+        id: postId,
+        channelId: _channel.id,
+        authorId: _myId,
+        text: _postCtrl.text.trim(),
+        imagePath: path,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        staffLabel: staffLabel,
+      );
+      await ChannelService.instance.savePost(post);
+
+      await BroadcastOutboxService.instance.enqueueChannelPost(
+        channelId: _channel.id,
+        postId: postId,
+        authorId: _myId,
+        text: post.text,
+        timestamp: post.timestamp,
+        hasImage: true,
+        staffLabel: staffLabel,
+      );
+      _maybeAutoDriveBackupAfterOwnerPost();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _channelGalleryVideoPath(String rawPath) async {
+    if (_isSending) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final path =
+          await ImageService.instance.saveVideo(rawPath, isSquare: false);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final postId = _uuid.v4();
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: postId,
+        totalChunks: chunks.length,
+        fromId: _myId,
+        isAvatar: false,
+        isVideo: true,
+        isSquare: false,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: postId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: _myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+
+      final staffLabel = _channel.staffLabelForNewPost(_myId);
+      final post = ChannelPost(
+        id: postId,
+        channelId: _channel.id,
+        authorId: _myId,
+        text: '',
+        videoPath: path,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        staffLabel: staffLabel,
+      );
+      await ChannelService.instance.savePost(post);
+
+      await BroadcastOutboxService.instance.enqueueChannelPost(
+        channelId: _channel.id,
+        postId: postId,
+        authorId: _myId,
+        text: '',
+        timestamp: post.timestamp,
+        hasVideo: true,
+        staffLabel: staffLabel,
+      );
+      _maybeAutoDriveBackupAfterOwnerPost();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _channelPublishStickerImagePath(String path) async {
+    final bytes = await File(path).readAsBytes();
+    final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+    final postId = _uuid.v4();
+
+    await GossipRouter.instance.sendImgMeta(
+      msgId: postId,
+      totalChunks: chunks.length,
+      fromId: _myId,
+      isAvatar: false,
+      isSticker: true,
+    );
+    for (var i = 0; i < chunks.length; i++) {
+      await GossipRouter.instance.sendImgChunk(
+        msgId: postId,
+        index: i,
+        base64Data: chunks[i],
+        fromId: _myId,
+      );
+      if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+    }
+
+    final cap = _postCtrl.text.trim();
+    final staffLabel = _channel.staffLabelForNewPost(_myId);
+    final post = ChannelPost(
+      id: postId,
+      channelId: _channel.id,
+      authorId: _myId,
+      text: cap.isEmpty ? ' ' : cap,
+      imagePath: path,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      staffLabel: staffLabel,
+      isSticker: true,
+    );
+    await ChannelService.instance.savePost(post);
+
+    await BroadcastOutboxService.instance.enqueueChannelPost(
+      channelId: _channel.id,
+      postId: postId,
+      authorId: _myId,
+      text: post.text,
+      timestamp: post.timestamp,
+      hasImage: true,
+      isSticker: true,
+      staffLabel: staffLabel,
+    );
+    _maybeAutoDriveBackupAfterOwnerPost();
+  }
+
+  Future<void> _channelGalleryStickerFromCrop(Uint8List bytes) async {
+    if (_isSending) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final path = await ImageService.instance.saveStickerFromBytes(bytes);
+      unawaited(
+          StickerCollectionService.instance.registerAbsoluteStickerPath(path));
+      await _channelPublishStickerImagePath(path);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Стикер: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _channelGalleryStickerFromLibrary(String absPath) async {
+    if (_isSending) return;
+    if (!File(absPath).existsSync()) return;
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      await _channelPublishStickerImagePath(absPath);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Стикер: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  Future<void> _channelGalleryFilePath(String srcPath) async {
+    if (_isSending) return;
+    if (!File(srcPath).existsSync()) return;
+    final originalName = p.basename(srcPath);
+    final fileBytes = await File(srcPath).readAsBytes();
+    if (!mounted) return;
+
+    if (fileBytes.length > 500 * 1024) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Большой файл'),
+          content: Text(
+            'Файл ${(fileBytes.length / 1024).toStringAsFixed(0)} КБ — '
+            'передача по Bluetooth займёт несколько минут. Продолжить?',
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Отмена')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Отправить')),
+          ],
+        ),
+      );
+      if (proceed != true || !mounted) return;
+    }
+
+    setState(() {
+      _isSending = true;
+      _sendProgress = 0.0;
+    });
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final filesDir = Directory('${docsDir.path}/files');
+      if (!filesDir.existsSync()) filesDir.createSync(recursive: true);
+      final destPath =
+          '${filesDir.path}/${DateTime.now().millisecondsSinceEpoch}_$originalName';
+      await File(srcPath).copy(destPath);
+
+      final chunks = ImageService.instance.splitToBase64Chunks(fileBytes);
+      final postId = _uuid.v4();
+
+      await GossipRouter.instance.sendImgMeta(
+        msgId: postId,
+        totalChunks: chunks.length,
+        fromId: _myId,
+        isAvatar: false,
+        isFile: true,
+        fileName: originalName,
+      );
+      for (var i = 0; i < chunks.length; i++) {
+        await GossipRouter.instance.sendImgChunk(
+          msgId: postId,
+          index: i,
+          base64Data: chunks[i],
+          fromId: _myId,
+        );
+        if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
+      }
+
+      final staffLabel = _channel.staffLabelForNewPost(_myId);
+      final post = ChannelPost(
+        id: postId,
+        channelId: _channel.id,
+        authorId: _myId,
+        text: '\u{1F4CE} $originalName',
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        filePath: destPath,
+        fileName: originalName,
+        fileSize: fileBytes.length,
+        staffLabel: staffLabel,
+      );
+      await ChannelService.instance.savePost(post);
+
+      await BroadcastOutboxService.instance.enqueueChannelPost(
+        channelId: _channel.id,
+        postId: postId,
+        authorId: _myId,
+        text: post.text,
+        timestamp: post.timestamp,
+        hasFile: true,
+        fileName: originalName,
+        staffLabel: staffLabel,
+      );
+      _maybeAutoDriveBackupAfterOwnerPost();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1220,6 +1595,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         if (mounted) setState(() => _sendProgress = (i + 1) / chunks.length);
       }
 
+      final staffLabel = _channel.staffLabelForNewPost(_myId);
       final post = ChannelPost(
         id: postId,
         channelId: _channel.id,
@@ -1227,6 +1603,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         text: '\u{1F3A4} Голосовое',
         timestamp: DateTime.now().millisecondsSinceEpoch,
         voicePath: path,
+        staffLabel: staffLabel,
       );
       await ChannelService.instance.savePost(post);
 
@@ -1237,7 +1614,9 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
         text: post.text,
         timestamp: post.timestamp,
         hasVoice: true,
+        staffLabel: staffLabel,
       );
+      _maybeAutoDriveBackupAfterOwnerPost();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1306,439 +1685,32 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
       postId: postId,
       authorId: _myId,
     );
-  }
-
-  void _toggleComments() async {
-    final updated =
-        _channel.copyWith(commentsEnabled: !_channel.commentsEnabled);
-    await ChannelService.instance.updateChannel(updated);
-    await GossipRouter.instance.broadcastChannelMeta(
-      channelId: _channel.id,
-      name: _channel.name,
-      adminId: _channel.adminId,
-      avatarColor: _channel.avatarColor,
-      avatarEmoji: _channel.avatarEmoji,
-      description: _channel.description,
-      commentsEnabled: updated.commentsEnabled,
-      createdAt: _channel.createdAt,
-      verified: _channel.verified,
-      verifiedBy: _channel.verifiedBy,
-      moderatorIds: _channel.moderatorIds,
-    );
-  }
-
-  void _requestVerification() async {
-    if (_channel.verified) return;
-    final canAutoVerify = ChannelService.instance.checkAutoVerify(_channel);
-    if (canAutoVerify) {
-      await ChannelService.instance.verifyChannel(_channel.id, 'auto');
-      await GossipRouter.instance.broadcastChannelMeta(
-        channelId: _channel.id,
-        name: _channel.name,
-        adminId: _channel.adminId,
-        avatarColor: _channel.avatarColor,
-        avatarEmoji: _channel.avatarEmoji,
-        description: _channel.description,
-        commentsEnabled: _channel.commentsEnabled,
-        createdAt: _channel.createdAt,
-        verified: true,
-        verifiedBy: 'auto',
-        moderatorIds: _channel.moderatorIds,
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Канал верифицирован!')),
-        );
+    unawaited(() async {
+      try {
+        await ChannelBackupService.instance
+            .publishBackupIfAdminDriveEnabled(_channel.id);
+        if (mounted) await _load();
+      } catch (e, st) {
+        debugPrint('[RLINK][Drive] backup after delete post: $e\n$st');
       }
-    } else {
-      // Send verification request to network admins.
-      await GossipRouter.instance.sendVerificationRequest(
-        channelId: _channel.id,
-        channelName: _channel.name,
-        adminId: _channel.adminId,
-        subscriberCount: _channel.subscriberIds.length,
-        avatarEmoji: _channel.avatarEmoji,
-        description: _channel.description,
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content:
-                Text('Заявка на верификацию отправлена администраторам сети'),
-          ),
-        );
-      }
-    }
+    }());
   }
 
-  // ── Edit channel profile ─────────────────────────────────────
-
-  static const _accentColors = [
-    0xFF42A5F5, // голубой (по умолчанию)
-    0xFF66BB6A, // зелёный
-    0xFFEF5350, // красный
-    0xFFAB47BC, // фиолетовый
-    0xFFFFA726, // оранжевый
-    0xFF26C6DA, // бирюзовый
-    0xFFEC407A, // розовый
-    0xFF8D6E63, // коричневый
-    0xFF78909C, // серо-стальной
-  ];
+  // ── Edit channel profile (модератор: только оформление) ─────
 
   void _editChannel() {
-    final nameCtrl = TextEditingController(text: _channel.name);
-    final descCtrl = TextEditingController(text: _channel.description ?? '');
-    final emojiCtrl = TextEditingController(text: _channel.avatarEmoji);
-    String? pickedImagePath = _channel.avatarImagePath;
-    String? pickedBannerPath = _channel.bannerImagePath;
-    int pickedColor = _channel.avatarColor;
-    bool commentsEnabled = _channel.commentsEnabled;
-    bool isPublic = _channel.isPublic;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          final cs = Theme.of(ctx).colorScheme;
-          return AlertDialog(
-            title: const Text('Настройки канала'),
-            contentPadding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-            content: Padding(
-              padding:
-                  EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(ctx).bottom),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Avatar image picker
-                    Center(
-                      child: GestureDetector(
-                        onTap: () async {
-                          final picked = await ImagePicker()
-                              .pickImage(source: ImageSource.gallery);
-                          if (picked == null) return;
-                          final saved =
-                              await ImageService.instance.compressAndSave(
-                            picked.path,
-                            isAvatar: true,
-                          );
-                          if (!ctx.mounted) return;
-                          setDialogState(() => pickedImagePath = saved);
-                        },
-                        child: CircleAvatar(
-                          radius: 36,
-                          backgroundColor: Color(pickedColor),
-                          backgroundImage: () {
-                            if (pickedImagePath == null) return null;
-                            final rp = ImageService.instance
-                                .resolveStoredPath(pickedImagePath);
-                            if (rp != null && File(rp).existsSync()) {
-                              return FileImage(File(rp));
-                            }
-                            return null;
-                          }(),
-                          child: () {
-                            if (pickedImagePath == null) {
-                              return Text(
-                                  emojiCtrl.text.isEmpty
-                                      ? '📢'
-                                      : emojiCtrl.text,
-                                  style: const TextStyle(fontSize: 28));
-                            }
-                            final rp = ImageService.instance
-                                .resolveStoredPath(pickedImagePath);
-                            if (rp != null && File(rp).existsSync()) {
-                              return null;
-                            }
-                            return Text(
-                                emojiCtrl.text.isEmpty ? '📢' : emojiCtrl.text,
-                                style: const TextStyle(fontSize: 28));
-                          }(),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Text('Баннер профиля',
-                        style: TextStyle(
-                            fontSize: 12, color: cs.onSurfaceVariant)),
-                    const SizedBox(height: 8),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: GestureDetector(
-                        onTap: () async {
-                          final picked = await ImagePicker()
-                              .pickImage(source: ImageSource.gallery);
-                          if (picked == null) return;
-                          final saved =
-                              await ImageService.instance.compressAndSave(
-                            picked.path,
-                            isAvatar: false,
-                            maxSize: 1200,
-                            quality: 82,
-                          );
-                          if (!ctx.mounted) return;
-                          setDialogState(() => pickedBannerPath = saved);
-                        },
-                        child: SizedBox(
-                          width:
-                              math.min(MediaQuery.sizeOf(ctx).width - 48, 520),
-                          height: 100,
-                          child: ColoredBox(
-                            color: cs.surfaceContainerHighest,
-                            child: pickedBannerPath == null
-                                ? Center(
-                                    child: Text(
-                                      'Нажмите, чтобы выбрать баннер',
-                                      style:
-                                          TextStyle(color: cs.onSurfaceVariant),
-                                    ),
-                                  )
-                                : Builder(builder: (_) {
-                                    final bp = ImageService.instance
-                                        .resolveStoredPath(pickedBannerPath);
-                                    if (bp != null && File(bp).existsSync()) {
-                                      return Image.file(
-                                        File(bp),
-                                        fit: BoxFit.cover,
-                                        width: math.min(
-                                            MediaQuery.sizeOf(ctx).width - 48,
-                                            520),
-                                        height: 100,
-                                        errorBuilder: (_, __, ___) => Center(
-                                          child: Icon(
-                                            Icons.broken_image_outlined,
-                                            color: cs.onSurfaceVariant,
-                                          ),
-                                        ),
-                                      );
-                                    }
-                                    return Center(
-                                      child: Icon(
-                                          Icons.add_photo_alternate_outlined,
-                                          color: cs.onSurfaceVariant),
-                                    );
-                                  }),
-                          ),
-                        ),
-                      ),
-                    ),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton(
-                        onPressed: () =>
-                            setDialogState(() => pickedBannerPath = null),
-                        child: const Text('Убрать баннер'),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    TextField(
-                      controller: nameCtrl,
-                      maxLength: 30,
-                      autofocus: false,
-                      decoration: const InputDecoration(
-                        labelText: 'Название канала',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.drive_file_rename_outline),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: descCtrl,
-                      maxLength: 200,
-                      maxLines: 3,
-                      decoration: const InputDecoration(
-                        labelText: 'Описание',
-                        hintText: 'Краткое описание канала...',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.info_outline),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: emojiCtrl,
-                      maxLength: 2,
-                      decoration: const InputDecoration(
-                        labelText: 'Эмодзи',
-                        hintText: '📢',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.emoji_emotions_outlined),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    // Color palette
-                    Text('Цвет канала',
-                        style: TextStyle(
-                            fontSize: 12, color: cs.onSurfaceVariant)),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      children: _accentColors.map((c) {
-                        final sel = c == pickedColor;
-                        return GestureDetector(
-                          onTap: () => setDialogState(() => pickedColor = c),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 150),
-                            width: 32,
-                            height: 32,
-                            decoration: BoxDecoration(
-                              color: Color(c),
-                              shape: BoxShape.circle,
-                              border: sel
-                                  ? Border.all(color: cs.onSurface, width: 2.5)
-                                  : null,
-                            ),
-                            child: sel
-                                ? const Icon(Icons.check,
-                                    color: Colors.white, size: 16)
-                                : null,
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                    const SizedBox(height: 12),
-                    // Toggles
-                    SwitchListTile(
-                      value: commentsEnabled,
-                      onChanged: (v) =>
-                          setDialogState(() => commentsEnabled = v),
-                      title: const Text('Комментарии'),
-                      subtitle: const Text(
-                          'Подписчики могут комментировать посты',
-                          style: TextStyle(fontSize: 12)),
-                      secondary: const Icon(Icons.comment_outlined),
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                    ),
-                    SwitchListTile(
-                      value: isPublic,
-                      onChanged: (v) => setDialogState(() => isPublic = v),
-                      title: const Text('Публичный канал'),
-                      subtitle: Text(
-                          isPublic
-                              ? 'Найдётся в поиске'
-                              : 'Скрытый — только по прямой ссылке',
-                          style: const TextStyle(fontSize: 12)),
-                      secondary:
-                          Icon(isPublic ? Icons.public : Icons.lock_outline),
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                    ),
-                    const SizedBox(height: 4),
-                    // Manage subscribers link
-                    ListTile(
-                      leading: const Icon(Icons.group_outlined),
-                      title: const Text('Управление подписчиками'),
-                      trailing: const Icon(Icons.chevron_right),
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      onTap: () {
-                        Navigator.pop(ctx);
-                        _manageSubscribers();
-                      },
-                    ),
-                    // Manage moderators link
-                    ListTile(
-                      leading: const Icon(Icons.admin_panel_settings_outlined),
-                      title: const Text('Редакторы канала'),
-                      trailing: const Icon(Icons.chevron_right),
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      onTap: () {
-                        Navigator.pop(ctx);
-                        _manageModerators();
-                      },
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                ),
-              ),
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Отмена')),
-              FilledButton(
-                onPressed: () async {
-                  final name = nameCtrl.text.trim();
-                  if (name.isEmpty) return;
-                  final prevAvatar = _channel.avatarImagePath;
-                  final prevBanner = _channel.bannerImagePath;
-                  final updated = _channel.copyWith(
-                    name: name,
-                    description: descCtrl.text.trim().isEmpty
-                        ? null
-                        : descCtrl.text.trim(),
-                    avatarEmoji: emojiCtrl.text.trim().isEmpty
-                        ? _channel.avatarEmoji
-                        : emojiCtrl.text.trim(),
-                    avatarImagePath: pickedImagePath,
-                    bannerImagePath: pickedBannerPath,
-                    avatarColor: pickedColor,
-                    commentsEnabled: commentsEnabled,
-                    isPublic: isPublic,
-                  );
-                  await ChannelService.instance.updateChannel(updated);
-                  if (!mounted) return;
-                  if (!ctx.mounted) return;
-                  Navigator.pop(ctx);
-                  setState(() => _channel = updated);
-                  _load();
-                  unawaited(GossipRouter.instance.broadcastChannelMeta(
-                    channelId: updated.id,
-                    name: updated.name,
-                    adminId: updated.adminId,
-                    avatarColor: updated.avatarColor,
-                    avatarEmoji: updated.avatarEmoji,
-                    description: updated.description,
-                    commentsEnabled: updated.commentsEnabled,
-                    createdAt: updated.createdAt,
-                    verified: updated.verified,
-                    verifiedBy: updated.verifiedBy,
-                    subscriberIds: updated.subscriberIds,
-                    moderatorIds: updated.moderatorIds,
-                    username: updated.username,
-                    universalCode: updated.universalCode,
-                    isPublic: updated.isPublic,
-                  ));
-                  unawaited(_syncChannelVisualsAfterEdit(
-                    updated: updated,
-                    prevAvatarPath: prevAvatar,
-                    prevBannerPath: prevBanner,
-                  ));
-                },
-                child: const Text('Сохранить'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  // ── Delete channel (admin only) ────────────────────────────
-
-  Future<void> _deleteChannel() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Удалить канал?'),
-        content: const Text('Канал и все посты будут удалены навсегда.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Отмена')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('Удалить'),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true || !mounted) return;
-    await ChannelService.instance.deleteChannel(_channel.id);
-    if (mounted) Navigator.pop(context);
+    unawaited(showChannelProfileEditDialog(
+      context,
+      channel: _channel,
+      showPolicyToggles: _isAdmin,
+      myId: _myId,
+      onChannelUpdated: (updated) {
+        if (mounted) {
+          setState(() => _channel = updated);
+          _load();
+        }
+      },
+    ));
   }
 
   // ── Manage subscribers (kick) ───────────────────────────────
@@ -1914,20 +1886,23 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
                       description: _channel.description,
                       createdAt: _channel.createdAt,
                     );
-                    // Also broadcast updated meta
-                    await GossipRouter.instance.broadcastChannelMeta(
-                      channelId: _channel.id,
-                      name: _channel.name,
-                      adminId: _channel.adminId,
-                      avatarColor: _channel.avatarColor,
-                      avatarEmoji: _channel.avatarEmoji,
-                      description: _channel.description,
-                      commentsEnabled: _channel.commentsEnabled,
-                      createdAt: _channel.createdAt,
-                      verified: _channel.verified,
-                      verifiedBy: _channel.verifiedBy,
-                      moderatorIds: _channel.moderatorIds,
+                    await InviteDmService.sendChannelInviteDm(
+                      targetPublicKey: c.publicKeyHex,
+                      payload: {
+                        'channelId': _channel.id,
+                        'channelName': _channel.name,
+                        'adminId': _channel.adminId,
+                        'inviterId': CryptoService.instance.publicKeyHex,
+                        'inviterNick': myProfile?.nickname ?? '',
+                        'avatarColor': _channel.avatarColor,
+                        'avatarEmoji': _channel.avatarEmoji,
+                        if (_channel.description != null)
+                          'description': _channel.description,
+                        'createdAt': _channel.createdAt,
+                      },
                     );
+                    // Also broadcast updated meta
+                    await _channel.broadcastGossipMeta();
                     _load();
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -1941,99 +1916,6 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
           ],
         ),
       ),
-    );
-  }
-
-  // ── Moderator management ─────────────────────────────────────
-
-  void _manageModerators() {
-    final subscribers =
-        _channel.subscriberIds.where((id) => id != _channel.adminId).toList();
-    final contacts = ChatStorageService.instance.contactsNotifier.value;
-
-    String nickFor(String id) {
-      if (id == _myId) return 'Вы';
-      return contacts
-              .where((c) => c.publicKeyHex == id)
-              .firstOrNull
-              ?.nickname ??
-          '${id.substring(0, 8)}…';
-    }
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) {
-        return StatefulBuilder(builder: (ctx2, setModal) {
-          final mods = _channel.moderatorIds;
-          return SafeArea(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Text('Модераторы канала',
-                      style:
-                          TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
-                ),
-                if (subscribers.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('Нет подписчиков для назначения',
-                        style: TextStyle(color: Colors.grey)),
-                  )
-                else
-                  ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(ctx2).size.height * 0.5,
-                    ),
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: subscribers.length,
-                      itemBuilder: (_, i) {
-                        final uid = subscribers[i];
-                        final isMod = mods.contains(uid);
-                        return SwitchListTile(
-                          title: Text(nickFor(uid)),
-                          subtitle: Text(
-                            '${uid.substring(0, 12)}…',
-                            style: const TextStyle(
-                                fontSize: 11, color: Colors.grey),
-                          ),
-                          value: isMod,
-                          onChanged: (val) async {
-                            final updated = await ChannelService.instance
-                                .setModerator(_channel.id, uid, val);
-                            if (updated != null && mounted) {
-                              setState(() => _channel = updated);
-                              setModal(() {});
-                              // Broadcast updated meta so other devices sync
-                              unawaited(
-                                  GossipRouter.instance.broadcastChannelMeta(
-                                channelId: _channel.id,
-                                name: _channel.name,
-                                adminId: _channel.adminId,
-                                avatarColor: _channel.avatarColor,
-                                avatarEmoji: _channel.avatarEmoji,
-                                description: _channel.description,
-                                commentsEnabled: _channel.commentsEnabled,
-                                createdAt: _channel.createdAt,
-                                verified: _channel.verified,
-                                verifiedBy: _channel.verifiedBy,
-                                moderatorIds: updated.moderatorIds,
-                              ));
-                            }
-                          },
-                        );
-                      },
-                    ),
-                  ),
-                const SizedBox(height: 8),
-              ],
-            ),
-          );
-        });
-      },
     );
   }
 
@@ -2088,6 +1970,17 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
           ),
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.share_outlined),
+            tooltip: 'Поделиться каналом',
+            onPressed: () {
+              unawaited(RlinkDeepLink.shareChannelInvite(
+                context: context,
+                channelTitle: _channel.name,
+                channelId: _channel.id,
+              ));
+            },
+          ),
           // Subscribe / Unsubscribe for non-admins
           if (!_isAdmin)
             TextButton.icon(
@@ -2109,79 +2002,29 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
               tooltip: 'Пригласить',
               onPressed: _inviteSubscriber,
             ),
-          if (_isAdmin || _isModerator)
+          if (!_isAdmin && _isModerator)
             PopupMenuButton<String>(
               onSelected: (v) {
                 if (v == 'edit') _editChannel();
-                if (v == 'comments') _toggleComments();
-                if (v == 'verify') _requestVerification();
-                if (v == 'mods') _manageModerators();
                 if (v == 'subscribers') _manageSubscribers();
-                if (v == 'delete') _deleteChannel();
               },
-              itemBuilder: (_) => [
-                if (_isAdmin || _isModerator)
-                  const PopupMenuItem(
-                    value: 'edit',
-                    child: Row(children: [
-                      Icon(Icons.edit_outlined, size: 18),
-                      SizedBox(width: 8),
-                      Text('Редактировать'),
-                    ]),
-                  ),
-                if (_isAdmin || _isModerator)
-                  const PopupMenuItem(
-                    value: 'subscribers',
-                    child: Row(children: [
-                      Icon(Icons.people_outline, size: 18),
-                      SizedBox(width: 8),
-                      Text('Подписчики'),
-                    ]),
-                  ),
-                if (_isAdmin)
-                  PopupMenuItem(
-                    value: 'comments',
-                    child: Row(children: [
-                      Icon(
-                        _channel.commentsEnabled
-                            ? Icons.comments_disabled_outlined
-                            : Icons.comment_outlined,
-                        size: 18,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(_channel.commentsEnabled
-                          ? 'Выключить комментарии'
-                          : 'Включить комментарии'),
-                    ]),
-                  ),
-                if (_isAdmin)
-                  const PopupMenuItem(
-                    value: 'mods',
-                    child: Row(children: [
-                      Icon(Icons.manage_accounts_outlined, size: 18),
-                      SizedBox(width: 8),
-                      Text('Модераторы'),
-                    ]),
-                  ),
-                if (_isAdmin && !_channel.verified)
-                  const PopupMenuItem(
-                    value: 'verify',
-                    child: Row(children: [
-                      Icon(Icons.verified_outlined, size: 18),
-                      SizedBox(width: 8),
-                      Text('Подать на верификацию'),
-                    ]),
-                  ),
-                if (_isAdmin)
-                  const PopupMenuItem(
-                    value: 'delete',
-                    child: Row(children: [
-                      Icon(Icons.delete_outline, size: 18, color: Colors.red),
-                      SizedBox(width: 8),
-                      Text('Удалить канал',
-                          style: TextStyle(color: Colors.red)),
-                    ]),
-                  ),
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: 'edit',
+                  child: Row(children: [
+                    Icon(Icons.edit_outlined, size: 18),
+                    SizedBox(width: 8),
+                    Text('Редактировать'),
+                  ]),
+                ),
+                PopupMenuItem(
+                  value: 'subscribers',
+                  child: Row(children: [
+                    Icon(Icons.people_outline, size: 18),
+                    SizedBox(width: 8),
+                    Text('Подписчики'),
+                  ]),
+                ),
               ],
             ),
         ],
@@ -2247,20 +2090,26 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
                         controller: _feedScrollController,
                         padding: const EdgeInsets.symmetric(vertical: 8),
                         itemCount: _posts.length,
-                        itemBuilder: (_, i) => RepaintBoundary(
-                          child: _PostCard(
-                            post: _posts[i],
-                            isAdmin: _isAdmin,
-                            commentsEnabled: _channel.commentsEnabled,
-                            nickFor: _nickFor,
-                            onDelete: _channel.canPost(_myId)
-                                ? () => _deletePost(_posts[i].id)
-                                : null,
-                            channelId: _channel.id,
-                            channelName: _channel.name,
-                            channelAdminId: _channel.adminId,
-                          ),
-                        ),
+                        itemBuilder: (_, i) {
+                          final post = _posts[i];
+                          final showComments = _channel.commentsEnabled ||
+                              (post.authorId == _myId &&
+                                  _channel.canPost(_myId));
+                          return RepaintBoundary(
+                            child: _PostCard(
+                              post: post,
+                              isAdmin: _isAdmin,
+                              commentsEnabled: showComments,
+                              nickFor: _nickFor,
+                              onDelete: _channel.canPost(_myId)
+                                  ? () => _deletePost(post.id)
+                                  : null,
+                              channelId: _channel.id,
+                              channelName: _channel.name,
+                              channelAdminId: _channel.adminId,
+                            ),
+                          );
+                        },
                       ),
                       if (_showScrollToBottomFab)
                         Positioned(
@@ -2296,8 +2145,9 @@ class _ChannelViewScreenState extends State<ChannelViewScreen> {
               isRecording: _isRecording,
               recordingSecondsNotifier: _recordingSecondsNotifier,
               onSend: _createPost,
-              onPickImage: _pickAndSendImage,
-              onPickVideo: _pickAndSendVideo,
+              onOpenMediaGallery: _openChannelMediaGallery,
+              onPickVideoFromGallery: _pickAndSendVideoFromGallery,
+              onRecordSquareVideo: _recordAndSendSquarePost,
               onPickFile: _pickAndSendFile,
               onCreatePoll: _createPollPost,
               onMicDown: _startVoiceRecording,
@@ -2319,8 +2169,57 @@ class _ImageQuality {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Channel Input Bar — admin post bar with full media support
+// Channel Input Bar — как в личном чате: формат, +, галерея, поле, @, микрофон
 // ══════════════════════════════════════════════════════════════════
+
+class _ChannelFmtBtn extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  final bool bold;
+  final bool italic;
+  final bool strikethrough;
+  final bool underline;
+
+  const _ChannelFmtBtn({
+    required this.label,
+    required this.onTap,
+    this.bold = false,
+    this.italic = false,
+    this.strikethrough = false,
+    this.underline = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: Material(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: bold ? FontWeight.w800 : FontWeight.w500,
+                fontStyle: italic ? FontStyle.italic : FontStyle.normal,
+                decoration: underline
+                    ? TextDecoration.underline
+                    : strikethrough
+                        ? TextDecoration.lineThrough
+                        : TextDecoration.none,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _ChannelInputBar extends StatefulWidget {
   final TextEditingController controller;
@@ -2329,8 +2228,9 @@ class _ChannelInputBar extends StatefulWidget {
   final bool isRecording;
   final ValueNotifier<double> recordingSecondsNotifier;
   final VoidCallback onSend;
-  final VoidCallback onPickImage;
-  final VoidCallback onPickVideo;
+  final VoidCallback onOpenMediaGallery;
+  final VoidCallback onPickVideoFromGallery;
+  final VoidCallback onRecordSquareVideo;
   final VoidCallback onPickFile;
   final VoidCallback onCreatePoll;
   final VoidCallback onMicDown;
@@ -2344,8 +2244,9 @@ class _ChannelInputBar extends StatefulWidget {
     required this.isRecording,
     required this.recordingSecondsNotifier,
     required this.onSend,
-    required this.onPickImage,
-    required this.onPickVideo,
+    required this.onOpenMediaGallery,
+    required this.onPickVideoFromGallery,
+    required this.onRecordSquareVideo,
     required this.onPickFile,
     required this.onCreatePoll,
     required this.onMicDown,
@@ -2359,16 +2260,25 @@ class _ChannelInputBar extends StatefulWidget {
 
 class _ChannelInputBarState extends State<_ChannelInputBar> {
   bool _hasText = false;
+  int _length = 0;
+  bool _showFormatStrip = false;
   final _focusNode = FocusNode();
+  static const _kMaxPostLen = 12000;
+
+  void _onAppSettingsChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void initState() {
     super.initState();
+    AppSettings.instance.addListener(_onAppSettingsChanged);
     widget.controller.addListener(_onTextChanged);
   }
 
   @override
   void dispose() {
+    AppSettings.instance.removeListener(_onAppSettingsChanged);
     widget.controller.removeListener(_onTextChanged);
     _focusNode.dispose();
     super.dispose();
@@ -2376,8 +2286,15 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
 
   void _onTextChanged() {
     final has = widget.controller.text.trim().isNotEmpty;
-    if (has != _hasText) {
-      setState(() => _hasText = has);
+    final sel = widget.controller.selection;
+    if (mounted) {
+      setState(() {
+        _hasText = has;
+        _length = widget.controller.text.length;
+        if (!sel.isValid || sel.isCollapsed) {
+          _showFormatStrip = false;
+        }
+      });
     }
   }
 
@@ -2499,6 +2416,11 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final sel = widget.controller.selection;
+    final hasSelection =
+        sel.isValid && sel.baseOffset != sel.extentOffset;
+    final near = _length > _kMaxPostLen * 0.8;
+    final over = _length > _kMaxPostLen;
 
     return SafeArea(
       child: Container(
@@ -2525,16 +2447,59 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                   ),
                 ),
               ),
+            if (hasSelection && _showFormatStrip)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  children: [
+                    _ChannelFmtBtn(
+                        label: 'B',
+                        bold: true,
+                        onTap: () => _wrapSelection('**', '**')),
+                    _ChannelFmtBtn(
+                        label: 'I',
+                        italic: true,
+                        onTap: () => _wrapSelection('_', '_')),
+                    _ChannelFmtBtn(
+                        label: 'S',
+                        strikethrough: true,
+                        onTap: () => _wrapSelection('~~', '~~')),
+                    _ChannelFmtBtn(
+                        label: 'U',
+                        underline: true,
+                        onTap: () => _wrapSelection('__', '__')),
+                    _ChannelFmtBtn(
+                        label: '||',
+                        onTap: () => _wrapSelection('||', '||')),
+                  ],
+                ),
+              ),
             Row(children: [
+              if (hasSelection)
+                IconButton(
+                  onPressed: () =>
+                      setState(() => _showFormatStrip = !_showFormatStrip),
+                  icon: Icon(
+                    Icons.text_fields_rounded,
+                    color: _showFormatStrip ? cs.primary : cs.onSurfaceVariant,
+                    size: 22,
+                  ),
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  tooltip: _showFormatStrip
+                      ? 'Скрыть формат'
+                      : 'Формат выделенного текста',
+                ),
               PopupMenuButton<String>(
                 onSelected: (value) {
                   if (widget.isSending) return;
                   switch (value) {
-                    case 'photo':
-                      widget.onPickImage();
+                    case 'square_video':
+                      widget.onRecordSquareVideo();
                       break;
                     case 'video':
-                      widget.onPickVideo();
+                      widget.onPickVideoFromGallery();
                       break;
                     case 'file':
                       widget.onPickFile();
@@ -2555,11 +2520,16 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                     borderRadius: BorderRadius.circular(14)),
                 itemBuilder: (_) => [
                   const PopupMenuItem(
-                    value: 'photo',
+                    value: 'square_video',
                     child: Row(children: [
-                      Icon(Icons.photo_library_outlined, size: 20),
+                      Icon(Icons.crop_square, size: 20),
                       SizedBox(width: 12),
-                      Text('Фото'),
+                      Expanded(
+                        child: Text(
+                          'Записать квадратик',
+                          maxLines: 2,
+                        ),
+                      ),
                     ]),
                   ),
                   const PopupMenuItem(
@@ -2567,7 +2537,12 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                     child: Row(children: [
                       Icon(Icons.video_library_outlined, size: 20),
                       SizedBox(width: 12),
-                      Text('Видео'),
+                      Expanded(
+                        child: Text(
+                          'Видео из галереи',
+                          maxLines: 2,
+                        ),
+                      ),
                     ]),
                   ),
                   const PopupMenuItem(
@@ -2588,7 +2563,23 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                   ),
                 ],
               ),
-              const SizedBox(width: 4),
+              IconButton(
+                onPressed: widget.isSending || widget.isRecording
+                    ? null
+                    : widget.onOpenMediaGallery,
+                icon: Icon(
+                  Icons.photo_library_outlined,
+                  color: widget.isSending || widget.isRecording
+                      ? cs.onSurface.withValues(alpha: 0.3)
+                      : cs.onSurfaceVariant,
+                  size: 24,
+                ),
+                padding: EdgeInsets.zero,
+                constraints:
+                    const BoxConstraints(minWidth: 36, minHeight: 36),
+                tooltip: 'Галерея медиа',
+              ),
+              const SizedBox(width: 2),
               Expanded(
                 child: Container(
                   decoration: BoxDecoration(
@@ -2600,15 +2591,28 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                     builder: (_, secs, __) {
                       final s = secs.floor();
                       final t = ((secs % 1) * 10).floor();
+                      final sendOnEnter = AppSettings.instance.sendOnEnter;
                       return TextField(
                         controller: widget.controller,
                         focusNode: _focusNode,
                         onTapOutside: (_) => _focusNode.unfocus(),
                         enabled: !widget.isRecording,
                         contextMenuBuilder: _buildContextMenu,
-                        maxLines: 4,
+                        maxLines: sendOnEnter ? 1 : 4,
                         minLines: 1,
-                        textInputAction: TextInputAction.newline,
+                        textInputAction: sendOnEnter
+                            ? TextInputAction.send
+                            : TextInputAction.newline,
+                        onSubmitted: sendOnEnter
+                            ? (_) {
+                                if (!widget.isSending &&
+                                    !widget.isRecording &&
+                                    !over &&
+                                    _hasText) {
+                                  widget.onSend();
+                                }
+                              }
+                            : null,
                         style: const TextStyle(fontSize: 15),
                         decoration: InputDecoration(
                           hintText: widget.isRecording
@@ -2620,6 +2624,15 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                           border: InputBorder.none,
                           contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16, vertical: 10),
+                          suffix: near
+                              ? Text(
+                                  '${_kMaxPostLen - _length}',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: over ? Colors.red : cs.onSurfaceVariant,
+                                  ),
+                                )
+                              : null,
                         ),
                       );
                     },
@@ -2671,7 +2684,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
               const SizedBox(width: 8),
               if (_hasText || widget.isSending)
                 GestureDetector(
-                  onTap: widget.isSending || widget.isRecording
+                  onTap: widget.isSending || widget.isRecording || over
                       ? null
                       : widget.onSend,
                   child: AnimatedContainer(
@@ -2699,7 +2712,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                 )
               else
                 GestureDetector(
-                  onTap: widget.isSending ? null : widget.onPickVideo,
+                  onTap: widget.isSending ? null : widget.onRecordSquareVideo,
                   child: Container(
                     width: 44,
                     height: 44,
@@ -2709,7 +2722,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                           : cs.primary,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Icon(Icons.video_library_rounded,
+                    child: Icon(Icons.crop_square,
                         color: cs.onPrimary, size: 22),
                   ),
                 ),
@@ -2725,7 +2738,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
 // Post card — shows a single post with comment icon
 // ══════════════════════════════════════════════════════════════════
 
-class _PostCard extends StatelessWidget {
+class _PostCard extends StatefulWidget {
   final ChannelPost post;
   final bool isAdmin;
   final bool commentsEnabled;
@@ -2746,12 +2759,27 @@ class _PostCard extends StatelessWidget {
     required this.channelAdminId,
   });
 
+  @override
+  State<_PostCard> createState() => _PostCardState();
+}
+
+class _PostCardState extends State<_PostCard> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final myId = CryptoService.instance.publicKeyHex;
+      if (myId.isEmpty) return;
+      unawaited(ChannelService.instance.recordPostView(widget.post.id, myId));
+    });
+  }
+
   Future<void> _togglePostReaction(BuildContext context, String emoji) async {
     final myId = CryptoService.instance.publicKeyHex;
-    await ChannelService.instance.togglePostReaction(post.id, emoji, myId);
+    await ChannelService.instance.togglePostReaction(widget.post.id, emoji, myId);
     await BroadcastOutboxService.instance.enqueueReactionExt(
       kind: 'channel_post',
-      targetId: post.id,
+      targetId: widget.post.id,
       emoji: emoji,
       fromId: myId,
     );
@@ -2766,14 +2794,16 @@ class _PostCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final post = widget.post;
     final cs = Theme.of(context).colorScheme;
     final dt = DateTime.fromMillisecondsSinceEpoch(post.timestamp);
     final myId = CryptoService.instance.publicKeyHex;
     final missing = channelPostMissingLocalMedia(post);
     // Show channel name as sender (like Telegram). In parentheses show author only
     // if it's a moderator posting (not admin), so admins know who posted.
-    final senderLabel =
-        channelName.isNotEmpty ? channelName : nickFor(post.authorId);
+    final senderLabel = widget.channelName.isNotEmpty
+        ? widget.channelName
+        : widget.nickFor(post.authorId);
 
     return GestureDetector(
       onLongPress: () async {
@@ -2799,6 +2829,14 @@ class _PostCard extends StatelessWidget {
                     title: const Text('Копировать текст'),
                     onTap: () => Navigator.pop(ctx, 'copy'),
                   ),
+                if (widget.onDelete != null)
+                  ListTile(
+                    leading:
+                        Icon(Icons.delete_outline, color: cs.error),
+                    title: Text('Удалить пост',
+                        style: TextStyle(color: cs.error)),
+                    onTap: () => Navigator.pop(ctx, 'del_post'),
+                  ),
               ],
             ),
           ),
@@ -2807,16 +2845,17 @@ class _PostCard extends StatelessWidget {
         if (action == 'react') {
           await _openReactionPicker(context);
         } else if (action == 'fwd') {
-          final msg = _channelPostToForwardMessage(post, channelId);
-          final authorNick = nickFor(post.authorId);
-          final label = channelName.isNotEmpty
-              ? '$channelName · $authorNick'
+          final msg = _channelPostToForwardMessage(post, widget.channelId);
+          final authorNick = widget.nickFor(post.authorId);
+          final label = widget.channelName.isNotEmpty
+              ? '${widget.channelName} · $authorNick'
               : 'Канал · $authorNick';
           await _pickForwardChannelContent(
             context,
             forwardMessage: msg,
             forwardAuthorId: post.authorId,
             originalAuthorNick: label,
+            channelId: widget.channelId,
           );
         } else if (action == 'copy') {
           await Clipboard.setData(ClipboardData(text: post.text));
@@ -2825,6 +2864,8 @@ class _PostCard extends StatelessWidget {
               const SnackBar(content: Text('Текст скопирован')),
             );
           }
+        } else if (action == 'del_post') {
+          widget.onDelete?.call();
         }
       },
       child: Card(
@@ -2848,16 +2889,41 @@ class _PostCard extends StatelessWidget {
                   style: TextStyle(
                       fontSize: 11, color: cs.onSurface.withValues(alpha: 0.4)),
                 ),
-                if (onDelete != null)
-                  IconButton(
-                    icon: Icon(Icons.delete_outline,
-                        size: 16, color: Colors.red.shade300),
-                    onPressed: onDelete,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
+                if (post.forwardCount > 0) ...[
+                  const SizedBox(width: 8),
+                  Tooltip(
+                    message: 'Пересылок',
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.forward,
+                            size: 12,
+                            color: cs.onSurface.withValues(alpha: 0.45)),
+                        Text(
+                          '${post.forwardCount}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: cs.onSurface.withValues(alpha: 0.45),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
+                ],
               ]),
               const SizedBox(height: 6),
+              if (post.staffLabel != null && post.staffLabel!.trim().isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    post.staffLabel!.trim(),
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
+                      color: cs.tertiary,
+                    ),
+                  ),
+                ),
               if (missing)
                 ClearedMediaPlaceholder(
                   isOutgoing: false,
@@ -2884,18 +2950,21 @@ class _PostCard extends StatelessWidget {
                       final p = ImageService.instance
                           .resolveStoredPath(post.imagePath);
                       if (p == null) return const SizedBox.shrink();
-                      return ChannelFeedImage(resolvedPath: p);
+                      return ChannelFeedImage(
+                        resolvedPath: p,
+                        isSticker: post.isSticker,
+                      );
                     }),
                   ),
                 ),
               if (!missing && post.videoPath != null)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: _ChannelSquareVideoTile(storedPath: post.videoPath!),
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: _ChannelInlineVideo(storedPath: post.videoPath!),
                 ),
               if (!missing && post.voicePath != null)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.only(bottom: 4),
                   child: _ChannelVoiceRow(storedPath: post.voicePath!),
                 ),
               if (!missing && post.filePath != null)
@@ -2912,7 +2981,7 @@ class _PostCard extends StatelessWidget {
                   !(missing && isSyntheticMediaCaption(post.text)))
                 ValueListenableBuilder<List<Contact>>(
                   valueListenable: ChatStorageService.instance.contactsNotifier,
-                  builder: (_, contacts, __) {
+                  builder: (ctx, contacts, __) {
                     return RichMessageText(
                       text: post.text,
                       textColor: cs.onSurface,
@@ -2922,6 +2991,7 @@ class _PostCard extends StatelessWidget {
                         contacts,
                         ProfileService.instance.profile,
                       ),
+                      onMentionTap: (hex) => openDmFromMentionKey(ctx, hex),
                     );
                   },
                 ),
@@ -2934,31 +3004,6 @@ class _PostCard extends StatelessWidget {
                   isOutgoing: false,
                   compact: true,
                 ),
-              Padding(
-                padding: const EdgeInsets.only(top: 4, bottom: 2),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
-                      for (final e in kQuickReactionEmojis)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: InkWell(
-                            onTap: () => _togglePostReaction(context, e),
-                            borderRadius: BorderRadius.circular(8),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 3),
-                              child: Text(e,
-                                  style: const TextStyle(fontSize: 18)),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 6),
               if (post.reactions.isNotEmpty) ...[
                 ReactionsBar(
                   reactions: post.reactions,
@@ -2989,8 +3034,19 @@ class _PostCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 12),
+                Icon(Icons.visibility_outlined,
+                    size: 14,
+                    color: cs.onSurface.withValues(alpha: 0.4)),
+                const SizedBox(width: 4),
+                Text(
+                  '${post.viewCount}',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: cs.onSurface.withValues(alpha: 0.5)),
+                ),
+                const SizedBox(width: 12),
                 // Comments button — navigates to PostCommentsScreen
-                if (commentsEnabled)
+                if (widget.commentsEnabled)
                   Expanded(
                     child: GestureDetector(
                       onTap: () {
@@ -2999,10 +3055,10 @@ class _PostCard extends StatelessWidget {
                           MaterialPageRoute(
                             builder: (_) => PostCommentsScreen(
                               post: post,
-                              channelId: channelId,
-                              channelName: channelName,
-                              channelAdminId: channelAdminId,
-                              nickFor: nickFor,
+                              channelId: widget.channelId,
+                              channelName: widget.channelName,
+                              channelAdminId: widget.channelAdminId,
+                              nickFor: widget.nickFor,
                             ),
                           ),
                         );
@@ -3079,6 +3135,10 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
     _comments = List.from(widget.post.comments);
     _loadComments();
     ChannelService.instance.version.addListener(_loadComments);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_myId.isEmpty) return;
+      unawaited(ChannelService.instance.recordPostView(widget.post.id, _myId));
+    });
   }
 
   @override
@@ -3179,13 +3239,13 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
 
   Future<void> _sendCommentImage() async {
     if (_isSendingComment) return;
-    final picked =
-        await _commentImagePicker.pickImage(source: ImageSource.gallery);
-    if (picked == null || !mounted) return;
+    final rawPath = await pickImagePathDesktopAware(
+        imagePicker: _commentImagePicker);
+    if (rawPath == null || !mounted) return;
     final editedBytes = await Navigator.push<Uint8List>(
       context,
       MaterialPageRoute(
-          builder: (_) => ImageEditorScreen(imagePath: picked.path)),
+          builder: (_) => ImageEditorScreen(imagePath: rawPath)),
     );
     if (editedBytes == null || !mounted) return;
     final quality = await _commentPickImageQuality();
@@ -3238,6 +3298,69 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
               content: Text('Ошибка фото: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSendingComment = false;
+          _commentSendProgress = 0;
+        });
+      }
+    }
+  }
+
+  Future<void> _sendCommentSquareVideo() async {
+    if (_isSendingComment) return;
+    if (!mounted) return;
+    final raw = await showSquareVideoRecorder(context);
+    if (raw == null || !mounted) return;
+
+    setState(() {
+      _isSendingComment = true;
+      _commentSendProgress = 0;
+    });
+    try {
+      final path =
+          await ImageService.instance.saveVideo(raw, isSquare: true);
+      final bytes = await File(path).readAsBytes();
+      final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+      final commentId = const Uuid().v4();
+      await _runCommentChunks(
+        commentId: commentId,
+        chunks: chunks,
+        isVideo: true,
+        isSquare: true,
+      );
+
+      final caption = _commentCtrl.text.trim();
+      final textForDb = caption.isEmpty ? ' ' : caption;
+      final comment = ChannelComment(
+        id: commentId,
+        postId: widget.post.id,
+        authorId: _myId,
+        text: textForDb,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        videoPath: path,
+      );
+      await ChannelService.instance.saveComment(comment);
+      await ChannelService.instance.flushPendingMediaForComment(commentId);
+      await BroadcastOutboxService.instance.enqueueChannelComment(
+        postId: widget.post.id,
+        commentId: commentId,
+        authorId: _myId,
+        text: textForDb,
+        timestamp: comment.timestamp,
+        hasVideo: true,
+      );
+      _commentCtrl.clear();
+      _loadComments();
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Квадратик: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -3531,6 +3654,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
       timestamp: comment.timestamp,
     );
 
+    _loadComments();
     _scrollToBottom();
   }
 
@@ -3573,6 +3697,14 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
       commentId: c.id,
       byUserId: _myId,
     );
+    unawaited(() async {
+      try {
+        await ChannelBackupService.instance
+            .publishBackupIfAdminDriveEnabled(widget.channelId);
+      } catch (e, st) {
+        debugPrint('[RLINK][Drive] backup after delete comment: $e\n$st');
+      }
+    }());
     _loadComments();
   }
 
@@ -3581,6 +3713,8 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
     final cs = Theme.of(context).colorScheme;
     final postDt = DateTime.fromMillisecondsSinceEpoch(widget.post.timestamp);
     final postMissing = channelPostMissingLocalMedia(widget.post);
+    final headerBare = _channelPostMediaOnlyVoiceOrSquare(widget.post,
+        missing: postMissing);
 
     return Scaffold(
       appBar: AppBar(
@@ -3591,13 +3725,19 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
           // ── Original post card at the top ──
           Container(
             width: double.infinity,
-            margin: const EdgeInsets.all(12),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
-            ),
+            margin: EdgeInsets.fromLTRB(12, headerBare ? 6 : 12, 12, 8),
+            padding: headerBare
+                ? const EdgeInsets.symmetric(horizontal: 4, vertical: 2)
+                : const EdgeInsets.all(12),
+            decoration: headerBare
+                ? null
+                : BoxDecoration(
+                    color:
+                        cs.surfaceContainerHighest.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                        color: cs.outline.withValues(alpha: 0.2)),
+                  ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -3642,22 +3782,26 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                         final p = ImageService.instance
                             .resolveStoredPath(widget.post.imagePath);
                         if (p == null) return const SizedBox.shrink();
-                        return ChannelFeedImage(resolvedPath: p);
+                        return ChannelFeedImage(
+                          resolvedPath: p,
+                          isSticker: widget.post.isSticker,
+                        );
                       }),
                     ),
                   ),
                 if (!postMissing && widget.post.videoPath != null)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: _ChannelSquareVideoTile(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: _ChannelInlineVideo(
                       storedPath: widget.post.videoPath!,
-                      size: 140,
+                      squareSize: 140,
                     ),
                   ),
                 if (!postMissing && widget.post.voicePath != null)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: _ChannelVoiceRow(storedPath: widget.post.voicePath!),
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child:
+                        _ChannelVoiceRow(storedPath: widget.post.voicePath!),
                   ),
                 if (!postMissing && widget.post.filePath != null)
                   Padding(
@@ -3674,7 +3818,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                   ValueListenableBuilder<List<Contact>>(
                     valueListenable:
                         ChatStorageService.instance.contactsNotifier,
-                    builder: (_, contacts, __) {
+                    builder: (ctx, contacts, __) {
                       return RichMessageText(
                         text: widget.post.text,
                         textColor: cs.onSurface,
@@ -3684,6 +3828,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                           contacts,
                           ProfileService.instance.profile,
                         ),
+                        onMentionTap: (hex) => openDmFromMentionKey(ctx, hex),
                       );
                     },
                   ),
@@ -3795,6 +3940,9 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                           case 'photo':
                             unawaited(_sendCommentImage());
                             break;
+                          case 'square_video':
+                            unawaited(_sendCommentSquareVideo());
+                            break;
                           case 'video':
                             unawaited(_sendCommentVideo());
                             break;
@@ -3822,11 +3970,29 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                           ]),
                         ),
                         const PopupMenuItem(
+                          value: 'square_video',
+                          child: Row(children: [
+                            Icon(Icons.crop_square, size: 20),
+                            SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                'Записать квадратик',
+                                maxLines: 2,
+                              ),
+                            ),
+                          ]),
+                        ),
+                        const PopupMenuItem(
                           value: 'video',
                           child: Row(children: [
                             Icon(Icons.video_library_outlined, size: 20),
                             SizedBox(width: 12),
-                            Text('Видео'),
+                            Expanded(
+                              child: Text(
+                                'Видео из галереи',
+                                maxLines: 2,
+                              ),
+                            ),
                           ]),
                         ),
                         const PopupMenuItem(
@@ -3987,7 +4153,7 @@ class _ChannelVoiceRow extends StatelessWidget {
               onPressed: () async {
                 try {
                   if (isPlaying) {
-                    await VoiceService.instance.stop();
+                    await VoiceService.instance.stopPlayback();
                   } else {
                     await VoiceService.instance.play(abs);
                   }
@@ -4142,39 +4308,56 @@ class _ChannelFileAttachRow extends StatelessWidget {
   }
 }
 
-class _ChannelSquareVideoTile extends StatefulWidget {
+/// Видео в канале: записанный «квадратик» (1:1, как в чате/группах) или ролик из галереи.
+class _ChannelInlineVideo extends StatefulWidget {
   final String storedPath;
-  final double size;
+  final double squareSize;
 
-  const _ChannelSquareVideoTile({
+  const _ChannelInlineVideo({
     required this.storedPath,
-    this.size = 160,
+    this.squareSize = 160,
   });
 
   @override
-  State<_ChannelSquareVideoTile> createState() =>
-      _ChannelSquareVideoTileState();
+  State<_ChannelInlineVideo> createState() => _ChannelInlineVideoState();
 }
 
-class _ChannelSquareVideoTileState extends State<_ChannelSquareVideoTile> {
+class _ChannelInlineVideoState extends State<_ChannelInlineVideo> {
   VideoPlayerController? _ctrl;
   bool _initialized = false;
   bool _playing = false;
+  int _embedPauseGen = 0;
+
+  void _onEmbedPauseBus() {
+    if (!mounted) return;
+    final g = EmbeddedVideoPauseBus.instance.generation.value;
+    if (g != _embedPauseGen) {
+      _embedPauseGen = g;
+      try {
+        _ctrl?.pause();
+      } catch (_) {}
+      setState(() => _playing = false);
+    }
+  }
 
   String? get _abs {
     final r = ImageService.instance.resolveStoredPath(widget.storedPath);
     return (r != null && File(r).existsSync()) ? r : null;
   }
 
+  bool get _isSquare => widget.storedPath.endsWith('_sq.mp4');
+
   @override
   void initState() {
     super.initState();
+    _embedPauseGen = EmbeddedVideoPauseBus.instance.generation.value;
+    EmbeddedVideoPauseBus.instance.generation.addListener(_onEmbedPauseBus);
     final p = _abs;
     if (p != null) _init(p);
   }
 
   @override
-  void didUpdateWidget(_ChannelSquareVideoTile oldWidget) {
+  void didUpdateWidget(_ChannelInlineVideo oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.storedPath != widget.storedPath) {
       _ctrl?.dispose();
@@ -4190,7 +4373,11 @@ class _ChannelSquareVideoTileState extends State<_ChannelSquareVideoTile> {
     final ctrl = VideoPlayerController.file(File(path));
     try {
       await ctrl.initialize();
-      ctrl.setLooping(true);
+      if (_isSquare) {
+        ctrl.setLooping(true);
+      } else {
+        await ctrl.seekTo(Duration.zero);
+      }
       if (mounted) {
         setState(() {
           _ctrl = ctrl;
@@ -4200,27 +4387,32 @@ class _ChannelSquareVideoTileState extends State<_ChannelSquareVideoTile> {
         ctrl.dispose();
       }
     } catch (e) {
-      debugPrint('[ChannelVideoTile] $e');
+      debugPrint('[ChannelVideo] $e');
       ctrl.dispose();
     }
   }
 
   @override
   void dispose() {
+    EmbeddedVideoPauseBus.instance.generation.removeListener(_onEmbedPauseBus);
     _ctrl?.dispose();
     super.dispose();
   }
 
-  void _togglePlay() {
+  void _toggleSquare() {
     if (_ctrl == null || !_initialized) return;
-    setState(() {
-      if (_playing) {
-        _ctrl!.pause();
-        _playing = false;
-      } else {
-        _ctrl!.play();
-        _playing = true;
-      }
+    if (_playing) {
+      _ctrl!.pause();
+      setState(() => _playing = false);
+      return;
+    }
+    EmbeddedVideoPauseBus.instance.bump();
+    unawaited(VoiceService.instance.stopPlayback());
+    _embedPauseGen = EmbeddedVideoPauseBus.instance.generation.value;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _ctrl == null) return;
+      _ctrl!.play();
+      setState(() => _playing = true);
     });
   }
 
@@ -4229,8 +4421,8 @@ class _ChannelSquareVideoTileState extends State<_ChannelSquareVideoTile> {
     final p = _abs;
     if (p == null) {
       return Container(
-        width: widget.size,
-        height: widget.size,
+        width: widget.squareSize,
+        height: widget.squareSize,
         decoration: BoxDecoration(
           color: Colors.black87,
           borderRadius: BorderRadius.circular(12),
@@ -4241,16 +4433,74 @@ class _ChannelSquareVideoTileState extends State<_ChannelSquareVideoTile> {
         ),
       );
     }
+    if (_isSquare) {
+      final s = widget.squareSize;
+      return GestureDetector(
+        onTap: _toggleSquare,
+        child: SizedBox(
+          width: s,
+          height: s,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (_initialized && _ctrl != null)
+                  FittedBox(
+                    fit: BoxFit.cover,
+                    child: SizedBox(
+                      width: _ctrl!.value.size.width,
+                      height: _ctrl!.value.size.height,
+                      child: VideoPlayer(_ctrl!),
+                    ),
+                  )
+                else
+                  Container(
+                    color: const Color(0xFF1A1A1A),
+                    child: const Center(
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white54),
+                      ),
+                    ),
+                  ),
+                if (!_playing)
+                  Container(
+                    color: Colors.black.withValues(alpha: 0.25),
+                    child: const Center(
+                      child: Icon(Icons.play_circle_fill,
+                          color: Colors.white, size: 48),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final ar = (_initialized && _ctrl != null && _ctrl!.value.aspectRatio > 0)
+        ? _ctrl!.value.aspectRatio
+        : 16 / 9;
+    const w = 220.0;
+    final h = (w / ar).clamp(80.0, 280.0);
     return GestureDetector(
-      onTap: _togglePlay,
-      child: SizedBox(
-        width: widget.size,
-        height: widget.size,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _ChannelVideoFullScreen(path: p),
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          width: w,
+          height: h,
           child: Stack(
             fit: StackFit.expand,
             children: [
+              Container(color: const Color(0xFF111111)),
               if (_initialized && _ctrl != null)
                 FittedBox(
                   fit: BoxFit.cover,
@@ -4259,30 +4509,85 @@ class _ChannelSquareVideoTileState extends State<_ChannelSquareVideoTile> {
                     height: _ctrl!.value.size.height,
                     child: VideoPlayer(_ctrl!),
                   ),
-                )
-              else
-                Container(
-                  color: const Color(0xFF1A1A1A),
-                  child: const Center(
-                    child: SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white54),
-                    ),
-                  ),
                 ),
-              if (!_playing)
-                Container(
-                  color: Colors.black.withValues(alpha: 0.25),
-                  child: const Center(
-                    child: Icon(Icons.play_circle_fill,
-                        color: Colors.white, size: 48),
-                  ),
-                ),
+              Container(color: Colors.black.withValues(alpha: 0.28)),
+              const Center(
+                child: Icon(Icons.play_circle_fill,
+                    color: Colors.white, size: 54),
+              ),
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ChannelVideoFullScreen extends StatefulWidget {
+  final String path;
+  const _ChannelVideoFullScreen({required this.path});
+
+  @override
+  State<_ChannelVideoFullScreen> createState() =>
+      _ChannelVideoFullScreenState();
+}
+
+class _ChannelVideoFullScreenState extends State<_ChannelVideoFullScreen> {
+  VideoPlayerController? _ctrl;
+  int _embedPauseGen = 0;
+
+  void _onEmbedPauseBus() {
+    if (!mounted) return;
+    final g = EmbeddedVideoPauseBus.instance.generation.value;
+    if (g != _embedPauseGen) {
+      _embedPauseGen = g;
+      try {
+        _ctrl?.pause();
+      } catch (_) {}
+      setState(() {});
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _embedPauseGen = EmbeddedVideoPauseBus.instance.generation.value;
+    EmbeddedVideoPauseBus.instance.generation.addListener(_onEmbedPauseBus);
+    final c = VideoPlayerController.file(File(widget.path));
+    c.initialize().then((_) {
+      if (mounted) {
+        setState(() => _ctrl = c);
+        c.play();
+      } else {
+        c.dispose();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    EmbeddedVideoPauseBus.instance.generation.removeListener(_onEmbedPauseBus);
+    _ctrl?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = _ctrl;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: Center(
+        child: c != null && c.value.isInitialized
+            ? AspectRatio(
+                aspectRatio: c.value.aspectRatio,
+                child: VideoPlayer(c),
+              )
+            : const CircularProgressIndicator(color: Colors.white54),
       ),
     );
   }
@@ -4339,6 +4644,8 @@ class _CommentBubble extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final myId = CryptoService.instance.publicKeyHex;
     final missing = channelCommentMissingLocalMedia(comment);
+    final bareMedia = _channelCommentMediaOnlyVoiceOrSquare(comment,
+        missing: missing);
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
@@ -4389,6 +4696,7 @@ class _CommentBubble extends StatelessWidget {
               forwardMessage: msg,
               forwardAuthorId: comment.authorId,
               originalAuthorNick: label,
+              channelId: channelId,
             );
           } else if (action == 'copy') {
             await Clipboard.setData(ClipboardData(text: text));
@@ -4405,29 +4713,35 @@ class _CommentBubble extends StatelessWidget {
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width * 0.75,
           ),
-          margin: const EdgeInsets.symmetric(vertical: 3),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: isMe
-                ? cs.primary.withValues(alpha: 0.15)
-                : cs.surfaceContainerHighest,
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(16),
-              topRight: const Radius.circular(16),
-              bottomLeft: Radius.circular(isMe ? 16 : 4),
-              bottomRight: Radius.circular(isMe ? 4 : 16),
-            ),
-          ),
+          margin: EdgeInsets.symmetric(vertical: bareMedia ? 1 : 3),
+          padding: bareMedia
+              ? EdgeInsets.zero
+              : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: bareMedia
+              ? null
+              : BoxDecoration(
+                  color: isMe
+                      ? cs.primary.withValues(alpha: 0.15)
+                      : cs.surfaceContainerHighest,
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(16),
+                    topRight: const Radius.circular(16),
+                    bottomLeft: Radius.circular(isMe ? 16 : 4),
+                    bottomRight: Radius.circular(isMe ? 4 : 16),
+                  ),
+                ),
           child: Column(
             crossAxisAlignment:
                 isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
             children: [
-              Text(nick,
-                  style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: cs.primary)),
-              const SizedBox(height: 2),
+              if (!bareMedia) ...[
+                Text(nick,
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: cs.primary)),
+                const SizedBox(height: 2),
+              ],
               if (missing)
                 ClearedMediaPlaceholder(
                   isOutgoing: isMe,
@@ -4459,15 +4773,15 @@ class _CommentBubble extends StatelessWidget {
                 ),
               if (!missing && comment.videoPath != null)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: _ChannelSquareVideoTile(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: _ChannelInlineVideo(
                     storedPath: comment.videoPath!,
-                    size: 140,
+                    squareSize: 140,
                   ),
                 ),
               if (!missing && comment.voicePath != null)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
+                  padding: const EdgeInsets.only(bottom: 2),
                   child: _ChannelVoiceRow(storedPath: comment.voicePath!),
                 ),
               if (!missing && comment.filePath != null)
@@ -4483,7 +4797,7 @@ class _CommentBubble extends StatelessWidget {
                   !(missing && isSyntheticMediaCaption(comment.text)))
                 ValueListenableBuilder<List<Contact>>(
                   valueListenable: ChatStorageService.instance.contactsNotifier,
-                  builder: (_, contacts, __) {
+                  builder: (ctx, contacts, __) {
                     return RichMessageText(
                       text: text,
                       textColor: cs.onSurface,
@@ -4493,35 +4807,10 @@ class _CommentBubble extends StatelessWidget {
                         contacts,
                         ProfileService.instance.profile,
                       ),
+                      onMentionTap: (hex) => openDmFromMentionKey(ctx, hex),
                     );
                   },
                 ),
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    mainAxisAlignment:
-                        isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-                    children: [
-                      for (final e in kQuickReactionEmojis)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: InkWell(
-                            onTap: () => _toggle(context, e),
-                            borderRadius: BorderRadius.circular(8),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 2),
-                              child: Text(e,
-                                  style: const TextStyle(fontSize: 18)),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
               const SizedBox(height: 2),
               Text(time,
                   style: TextStyle(

@@ -13,6 +13,8 @@ import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
 import '../widgets/avatar_widget.dart';
+import '../../main.dart' show navigatorKey;
+import '../../services/rlink_deep_link_service.dart';
 import 'chat_list_screen.dart';
 
 class OnboardingScreen extends StatefulWidget {
@@ -110,6 +112,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       // For first-launch (BLE already running) start() is a no-op;
       // relay reconnect is harmless if already connected.
       unawaited(_restartTransports(ProfileService.instance.profile!));
+      unawaited(RlinkDeepLinkService.instance.start(navigatorKey));
 
       if (mounted) {
         Navigator.of(context).pushReplacement(
@@ -157,6 +160,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         emoji: profile.avatarEmoji,
         x25519Key: CryptoService.instance.x25519PublicKeyBase64,
         tags: profile.tags,
+        statusEmoji: profile.statusEmoji,
       );
     } catch (e) {
       debugPrint('[Onboarding] Profile broadcast error: $e');

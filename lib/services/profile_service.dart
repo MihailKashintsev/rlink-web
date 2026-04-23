@@ -64,6 +64,7 @@ class ProfileService {
             tags: _profile!.tags,
             bannerImagePath: _profile!.bannerImagePath,
             profileMusicPath: _profile!.profileMusicPath,
+            statusEmoji: _profile!.statusEmoji,
           );
           await _write(_profile!.encode());
         }
@@ -111,10 +112,14 @@ class ProfileService {
     List<String>? tags,
     String? bannerImagePath,
     String? profileMusicPath,
+    String? statusEmoji,
   }) async {
     if (_profile == null) throw StateError('No profile');
     // Always use the current CryptoService key to prevent divergence
     final currentKey = CryptoService.instance.publicKeyHex;
+    final nextStatus = statusEmoji != null
+        ? UserProfile.normalizeStatusEmoji(statusEmoji)
+        : _profile!.statusEmoji;
     final updated = UserProfile(
       publicKeyHex: currentKey.isNotEmpty ? currentKey : _profile!.publicKeyHex,
       nickname: nickname ?? _profile!.nickname,
@@ -125,6 +130,7 @@ class ProfileService {
       tags: tags ?? _profile!.tags,
       bannerImagePath: bannerImagePath ?? _profile!.bannerImagePath,
       profileMusicPath: profileMusicPath ?? _profile!.profileMusicPath,
+      statusEmoji: nextStatus,
     );
     await _write(updated.encode());
     _profile = updated;

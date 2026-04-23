@@ -12,11 +12,11 @@ import 'app_settings.dart';
 /// - личных сообщений;
 /// - сообщений групп;
 /// - постов каналов;
-/// когда пользователь **не в этом чате** (экран закрыт/app в фоне, пока ОС
-/// держит процесс живым — типичный BLE-mesh сценарий).
+/// когда пользователь **не в этом чате** (экран закрыт или в фоне).
 ///
-/// Push-серверов у нас нет сознательно: идея — минимум данных на серверах.
-/// Если приложение убито ОС — уведомление прилетит при следующем запуске.
+/// На Android процесс в фоне держится кэшированным FlutterEngine + foreground
+/// service; на Windows окно можно закрыть в трей — relay остаётся активным.
+/// Принудительная остановка приложения из настроек ОС по-прежнему рвёт сеть.
 class NotificationService {
   NotificationService._();
   static final NotificationService instance = NotificationService._();
@@ -51,13 +51,22 @@ class NotificationService {
       requestSoundPermission: false,
     );
     const linuxInit = LinuxInitializationSettings(defaultActionName: 'Открыть');
-    const init = InitializationSettings(
+    final WindowsInitializationSettings? windowsInit =
+        defaultTargetPlatform == TargetPlatform.windows
+            ? const WindowsInitializationSettings(
+                appName: 'Rlink',
+                appUserModelId: 'com.rendergames.rlink',
+                guid: 'c8f1a2b3-4d5e-6f70-a89b-0c1d2e3f4a5b',
+              )
+            : null;
+    final init = InitializationSettings(
       android: androidInit,
       iOS: iosInit,
       macOS: macInit,
       linux: linuxInit,
+      windows: windowsInit,
     );
-    await _plugin.initialize(init);
+    await _plugin.initialize(settings: init);
   }
 
   /// Запрашивает разрешения на уведомления (iOS/Android 13+/macOS).
@@ -168,17 +177,28 @@ class NotificationService {
         priority: Priority.high,
         category: AndroidNotificationCategory.message,
       );
-      final iosDetails = DarwinNotificationDetails(
+      final darwinDetails = DarwinNotificationDetails(
         presentAlert: true,
         presentBadge: true,
         presentSound: true,
         threadIdentifier: threadIdentifier,
       );
+      final WindowsNotificationDetails? windowsDetails =
+          defaultTargetPlatform == TargetPlatform.windows
+              ? const WindowsNotificationDetails(
+                  duration: WindowsNotificationDuration.long,
+                )
+              : null;
       await _plugin.show(
-        id,
-        title,
-        body,
-        NotificationDetails(android: androidDetails, iOS: iosDetails),
+        id: id,
+        title: title,
+        body: body,
+        notificationDetails: NotificationDetails(
+          android: androidDetails,
+          iOS: darwinDetails,
+          macOS: darwinDetails,
+          windows: windowsDetails,
+        ),
         payload: payload,
       );
     } catch (e) {

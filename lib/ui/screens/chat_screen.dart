@@ -1,50 +1,143 @@
 import 'dart:async';
+import 'dart:convert' show jsonDecode;
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:geolocator/geolocator.dart';
+import 'package:camera/camera.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:gal/gal.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 
 import '../../main.dart' show IncomingMessage, incomingMessageController;
+import '../../models/channel.dart';
 import '../../models/chat_message.dart';
+import '../../models/group.dart';
 import '../../models/shared_collab.dart';
 import '../../models/contact.dart';
+import '../../services/ai_bot_constants.dart';
 import '../../services/app_settings.dart';
+import '../../services/gigachat_service.dart';
 import '../../services/ble_service.dart';
 import '../../services/block_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/channel_service.dart';
+import '../../services/group_service.dart';
 import '../../services/outbound_dm_text.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
+import '../../services/sticker_collection_service.dart';
 import '../../services/profile_service.dart';
 import '../../services/voice_service.dart';
+import '../../services/embedded_video_pause_bus.dart';
 import '../../services/story_service.dart';
 import '../../services/typing_service.dart';
 import '../../services/relay_service.dart';
 import '../../services/media_upload_queue.dart';
 import '../../utils/channel_mentions.dart';
+import '../../utils/invite_dm_codec.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/reactions.dart';
 import 'image_editor_screen.dart';
+import 'profile_screen.dart';
 import 'square_video_recorder_screen.dart';
 import 'story_viewer_screen.dart';
 import 'collab_compose_dialogs.dart';
+import 'channels_screen.dart';
+import 'groups_screen.dart';
 import '../widgets/shared_todo_message_card.dart';
 import '../widgets/shared_calendar_message_card.dart';
 import '../widgets/missing_local_media.dart';
 import '../widgets/rich_message_text.dart';
+import '../widgets/swipe_to_reply.dart';
+import 'peer_stickers_screen.dart';
+import '../widgets/media_gallery_send_sheet.dart';
+import '../widgets/dm_video_fullscreen_page.dart';
+import '../widgets/telegram_media_record_button.dart';
+import '../widgets/hold_square_video_review_screen.dart';
+import '../widgets/square_video_recording_widgets.dart';
+import '../widgets/forward_target_sheet.dart';
+import '../mention_nav.dart';
+
+bool _dmVideoPathIsSquare(String path) =>
+    p.basename(path).toLowerCase().endsWith('_sq.mp4');
+
+bool _dmPlaybackFileNameIsAudio(String fileName) {
+  const exts = {
+    '.mp3', '.ogg', '.wav', '.m4a', '.aac', '.flac', '.opus', '.wma', '.mp4a',
+  };
+  final n = fileName.toLowerCase();
+  for (final e in exts) {
+    if (n.endsWith(e)) return true;
+  }
+  return false;
+}
+
+String? _dmResolveMsgPath(String? raw) {
+  if (raw == null || raw.isEmpty) return null;
+  final r = ImageService.instance.resolveStoredPath(raw) ?? raw;
+  return File(r).existsSync() ? r : null;
+}
+
+/// Очередь «с этого сообщения до конца»: голосовые, аудио-файлы, квадратики.
+List<PlaybackQueueItem> _dmPlaybackQueueFrom(
+  List<ChatMessage> messages,
+  int startIndex,
+) {
+  final out = <PlaybackQueueItem>[];
+  for (var i = startIndex; i < messages.length; i++) {
+    final m = messages[i];
+    if (dmMessageMissingLocalMedia(m)) continue;
+
+    final voice = _dmResolveMsgPath(m.voicePath);
+    if (voice != null) {
+      out.add(PlaybackQueueItem(
+        path: voice,
+        title: 'Голосовое',
+        kind: PlaybackMediaKind.voice,
+      ));
+      continue;
+    }
+
+    if (m.filePath != null && m.fileName != null) {
+      final fp = _dmResolveMsgPath(m.filePath);
+      if (fp != null && _dmPlaybackFileNameIsAudio(m.fileName!)) {
+        out.add(PlaybackQueueItem(
+          path: fp,
+          title: m.fileName!,
+          kind: PlaybackMediaKind.audioFile,
+        ));
+        continue;
+      }
+    }
+
+    if (m.videoPath != null && _dmVideoPathIsSquare(m.videoPath!)) {
+      final vp = _dmResolveMsgPath(m.videoPath);
+      if (vp != null) {
+        out.add(PlaybackQueueItem(
+          path: vp,
+          title: 'Видеосообщение',
+          kind: PlaybackMediaKind.squareVideo,
+        ));
+      }
+    }
+  }
+  return out;
+}
 
 /// Пересылка в этот чат: оригинальное сообщение и контекст автора.
 class DmForwardDraft {
@@ -54,12 +147,15 @@ class DmForwardDraft {
   final String originalAuthorNick;
   /// Публичный ключ автора оригинала (Ed25519 hex).
   final String forwardAuthorId;
+  /// Переслано из канала (для открытия ленты по тапу).
+  final String? forwardChannelId;
 
   const DmForwardDraft({
     required this.message,
     required this.sourcePeerId,
     required this.originalAuthorNick,
     required this.forwardAuthorId,
+    this.forwardChannelId,
   });
 }
 
@@ -101,6 +197,18 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _editingMessageId;
   String? _editingPreviewText;
   bool _isRecording = false;
+  /// Подготовка камеры для удержания «видеоквадратика».
+  bool _dmHoldVideoStarting = false;
+  CameraController? _dmHoldVideoCam;
+  /// Инвалидация асинхронного старта камеры при отмене.
+  int _dmHoldSession = 0;
+  /// Видео в режиме «зажим» (свайп вверх).
+  bool _dmHoldLockedWhileVideo = false;
+  final _dmHoldVideoPausedNotifier = ValueNotifier<bool>(false);
+  List<CameraDescription> _dmHoldCameraList = [];
+  int _dmHoldCameraIndex = 0;
+  final List<String> _dmHoldVideoSegments = [];
+  bool _dmHoldSwitchingCam = false;
   final _recordingSecondsNotifier = ValueNotifier<double>(0);
   Timer? _recordingTimer;
   double? _pendingLat;
@@ -115,6 +223,25 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _forwardStarted = false;
   VoidCallback? _pinsListener;
   bool _showScrollToBottomFab = false;
+  String? _lastQuickPointerMsgId;
+  DateTime? _lastQuickPointerAt;
+  int _lastPinSyncMessageCount = -1;
+  bool _pendingMessageCountPinSync = false;
+  bool _aiThinking = false;
+  StreamSubscription<List<ConnectivityResult>>? _vpnConnSub;
+  /// Только для GigaChat: на iOS/Android [ConnectivityResult.vpn] из connectivity_plus.
+  bool _vpnProbablyActive = false;
+
+  bool get _isAiBot => widget.peerId == kAiBotPeerId;
+
+  /// Диалог «Избранное» (peer_id = наш ключ): только локальная БД, без mesh/relay.
+  bool get _savedMessagesLocalOnly {
+    final my = CryptoService.instance.publicKeyHex;
+    if (my.isEmpty) return false;
+    final peer =
+        _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
+    return peer == my;
+  }
 
   /// Max blob size for single relay message (~800KB compressed).
   /// Larger data is split into relay-friendly gossip chunks (50KB each).
@@ -133,9 +260,21 @@ class _ChatScreenState extends State<ChatScreen> {
     bool isVideo = false,
     bool isSquare = false,
     bool isFile = false,
+    bool isSticker = false,
     String? fileName,
     String? filePath, // local file path for upload queue (large file resume)
   }) async {
+    if (_isAiBot) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('В чате с ИИ доступен только текст')),
+        );
+      }
+      return false;
+    }
+    if (_savedMessagesLocalOnly) return false;
+
     bool blobSent = false;
     bool wasQueued = false;
 
@@ -157,6 +296,7 @@ class _ChatScreenState extends State<ChatScreen> {
             isVideo: isVideo,
             isSquare: isSquare,
             isFile: isFile,
+            isSticker: isSticker,
             fileName: fileName,
           ));
           blobSent = true;
@@ -175,6 +315,7 @@ class _ChatScreenState extends State<ChatScreen> {
               isVideo: isVideo,
               isSquare: isSquare,
               isFile: isFile,
+              isSticker: isSticker,
               fileName: fileName,
             );
             debugPrint('[RLINK][Media] In-memory blob sent: ${compressed.length} bytes');
@@ -190,6 +331,7 @@ class _ChatScreenState extends State<ChatScreen> {
               isVideo: isVideo,
               isSquare: isSquare,
               isFile: isFile,
+              isSticker: isSticker,
               fileName: fileName,
             );
           }
@@ -213,6 +355,7 @@ class _ChatScreenState extends State<ChatScreen> {
         isVideo: isVideo,
         isSquare: isSquare,
         isFile: isFile,
+        isSticker: isSticker,
         fileName: fileName,
       );
       _sendChunksInBackground(chunks, msgId, myId);
@@ -245,6 +388,7 @@ class _ChatScreenState extends State<ChatScreen> {
     bool isVideo = false,
     bool isSquare = false,
     bool isFile = false,
+    bool isSticker = false,
     String? fileName,
   }) {
     () async {
@@ -265,6 +409,7 @@ class _ChatScreenState extends State<ChatScreen> {
           isVideo: isVideo,
           isSquare: isSquare,
           isFile: isFile,
+          isSticker: isSticker,
           fileName: fileName,
         );
         // Gentle pacing — relay allows ~30 msgs/sec, we stay at 20/sec.
@@ -282,6 +427,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _looksLikePublicKey(String id) => _publicKeyRegExp.hasMatch(id.trim());
 
+  /// Квадратное видеосообщение (камера): только суффикс имени файла `_sq.mp4`.
+  static bool _videoPathIsSquare(String path) => _dmVideoPathIsSquare(path);
+
   /// Checks DB and updates [_isContact]. Called on init and whenever contacts change.
   Future<void> _checkContactStatus() async {
     final key = _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
@@ -295,6 +443,7 @@ class _ChatScreenState extends State<ChatScreen> {
     while (mounted && DateTime.now().isBefore(deadline)) {
       final resolved = BleService.instance.resolvePublicKey(widget.peerId);
       if (_looksLikePublicKey(resolved)) {
+        if (!mounted) return false;
         setState(() => _resolvedPeerId = resolved);
         return true;
       }
@@ -303,10 +452,29 @@ class _ChatScreenState extends State<ChatScreen> {
     return false;
   }
 
+  Future<bool> _ensureReadyForMediaSend() async {
+    if (_isSending) return false;
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
+          );
+        }
+        return false;
+      }
+    }
+    if (CryptoService.instance.publicKeyHex.isEmpty) return false;
+    return true;
+  }
+
   @override
   void initState() {
     super.initState();
-    _resolvedPeerId = BleService.instance.resolvePublicKey(widget.peerId);
+    _resolvedPeerId = widget.peerId == kAiBotPeerId
+        ? kAiBotPeerId
+        : BleService.instance.resolvePublicKey(widget.peerId);
     unawaited(_loadAndMarkRead());
     unawaited(_checkContactStatus());
     _pinsListener = () {
@@ -331,10 +499,22 @@ class _ChatScreenState extends State<ChatScreen> {
     ChatStorageService.instance.contactsNotifier.addListener(_contactListener!);
     // Update message status + clear uploading indicator when background upload finishes
     MediaUploadQueue.instance.onTaskCompleted = (msgId) async {
+      if (!mounted) return;
       await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
         msgId, MessageStatus.sent);
       if (mounted) setState(() => _uploadingMsgIds.remove(msgId));
     };
+
+    if (_isAiBot) {
+      unawaited(_refreshGigachatVpnFlag());
+      _vpnConnSub = Connectivity().onConnectivityChanged.listen((results) {
+        if (!mounted) return;
+        final on = results.contains(ConnectivityResult.vpn);
+        if (on != _vpnProbablyActive) {
+          setState(() => _vpnProbablyActive = on);
+        }
+      });
+    }
 
     _msgSub = incomingMessageController.stream.listen((msg) async {
       // fromId — Ed25519 public key. Сообщение уже сохранено в main.dart.
@@ -368,8 +548,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onPeersChanged() {
+    if (!mounted) return;
+    if (widget.peerId == kAiBotPeerId) return;
     final resolved = BleService.instance.resolvePublicKey(widget.peerId);
     if (resolved != _resolvedPeerId && resolved != widget.peerId) {
+      if (!mounted) return;
       setState(() => _resolvedPeerId = resolved);
       // Перезагружаем сообщения под правильным публичным ключом
       ChatStorageService.instance.loadMessages(_resolvedPeerId);
@@ -392,8 +575,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _sendActivity(int activity) {
+    if (_isAiBot) return;
     final myId = CryptoService.instance.publicKeyHex;
-    if (myId.isEmpty) return;
+    if (myId.isEmpty || _savedMessagesLocalOnly) return;
     GossipRouter.instance.sendTypingIndicator(
       fromId: myId,
       recipientId: _resolvedPeerId,
@@ -403,9 +587,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
-    unawaited(ChatStorageService.instance.markDmRead(_resolvedPeerId));
+    final peerForRead = _resolvedPeerId;
+    _vpnConnSub?.cancel();
+    _vpnConnSub = null;
     _typingDebounce?.cancel();
     _sendActivity(Activity.stopped);
+    // Сначала отменяем поток — иначе async-обработчик может дернуть scroll/setState
+    // после dispose контроллера и сломать дерево виджетов.
+    _msgSub?.cancel();
+    _msgSub = null;
     if (_pinsListener != null) {
       ChatStorageService.instance.pinsVersion.removeListener(_pinsListener!);
     }
@@ -416,12 +606,32 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_contactListener != null) {
       ChatStorageService.instance.contactsNotifier.removeListener(_contactListener!);
     }
+    MediaUploadQueue.instance.onTaskCompleted = null;
     _recordingTimer?.cancel();
+    final vCam = _dmHoldVideoCam;
+    _dmHoldVideoCam = null;
+    for (final path in _dmHoldVideoSegments) {
+      try {
+        File(path).deleteSync();
+      } catch (_) {}
+    }
+    _dmHoldVideoSegments.clear();
+    _dmHoldCameraList = [];
+    if (vCam != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        try {
+          vCam.dispose();
+        } catch (_) {}
+      });
+    }
+    _dmHoldVideoPausedNotifier.dispose();
     _recordingSecondsNotifier.dispose();
     _controller.dispose();
     _scrollController.dispose();
-    _msgSub?.cancel();
     super.dispose();
+    scheduleMicrotask(() {
+      unawaited(ChatStorageService.instance.markDmRead(peerForRead));
+    });
   }
 
   // ── Voice recording ───────────────────────────────────────────
@@ -503,6 +713,464 @@ class _ChatScreenState extends State<ChatScreen> {
             content: Text('Ошибка голосового: $e'),
             backgroundColor: Colors.red),
       );
+    }
+  }
+
+  /// Отмена записи (свайп / корзина в закреплённом режиме).
+  Future<void> _cancelActiveMediaRecording() async {
+    _dmHoldSession++;
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    _recordingSecondsNotifier.value = 0;
+
+    if (_dmHoldVideoCam != null) {
+      final ctrl = _dmHoldVideoCam;
+      _dmHoldVideoCam = null;
+      _dmHoldLockedWhileVideo = false;
+      _dmHoldVideoPausedNotifier.value = false;
+      for (final path in _dmHoldVideoSegments) {
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      }
+      _dmHoldVideoSegments.clear();
+      _dmHoldCameraList = [];
+      try {
+        if (ctrl!.value.isRecordingVideo) {
+          final x = await ctrl.stopVideoRecording();
+          try {
+            await File(x.path).delete();
+          } catch (_) {}
+        }
+      } catch (_) {}
+      try {
+        await ctrl?.dispose();
+      } catch (_) {}
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _dmHoldVideoStarting = false;
+        });
+      }
+      _sendActivity(Activity.stopped);
+      return;
+    }
+
+    if (_isRecording) {
+      await VoiceService.instance.cancelRecording();
+      if (mounted) setState(() => _isRecording = false);
+    }
+    if (mounted) setState(() => _dmHoldVideoStarting = false);
+    _sendActivity(Activity.stopped);
+  }
+
+  Future<void> _startDmHoldSquareVideo() async {
+    if (_isSending) return;
+    if (!mounted) return;
+    final session = ++_dmHoldSession;
+    _dmHoldLockedWhileVideo = false;
+    _dmHoldVideoPausedNotifier.value = false;
+    setState(() => _dmHoldVideoStarting = true);
+
+    CameraController? ctrl;
+    try {
+      final raw = await availableCameras();
+      if (!mounted || session != _dmHoldSession) return;
+      for (final path in _dmHoldVideoSegments) {
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      }
+      _dmHoldVideoSegments.clear();
+      _dmHoldCameraList = logicalCamerasForSquareVideo(raw);
+      if (_dmHoldCameraList.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Камера недоступна')),
+          );
+        }
+        return;
+      }
+      var idx = _dmHoldCameraList
+          .indexWhere((c) => c.lensDirection == CameraLensDirection.front);
+      if (idx < 0) idx = 0;
+      _dmHoldCameraIndex = idx;
+      ctrl = CameraController(
+        _dmHoldCameraList[idx],
+        ResolutionPreset.low,
+        enableAudio: true,
+        imageFormatGroup: ImageFormatGroup.jpeg,
+      );
+      await ctrl.initialize();
+      if (!mounted || session != _dmHoldSession) {
+        await ctrl.dispose();
+        return;
+      }
+      await ctrl.startVideoRecording();
+      if (!mounted || session != _dmHoldSession) {
+        try {
+          final x = await ctrl.stopVideoRecording();
+          try {
+            await File(x.path).delete();
+          } catch (_) {}
+        } catch (_) {}
+        await ctrl.dispose();
+        return;
+      }
+      _dmHoldVideoCam = ctrl;
+      ctrl = null;
+
+      _recordingSecondsNotifier.value = 0;
+      _recordingTimer?.cancel();
+      _recordingTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        if (!mounted || _dmHoldVideoCam == null) return;
+        if (_dmHoldVideoPausedNotifier.value) return;
+        _recordingSecondsNotifier.value += 0.25;
+        if (_recordingSecondsNotifier.value >= 15) {
+          unawaited(_finishDmHoldSquareVideo(send: true));
+        }
+      });
+      if (mounted) {
+        setState(() {
+          _isRecording = true;
+          _dmHoldVideoStarting = false;
+        });
+      }
+      EmbeddedVideoPauseBus.instance.bump();
+      unawaited(VoiceService.instance.stopPlayback());
+      _sendActivity(Activity.recordingVideo);
+    } catch (e) {
+      debugPrint('[DmHoldVideo] $e');
+      if (ctrl != null) {
+        try {
+          await ctrl.dispose();
+        } catch (_) {}
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Камера: $e')),
+        );
+      }
+    } finally {
+      if (mounted && _dmHoldVideoCam == null && session == _dmHoldSession) {
+        setState(() => _dmHoldVideoStarting = false);
+      }
+    }
+  }
+
+  Future<void> _finishDmHoldSquareVideo({required bool send}) async {
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    _dmHoldLockedWhileVideo = false;
+    _dmHoldVideoPausedNotifier.value = false;
+
+    final ctrl = _dmHoldVideoCam;
+    _dmHoldVideoCam = null;
+    XFile? file;
+    if (ctrl != null) {
+      try {
+        if (ctrl.value.isRecordingVideo) {
+          file = await ctrl.stopVideoRecording();
+        }
+      } catch (e) {
+        debugPrint('[DmHoldVideo] stop: $e');
+      }
+      try {
+        await ctrl.dispose();
+      } catch (_) {}
+    }
+    _dmHoldCameraList = [];
+    _recordingSecondsNotifier.value = 0;
+    if (mounted) setState(() => _isRecording = false);
+    _sendActivity(Activity.stopped);
+
+    if (!send) {
+      for (final path in _dmHoldVideoSegments) {
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      }
+      _dmHoldVideoSegments.clear();
+      if (file != null) {
+        try {
+          await File(file.path).delete();
+        } catch (_) {}
+      }
+      return;
+    }
+
+    final segments = List<String>.from(_dmHoldVideoSegments);
+    _dmHoldVideoSegments.clear();
+    if (file != null && file.path.isNotEmpty) {
+      segments.add(file.path);
+    }
+    if (segments.isEmpty) return;
+
+    String rawPath;
+    if (segments.length == 1) {
+      rawPath = segments.single;
+    } else {
+      final merged = await ImageService.instance.mergeVideoSegments(segments);
+      if (merged != null) {
+        rawPath = merged;
+        for (final p in segments) {
+          try {
+            await File(p).delete();
+          } catch (_) {}
+        }
+      } else {
+        rawPath = segments.last;
+        for (var i = 0; i < segments.length - 1; i++) {
+          try {
+            await File(segments[i]).delete();
+          } catch (_) {}
+        }
+      }
+    }
+
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
+          );
+        }
+        try {
+          await File(rawPath).delete();
+        } catch (_) {}
+        return;
+      }
+    }
+    if (!mounted) return;
+    final chosen = await Navigator.of(context).push<String?>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (ctx) => HoldSquareVideoReviewScreen(
+          videoPath: rawPath,
+          allowTrim: true,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (chosen == null || chosen.isEmpty) {
+      try {
+        await File(rawPath).delete();
+      } catch (_) {}
+      return;
+    }
+    if (chosen != rawPath) {
+      try {
+        await File(rawPath).delete();
+      } catch (_) {}
+    }
+    await _publishSquareVideoFromDisk(chosen);
+    if (chosen != rawPath) {
+      try {
+        await File(chosen).delete();
+      } catch (_) {}
+    }
+  }
+
+  void _onHoldRecordingLockChanged(bool locked) {
+    if (!locked) return;
+    if (_dmHoldVideoCam != null) {
+      setState(() => _dmHoldLockedWhileVideo = true);
+    }
+  }
+
+  Future<void> _toggleDmHoldVideoPause() async {
+    final cam = _dmHoldVideoCam;
+    if (cam == null || !cam.value.isInitialized) return;
+    try {
+      if (_dmHoldVideoPausedNotifier.value) {
+        await cam.resumeVideoRecording();
+        if (mounted) _dmHoldVideoPausedNotifier.value = false;
+      } else {
+        await cam.pauseVideoRecording();
+        if (mounted) _dmHoldVideoPausedNotifier.value = true;
+      }
+    } catch (e) {
+      debugPrint('[DmHoldVideo] pause toggle: $e');
+    }
+  }
+
+  Future<void> _switchDmHoldCamera() async {
+    final session = _dmHoldSession;
+    final ctrl = _dmHoldVideoCam;
+    if (ctrl == null ||
+        !ctrl.value.isInitialized ||
+        !ctrl.value.isRecordingVideo ||
+        _dmHoldSwitchingCam ||
+        _dmHoldCameraList.length < 2) {
+      return;
+    }
+    setState(() => _dmHoldSwitchingCam = true);
+    CameraController? newCam;
+    try {
+      final stopped = await ctrl.stopVideoRecording();
+      _dmHoldVideoSegments.add(stopped.path);
+      final next = (_dmHoldCameraIndex + 1) % _dmHoldCameraList.length;
+      await ctrl.dispose();
+      _dmHoldVideoCam = null;
+      if (!mounted || session != _dmHoldSession) {
+        for (final p in _dmHoldVideoSegments) {
+          try {
+            await File(p).delete();
+          } catch (_) {}
+        }
+        _dmHoldVideoSegments.clear();
+        return;
+      }
+      _dmHoldCameraIndex = next;
+      newCam = CameraController(
+        _dmHoldCameraList[next],
+        ResolutionPreset.low,
+        enableAudio: true,
+        imageFormatGroup: ImageFormatGroup.jpeg,
+      );
+      await newCam.initialize();
+      if (!mounted || session != _dmHoldSession) {
+        await newCam.dispose();
+        for (final p in _dmHoldVideoSegments) {
+          try {
+            await File(p).delete();
+          } catch (_) {}
+        }
+        _dmHoldVideoSegments.clear();
+        return;
+      }
+      await newCam.startVideoRecording();
+      if (_dmHoldVideoPausedNotifier.value) {
+        try {
+          await newCam.pauseVideoRecording();
+        } catch (_) {
+          if (mounted) _dmHoldVideoPausedNotifier.value = false;
+        }
+      }
+      if (!mounted || session != _dmHoldSession) {
+        try {
+          if (newCam.value.isRecordingVideo) {
+            final x = await newCam.stopVideoRecording();
+            try {
+              await File(x.path).delete();
+            } catch (_) {}
+          }
+        } catch (_) {}
+        await newCam.dispose();
+        for (final p in _dmHoldVideoSegments) {
+          try {
+            await File(p).delete();
+          } catch (_) {}
+        }
+        _dmHoldVideoSegments.clear();
+        return;
+      }
+      setState(() => _dmHoldVideoCam = newCam);
+    } catch (e) {
+      debugPrint('[DmHoldVideo] switch cam: $e');
+      await newCam?.dispose();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Смена камеры: $e')),
+        );
+      }
+      _recordingTimer?.cancel();
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _dmHoldVideoCam = null;
+        });
+      } else {
+        _dmHoldVideoCam = null;
+      }
+      for (final p in _dmHoldVideoSegments) {
+        try {
+          await File(p).delete();
+        } catch (_) {}
+      }
+      _dmHoldVideoSegments.clear();
+      _sendActivity(Activity.stopped);
+    } finally {
+      if (mounted && session == _dmHoldSession) {
+        setState(() => _dmHoldSwitchingCam = false);
+      }
+    }
+  }
+
+  /// Общая отправка квадратного видео (полноэкранный рекордер или удержание).
+  Future<void> _publishSquareVideoFromDisk(String rawVideoPath) async {
+    if (_isSending) return;
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Ошибка: приложение еще не готово'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
+    }
+
+    setState(() => _isSending = true);
+    try {
+      final path =
+          await ImageService.instance.saveVideo(rawVideoPath, isSquare: true);
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+
+      var wasQueued = false;
+      if (!_savedMessagesLocalOnly) {
+        if (RelayService.instance.isConnected) {
+          unawaited(MediaUploadQueue.instance.enqueue(
+            msgId: msgId,
+            filePath: path,
+            recipientKey: _resolvedPeerId,
+            fromId: myId,
+            isVideo: true,
+            isSquare: true,
+          ));
+          wasQueued = true;
+        } else {
+          final bytes = await File(path).readAsBytes();
+          await _sendMedia(
+            bytes: bytes,
+            msgId: msgId,
+            myId: myId,
+            isVideo: true,
+            isSquare: true,
+            filePath: path,
+          );
+        }
+      }
+
+      await _saveAndTrack(
+        ChatMessage(
+          id: msgId,
+          peerId: targetPeerId,
+          text: '⬛ Видео',
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          videoPath: path,
+        ),
+        wasQueued: wasQueued,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Ошибка видео: $e'),
+              backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
     }
   }
 
@@ -606,12 +1274,18 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onScrollForPins() {
-    final pos = _scrollController.hasClients ? _scrollController.position : null;
+    if (!mounted) return;
+    ScrollPosition? pos;
+    try {
+      pos = _scrollController.hasClients ? _scrollController.position : null;
+    } catch (_) {
+      return;
+    }
     if (pos != null) {
       final awayFromBottom = pos.maxScrollExtent - pos.pixels;
       final showFab = awayFromBottom > 120;
       if (showFab != _showScrollToBottomFab) {
-        setState(() => _showScrollToBottomFab = showFab);
+        if (mounted) setState(() => _showScrollToBottomFab = showFab);
       }
     }
     final msgs =
@@ -620,15 +1294,22 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _recomputePinHighlight(List<ChatMessage> messages) {
+    if (!mounted) return;
     if (_pinnedIdsChrono.isEmpty) {
       if (_pinBarHighlightId != null) {
-        setState(() => _pinBarHighlightId = null);
+        if (mounted) setState(() => _pinBarHighlightId = null);
       }
       return;
     }
     const estH = 72.0;
-    final pos = _scrollController.hasClients ? _scrollController.position : null;
-    final scroll = pos?.pixels ?? 0;
+    double scroll = 0;
+    try {
+      final pos =
+          _scrollController.hasClients ? _scrollController.position : null;
+      scroll = pos?.pixels ?? 0;
+    } catch (_) {
+      scroll = 0;
+    }
     final firstIdx =
         (scroll / estH).floor().clamp(0, messages.isEmpty ? 0 : messages.length - 1);
     String? bestId;
@@ -643,7 +1324,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     bestId ??= _pinnedIdsChrono.isNotEmpty ? _pinnedIdsChrono.last : null;
     if (bestId != _pinBarHighlightId) {
-      setState(() => _pinBarHighlightId = bestId);
+      if (mounted) setState(() => _pinBarHighlightId = bestId);
     }
   }
 
@@ -760,6 +1441,27 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Future<void> _onForwardContextTap(ChatMessage msg) async {
+    final chId = msg.forwardFromChannelId;
+    if (chId != null && chId.isNotEmpty) {
+      final ch = await ChannelService.instance.getChannel(chId);
+      if (!mounted) return;
+      if (ch != null) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ChannelViewScreen(channel: ch),
+          ),
+        );
+        return;
+      }
+    }
+    final fk = msg.forwardFromId;
+    if (fk != null) {
+      await _openForwardedAuthorProfile(fk, msg.forwardFromNick);
+    }
+  }
+
   Future<void> _openForwardedAuthorProfile(
       String authorKey, String? hintNick) async {
     final c = await ChatStorageService.instance.getContact(authorKey);
@@ -787,12 +1489,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final pinned = _pinnedMsgIds.contains(msg.id);
     if (pinned) {
       await ChatStorageService.instance.unpinDmMessage(_resolvedPeerId, msg.id);
-      await GossipRouter.instance.sendDmPin(
-        recipientId: _resolvedPeerId,
-        messageId: msg.id,
-        add: false,
-        fromId: CryptoService.instance.publicKeyHex,
-      );
+      if (!_savedMessagesLocalOnly) {
+        await GossipRouter.instance.sendDmPin(
+          recipientId: _resolvedPeerId,
+          messageId: msg.id,
+          add: false,
+          fromId: CryptoService.instance.publicKeyHex,
+        );
+      }
     } else {
       final ok = await ChatStorageService.instance
           .pinDmMessage(_resolvedPeerId, msg.id);
@@ -804,47 +1508,22 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         return;
       }
-      await GossipRouter.instance.sendDmPin(
-        recipientId: _resolvedPeerId,
-        messageId: msg.id,
-        add: true,
-        fromId: CryptoService.instance.publicKeyHex,
-      );
+      if (!_savedMessagesLocalOnly) {
+        await GossipRouter.instance.sendDmPin(
+          recipientId: _resolvedPeerId,
+          messageId: msg.id,
+          add: true,
+          fromId: CryptoService.instance.publicKeyHex,
+        );
+      }
     }
     await _reloadPins();
   }
 
   Future<void> _pickForwardTargetAndNavigate(ChatMessage msg) async {
-    final peers = await ChatStorageService.instance.getChatPeerIds();
-    final targets =
-        peers.where((k) => k != _resolvedPeerId).toList();
-    if (!mounted) return;
-    if (targets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Нет других чатов для пересылки')),
-      );
-      return;
-    }
-    final nickMap = <String, String>{};
-    for (final c in ChatStorageService.instance.contactsNotifier.value) {
-      nickMap[c.publicKeyHex] = c.nickname;
-    }
-    final picked = await showModalBottomSheet<String>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            const ListTile(title: Text('Переслать в…')),
-            for (final pid in targets)
-              ListTile(
-                leading: const Icon(Icons.person_outline),
-                title: Text(nickMap[pid] ?? '${pid.substring(0, 8)}…'),
-                onTap: () => Navigator.pop(ctx, pid),
-              ),
-          ],
-        ),
-      ),
+    final picked = await showForwardDmTargetSheet(
+      context,
+      excludePeerId: _resolvedPeerId,
     );
     if (picked == null || !mounted) return;
     final authorNick = msg.isOutgoing
@@ -857,18 +1536,17 @@ class _ChatScreenState extends State<ChatScreen> {
       forwardAuthorId:
           msg.isOutgoing ? CryptoService.instance.publicKeyHex : _resolvedPeerId,
     );
-    final nick = nickMap[picked] ?? '${picked.substring(0, 8)}…';
-    final c = await ChatStorageService.instance.getContact(picked);
+    final c = await ChatStorageService.instance.getContact(picked.peerId);
     if (!mounted) return;
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => ChatScreen(
-          peerId: picked,
-          peerNickname: nick,
-          peerAvatarColor: c?.avatarColor ?? 0xFF42A5F5,
-          peerAvatarEmoji: c?.avatarEmoji ?? '👤',
-          peerAvatarImagePath: c?.avatarImagePath,
+          peerId: picked.peerId,
+          peerNickname: c?.nickname ?? picked.nickname,
+          peerAvatarColor: c?.avatarColor ?? picked.avatarColor,
+          peerAvatarEmoji: c?.avatarEmoji ?? picked.avatarEmoji,
+          peerAvatarImagePath: c?.avatarImagePath ?? picked.avatarImagePath,
           forwardDraft: draft,
         ),
       ),
@@ -882,6 +1560,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final myId = CryptoService.instance.publicKeyHex;
     final fid = d.forwardAuthorId;
     final fnk = d.originalAuthorNick;
+    final fch = d.forwardChannelId;
     final target = _resolvedPeerId;
     if (!_looksLikePublicKey(target)) {
       final ok = await _waitForPeerPublicKey();
@@ -889,6 +1568,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     var x25519Key = BleService.instance.getPeerX25519Key(target);
     x25519Key ??= RelayService.instance.getPeerX25519Key(target);
+    final skipNet = myId == target;
 
     Future<void> sendText(String text, String msgId) async {
       final msg = ChatMessage(
@@ -900,30 +1580,35 @@ class _ChatScreenState extends State<ChatScreen> {
         status: MessageStatus.sending,
         forwardFromId: fid,
         forwardFromNick: fnk,
+        forwardFromChannelId: fch,
       );
       await ChatStorageService.instance.saveMessage(msg);
-      if (x25519Key != null && x25519Key.isNotEmpty) {
-        final enc = await CryptoService.instance.encryptMessage(
-          plaintext: text,
-          recipientX25519KeyBase64: x25519Key,
-        );
-        await GossipRouter.instance.sendEncryptedMessage(
-          encrypted: enc,
-          senderId: myId,
-          recipientId: target,
-          messageId: msgId,
-          forwardFromId: fid,
-          forwardFromNick: fnk,
-        );
-      } else {
-        await GossipRouter.instance.sendRawMessage(
-          text: text,
-          senderId: myId,
-          recipientId: target,
-          messageId: msgId,
-          forwardFromId: fid,
-          forwardFromNick: fnk,
-        );
+      if (!skipNet) {
+        if (x25519Key != null && x25519Key.isNotEmpty) {
+          final enc = await CryptoService.instance.encryptMessage(
+            plaintext: text,
+            recipientX25519KeyBase64: x25519Key,
+          );
+          await GossipRouter.instance.sendEncryptedMessage(
+            encrypted: enc,
+            senderId: myId,
+            recipientId: target,
+            messageId: msgId,
+            forwardFromId: fid,
+            forwardFromNick: fnk,
+            forwardFromChannelId: fch,
+          );
+        } else {
+          await GossipRouter.instance.sendRawMessage(
+            text: text,
+            senderId: myId,
+            recipientId: target,
+            messageId: msgId,
+            forwardFromId: fid,
+            forwardFromNick: fnk,
+            forwardFromChannelId: fch,
+          );
+        }
       }
       await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
         msgId,
@@ -939,22 +1624,27 @@ class _ChatScreenState extends State<ChatScreen> {
         final dest =
             '${docs.path}/fwd_${msgId}${ext.isNotEmpty ? ext : '.jpg'}';
         await File(m.imagePath!).copy(dest);
-        final bytes = await File(dest).readAsBytes();
-        final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-        await GossipRouter.instance.sendImgMeta(
-          msgId: msgId,
-          totalChunks: chunks.length,
-          fromId: myId,
-          recipientId: target,
-        );
-        for (var i = 0; i < chunks.length; i++) {
-          await GossipRouter.instance.sendImgChunk(
+        if (!skipNet) {
+          final bytes = await File(dest).readAsBytes();
+          final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+          await GossipRouter.instance.sendImgMeta(
             msgId: msgId,
-            index: i,
-            base64Data: chunks[i],
+            totalChunks: chunks.length,
             fromId: myId,
             recipientId: target,
+            forwardFromId: fid,
+            forwardFromNick: fnk,
+            forwardFromChannelId: fch,
           );
+          for (var i = 0; i < chunks.length; i++) {
+            await GossipRouter.instance.sendImgChunk(
+              msgId: msgId,
+              index: i,
+              base64Data: chunks[i],
+              fromId: myId,
+              recipientId: target,
+            );
+          }
         }
         final msg = ChatMessage(
           id: msgId,
@@ -966,6 +1656,7 @@ class _ChatScreenState extends State<ChatScreen> {
           status: MessageStatus.sent,
           forwardFromId: fid,
           forwardFromNick: fnk,
+          forwardFromChannelId: fch,
         );
         await ChatStorageService.instance.saveMessage(msg);
       } else if (m.videoPath != null && File(m.videoPath!).existsSync()) {
@@ -975,25 +1666,30 @@ class _ChatScreenState extends State<ChatScreen> {
         final dest =
             '${docs.path}/fwd_${msgId}${ext.isNotEmpty ? ext : '.mp4'}';
         await File(m.videoPath!).copy(dest);
-        final bytes = await File(dest).readAsBytes();
-        final chunks = ImageService.instance.splitToBase64Chunks(bytes);
-        final isSq = dest.contains('_sq') || m.videoPath!.contains('_sq');
-        await GossipRouter.instance.sendImgMeta(
-          msgId: msgId,
-          totalChunks: chunks.length,
-          fromId: myId,
-          recipientId: target,
-          isVideo: true,
-          isSquare: isSq,
-        );
-        for (var i = 0; i < chunks.length; i++) {
-          await GossipRouter.instance.sendImgChunk(
+        if (!skipNet) {
+          final bytes = await File(dest).readAsBytes();
+          final chunks = ImageService.instance.splitToBase64Chunks(bytes);
+          final isSq = _videoPathIsSquare(m.videoPath!);
+          await GossipRouter.instance.sendImgMeta(
             msgId: msgId,
-            index: i,
-            base64Data: chunks[i],
+            totalChunks: chunks.length,
             fromId: myId,
             recipientId: target,
+            isVideo: true,
+            isSquare: isSq,
+            forwardFromId: fid,
+            forwardFromNick: fnk,
+            forwardFromChannelId: fch,
           );
+          for (var i = 0; i < chunks.length; i++) {
+            await GossipRouter.instance.sendImgChunk(
+              msgId: msgId,
+              index: i,
+              base64Data: chunks[i],
+              fromId: myId,
+              recipientId: target,
+            );
+          }
         }
         await ChatStorageService.instance.saveMessage(ChatMessage(
           id: msgId,
@@ -1005,6 +1701,7 @@ class _ChatScreenState extends State<ChatScreen> {
           status: MessageStatus.sent,
           forwardFromId: fid,
           forwardFromNick: fnk,
+          forwardFromChannelId: fch,
         ));
       } else if (m.voicePath != null && File(m.voicePath!).existsSync()) {
         final msgId = _uuid.v4();
@@ -1029,6 +1726,7 @@ class _ChatScreenState extends State<ChatScreen> {
           status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
           forwardFromId: fid,
           forwardFromNick: fnk,
+          forwardFromChannelId: fch,
         ));
       } else if (m.filePath != null && File(m.filePath!).existsSync()) {
         final msgId = _uuid.v4();
@@ -1059,6 +1757,7 @@ class _ChatScreenState extends State<ChatScreen> {
           status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
           forwardFromId: fid,
           forwardFromNick: fnk,
+          forwardFromChannelId: fch,
         ));
       } else {
         await sendText(m.text.isNotEmpty ? m.text : ' ', _uuid.v4());
@@ -1080,11 +1779,12 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
 
-    if (text.length > _kMaxMessageLength) {
+    final maxLen = _isAiBot ? 12000 : _kMaxMessageLength;
+    if (text.length > maxLen) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
             content: Text(
-                'Сообщение слишком длинное (макс. $_kMaxMessageLength симв.)')),
+                'Сообщение слишком длинное (макс. $maxLen симв.)')),
       );
       return;
     }
@@ -1106,7 +1806,7 @@ class _ChatScreenState extends State<ChatScreen> {
     String? msgId;
     try {
       // Peer id might be a BLE UUID until profiles exchange completes.
-      if (!_looksLikePublicKey(_resolvedPeerId)) {
+      if (!_isAiBot && !_looksLikePublicKey(_resolvedPeerId)) {
         final ok = await _waitForPeerPublicKey();
         if (!ok) {
           if (mounted) {
@@ -1123,12 +1823,14 @@ class _ChatScreenState extends State<ChatScreen> {
       // 1) Edit mode: send edit packet for an existing outgoing message.
       if (_editingMessageId != null) {
         final targetId = _editingMessageId!;
-        await GossipRouter.instance.sendEditMessage(
-          messageId: targetId,
-          newText: text,
-          senderId: myId,
-          recipientId: _resolvedPeerId,
-        );
+        if (!_savedMessagesLocalOnly && !_isAiBot) {
+          await GossipRouter.instance.sendEditMessage(
+            messageId: targetId,
+            newText: text,
+            senderId: myId,
+            recipientId: _resolvedPeerId,
+          );
+        }
         await ChatStorageService.instance.editMessage(targetId, text);
         if (!mounted) return;
         _controller.clear();
@@ -1170,34 +1872,38 @@ class _ChatScreenState extends State<ChatScreen> {
           'relay=${RelayService.instance.isConnected}, '
           'mode=${AppSettings.instance.connectionMode}');
 
-      if (x25519Key != null && x25519Key.isNotEmpty) {
-        // Зашифрованная отправка — ChaCha20-Poly1305 + X25519 ECDH
-        final encrypted = await CryptoService.instance.encryptMessage(
-          plaintext: text,
-          recipientX25519KeyBase64: x25519Key,
-        );
-        await GossipRouter.instance.sendEncryptedMessage(
-          encrypted: encrypted,
-          senderId: myId,
-          recipientId: targetPeerId,
-          messageId: msgId,
-          latitude: lat,
-          longitude: lng,
-          replyToMessageId: _replyToMessageId,
-        );
-        debugPrint('[RLINK][Chat] Sent ENCRYPTED msg $msgId');
+      if (!_savedMessagesLocalOnly && !_isAiBot) {
+        if (x25519Key != null && x25519Key.isNotEmpty) {
+          // Зашифрованная отправка — ChaCha20-Poly1305 + X25519 ECDH
+          final encrypted = await CryptoService.instance.encryptMessage(
+            plaintext: text,
+            recipientX25519KeyBase64: x25519Key,
+          );
+          await GossipRouter.instance.sendEncryptedMessage(
+            encrypted: encrypted,
+            senderId: myId,
+            recipientId: targetPeerId,
+            messageId: msgId,
+            latitude: lat,
+            longitude: lng,
+            replyToMessageId: _replyToMessageId,
+          );
+          debugPrint('[RLINK][Chat] Sent ENCRYPTED msg $msgId');
+        } else {
+          // Fallback — plaintext если X25519 ключ ещё не получен
+          await GossipRouter.instance.sendRawMessage(
+            text: text,
+            senderId: myId,
+            recipientId: targetPeerId,
+            messageId: msgId,
+            replyToMessageId: _replyToMessageId,
+            latitude: lat,
+            longitude: lng,
+          );
+          debugPrint('[RLINK][Chat] Sent RAW msg $msgId');
+        }
       } else {
-        // Fallback — plaintext если X25519 ключ ещё не получен
-        await GossipRouter.instance.sendRawMessage(
-          text: text,
-          senderId: myId,
-          recipientId: targetPeerId,
-          messageId: msgId,
-          replyToMessageId: _replyToMessageId,
-          latitude: lat,
-          longitude: lng,
-        );
-        debugPrint('[RLINK][Chat] Sent RAW msg $msgId');
+        debugPrint('[RLINK][Chat] Saved messages / ИИ — сеть не используется');
       }
 
       await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
@@ -1211,6 +1917,10 @@ class _ChatScreenState extends State<ChatScreen> {
           _replyToMessageId = null;
           _replyPreviewText = null;
         });
+      }
+
+      if (_isAiBot) {
+        unawaited(_completeGigachatReply());
       }
     } catch (e) {
       if (!mounted) return;
@@ -1229,6 +1939,43 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _completeGigachatReply() async {
+    if (!mounted) return;
+    setState(() => _aiThinking = true);
+    try {
+      final reply = await GigachatService.instance.completeAfterUserMessage();
+      if (!mounted) return;
+      final botMsg = ChatMessage(
+        id: _uuid.v4(),
+        peerId: kAiBotPeerId,
+        text: reply,
+        isOutgoing: false,
+        timestamp: DateTime.now(),
+        status: MessageStatus.delivered,
+      );
+      await ChatStorageService.instance.saveMessage(botMsg);
+      await ChatStorageService.instance.loadMessages(kAiBotPeerId);
+      if (mounted) _scrollToBottom();
+    } on GigachatException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message), backgroundColor: Colors.red),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('GigaChat: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _aiThinking = false);
+    }
+  }
+
   Future<void> _composeAndSendTodo() async {
     if (_isSending || _editingMessageId != null) return;
     final enc = await showSharedTodoComposeDialog(context);
@@ -1244,6 +1991,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendCollabEncoded(String encoded) async {
+    if (_isAiBot) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('В чате с ИИ доступен только обычный текст')),
+        );
+      }
+      return;
+    }
     if (!_looksLikePublicKey(_resolvedPeerId)) {
       final ok = await _waitForPeerPublicKey();
       if (!ok) {
@@ -1281,16 +2037,30 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _patchSharedCollab(ChatMessage msg, String newEncoded) async {
     await ChatStorageService.instance.editMessage(msg.id, newEncoded);
-    await GossipRouter.instance.sendEditMessage(
-      messageId: msg.id,
-      newText: newEncoded,
-      senderId: CryptoService.instance.publicKeyHex,
-      recipientId: _resolvedPeerId,
-    );
+    if (!_savedMessagesLocalOnly && !_isAiBot) {
+      await GossipRouter.instance.sendEditMessage(
+        messageId: msg.id,
+        newText: newEncoded,
+        senderId: CryptoService.instance.publicKeyHex,
+        recipientId: _resolvedPeerId,
+      );
+    }
   }
 
   Future<void> _openChatCalendar() async {
-    final msgs = await ChatStorageService.instance.getMessages(_resolvedPeerId);
+    if (!mounted) return;
+    final List<ChatMessage> msgs;
+    try {
+      msgs = await ChatStorageService.instance.getMessages(_resolvedPeerId);
+    } catch (e, st) {
+      debugPrint('_openChatCalendar getMessages failed: $e\n$st');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось загрузить события: $e')),
+      );
+      return;
+    }
+    if (!mounted) return;
     final events = SharedCalendarPayload.collectFromChatMessages(msgs);
     if (!mounted) return;
     await showDialog<void>(
@@ -1301,23 +2071,28 @@ class _ChatScreenState extends State<ChatScreen> {
           width: double.maxFinite,
           child: events.isEmpty
               ? const Text('Пока нет отмеченных событий.')
-              : ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: events.length,
-                  itemBuilder: (_, i) {
-                    final e = events[i];
-                    final dt = DateTime.fromMillisecondsSinceEpoch(e.startMs);
-                    return ListTile(
-                      dense: true,
-                      title: Text(e.title.isEmpty ? '(без названия)' : e.title),
-                      subtitle: Text(
-                        '${dt.day.toString().padLeft(2, '0')}.'
-                        '${dt.month.toString().padLeft(2, '0')}.${dt.year} '
-                        '${dt.hour.toString().padLeft(2, '0')}:'
-                        '${dt.minute.toString().padLeft(2, '0')}',
-                      ),
-                    );
-                  },
+              : ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.sizeOf(ctx).height * 0.5,
+                  ),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: events.length,
+                    itemBuilder: (_, i) {
+                      final e = events[i];
+                      final dt = DateTime.fromMillisecondsSinceEpoch(e.startMs);
+                      return ListTile(
+                        dense: true,
+                        title: Text(e.title.isEmpty ? '(без названия)' : e.title),
+                        subtitle: Text(
+                          '${dt.day.toString().padLeft(2, '0')}.'
+                          '${dt.month.toString().padLeft(2, '0')}.${dt.year} '
+                          '${dt.hour.toString().padLeft(2, '0')}:'
+                          '${dt.minute.toString().padLeft(2, '0')}',
+                        ),
+                      );
+                    },
+                  ),
                 ),
         ),
         actions: [
@@ -1379,26 +2154,152 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Opens gallery to pick a photo.
-  Future<void> _sendFromGallery() async {
+  Future<void> _openMediaGallery() async {
     if (_isSending) return;
-    if (!_looksLikePublicKey(_resolvedPeerId)) {
-      final ok = await _waitForPeerPublicKey();
-      if (!ok) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
-          );
-        }
-        return;
-      }
-    }
+    if (!await _ensureReadyForMediaSend()) return;
+    if (!mounted) return;
+    final myId = CryptoService.instance.publicKeyHex;
+    await showMediaGallerySendSheet(
+      context,
+      onPhotoPath: (path) => _handlePickedChatImage(XFile(path)),
+      onGifPath: (path) => _sendGifFromPath(path, myId),
+      onVideoPath: (path) => _sendVideoFile(XFile(path), myId),
+      onStickerCropped: _sendStickerFromCroppedBytes,
+      onStickerFromLibrary: _sendStickerFromLibraryPath,
+      onFilePath: _sendFileFromMediaGalleryPath,
+    );
+  }
 
+  Future<void> _sendFileFromMediaGalleryPath(String srcPath) async {
+    if (_isSending) return;
+    if (!await _ensureReadyForMediaSend()) return;
+    if (!File(srcPath).existsSync()) return;
+    final originalName = p.basename(srcPath);
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isEmpty) return;
 
-    final picked = await _picker.pickImage(source: ImageSource.gallery);
-    if (picked == null || !mounted) return;
+    setState(() => _isSending = true);
+    _sendActivity(Activity.sendingFile);
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final filesDir = Directory('${docsDir.path}/files')
+        ..createSync(recursive: true);
+      final destPath =
+          '${filesDir.path}/${DateTime.now().millisecondsSinceEpoch}_$originalName';
+      await File(srcPath).copy(destPath);
+
+      final fileSize = File(destPath).lengthSync();
+      final msgId = _uuid.v4();
+      final targetPeerId =
+          _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
+      bool wasQueued = false;
+
+      if (!_savedMessagesLocalOnly) {
+        if (fileSize > _kMaxBlobBytes) {
+          unawaited(MediaUploadQueue.instance.enqueue(
+            msgId: msgId,
+            filePath: destPath,
+            recipientKey: _resolvedPeerId,
+            fromId: myId,
+            isFile: true,
+            fileName: originalName,
+          ));
+          wasQueued = true;
+        } else {
+          final fileBytes = await File(destPath).readAsBytes();
+          wasQueued = await _sendMedia(
+            bytes: fileBytes,
+            msgId: msgId,
+            myId: myId,
+            isFile: true,
+            fileName: originalName,
+            filePath: destPath,
+          );
+        }
+      }
+
+      await _saveAndTrack(
+        ChatMessage(
+          id: msgId,
+          peerId: targetPeerId,
+          text: '📎 $originalName',
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          filePath: destPath,
+          fileName: originalName,
+          fileSize: fileSize,
+        ),
+        wasQueued: wasQueued,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ошибка отправки файла: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      _sendActivity(Activity.stopped);
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _sendStickerFromLibraryPath(String absPath) async {
+    if (_isSending) return;
+    if (!await _ensureReadyForMediaSend()) return;
+    if (!File(absPath).existsSync()) return;
+    if (!mounted) return;
+    final myId = CryptoService.instance.publicKeyHex;
+
+    setState(() => _isSending = true);
+    try {
+      final fileBytes = await File(absPath).readAsBytes();
+      if (!mounted) return;
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+      final wasQueued = await _sendMedia(
+        bytes: fileBytes,
+        msgId: msgId,
+        myId: myId,
+        filePath: absPath,
+        isSticker: true,
+      );
+      await _saveAndTrack(
+        ChatMessage(
+          id: msgId,
+          peerId: targetPeerId,
+          text: '',
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          imagePath: absPath,
+        ),
+        wasQueued: wasQueued,
+      );
+      if (!mounted) return;
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Стикер: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _handlePickedChatImage(XFile picked) async {
+    if (_isSending) return;
+    if (!await _ensureReadyForMediaSend()) return;
+    if (!mounted) return;
+    final myId = CryptoService.instance.publicKeyHex;
 
     if (picked.path.toLowerCase().endsWith('.gif')) {
       await _sendGifFromPath(picked.path, myId);
@@ -1492,26 +2393,53 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Opens gallery to pick a video and send it.
-  Future<void> _sendVideoFromGallery() async {
+  Future<void> _sendStickerFromCroppedBytes(Uint8List bytes) async {
     if (_isSending) return;
-    if (!_looksLikePublicKey(_resolvedPeerId)) {
-      final ok = await _waitForPeerPublicKey();
-      if (!ok) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Подождите — идёт обмен профилями')),
-          );
-        }
-        return;
-      }
-    }
+    if (!await _ensureReadyForMediaSend()) return;
+    if (!mounted) return;
     final myId = CryptoService.instance.publicKeyHex;
-    if (myId.isEmpty) return;
 
-    final picked = await _picker.pickVideo(source: ImageSource.gallery);
-    if (picked == null || !mounted) return;
-    await _sendVideoFile(picked, myId);
+    setState(() => _isSending = true);
+    try {
+      final path = await ImageService.instance.saveStickerFromBytes(bytes);
+      if (!mounted) return;
+      unawaited(StickerCollectionService.instance.registerAbsoluteStickerPath(path));
+      final fileBytes = await File(path).readAsBytes();
+      if (!mounted) return;
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+      final wasQueued = await _sendMedia(
+        bytes: fileBytes,
+        msgId: msgId,
+        myId: myId,
+        filePath: path,
+        isSticker: true,
+      );
+      await _saveAndTrack(
+        ChatMessage(
+          id: msgId,
+          peerId: targetPeerId,
+          text: '',
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          imagePath: path,
+        ),
+        wasQueued: wasQueued,
+      );
+      if (!mounted) return;
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Стикер: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
   }
 
   /// Send a video file (picked from gallery) as a chat message.
@@ -1528,24 +2456,26 @@ class _ChatScreenState extends State<ChatScreen> {
 
       bool wasQueued = false;
 
-      if (RelayService.instance.isConnected) {
-        // Queue-based send: file never read into RAM
-        unawaited(MediaUploadQueue.instance.enqueue(
-          msgId: msgId,
-          filePath: path,
-          recipientKey: _resolvedPeerId,
-          fromId: myId,
-          isVideo: true,
-          isSquare: false,
-        ));
-        wasQueued = true;
-      } else {
-        // BLE-only fallback: must load bytes
-        final bytes = await File(path).readAsBytes();
-        await _sendMedia(
-          bytes: bytes, msgId: msgId, myId: myId,
-          isVideo: true, isSquare: false, filePath: path,
-        );
+      if (!_savedMessagesLocalOnly) {
+        if (RelayService.instance.isConnected) {
+          // Queue-based send: file never read into RAM
+          unawaited(MediaUploadQueue.instance.enqueue(
+            msgId: msgId,
+            filePath: path,
+            recipientKey: _resolvedPeerId,
+            fromId: myId,
+            isVideo: true,
+            isSquare: false,
+          ));
+          wasQueued = true;
+        } else {
+          // BLE-only fallback: must load bytes
+          final bytes = await File(path).readAsBytes();
+          await _sendMedia(
+            bytes: bytes, msgId: msgId, myId: myId,
+            isVideo: true, isSquare: false, filePath: path,
+          );
+        }
       }
 
       await _saveAndTrack(ChatMessage(
@@ -1626,23 +2556,25 @@ class _ChatScreenState extends State<ChatScreen> {
           ? _resolvedPeerId : widget.peerId;
       bool wasQueued = false;
 
-      if (fileSize > _kMaxBlobBytes) {
-        // Large original — use upload queue directly (avoid loading into RAM)
-        unawaited(MediaUploadQueue.instance.enqueue(
-          msgId: msgId,
-          filePath: destPath,
-          recipientKey: _resolvedPeerId,
-          fromId: myId,
-          isFile: true,
-          fileName: picked.name,
-        ));
-        wasQueued = true;
-      } else {
-        final bytes = await File(destPath).readAsBytes();
-        wasQueued = await _sendMedia(
-          bytes: bytes, msgId: msgId, myId: myId,
-          isFile: true, fileName: picked.name, filePath: destPath,
-        );
+      if (!_savedMessagesLocalOnly) {
+        if (fileSize > _kMaxBlobBytes) {
+          // Large original — use upload queue directly (avoid loading into RAM)
+          unawaited(MediaUploadQueue.instance.enqueue(
+            msgId: msgId,
+            filePath: destPath,
+            recipientKey: _resolvedPeerId,
+            fromId: myId,
+            isFile: true,
+            fileName: picked.name,
+          ));
+          wasQueued = true;
+        } else {
+          final bytes = await File(destPath).readAsBytes();
+          wasQueued = await _sendMedia(
+            bytes: bytes, msgId: msgId, myId: myId,
+            isFile: true, fileName: picked.name, filePath: destPath,
+          );
+        }
       }
 
       await _saveAndTrack(ChatMessage(
@@ -1668,7 +2600,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Record a square video (camera button). Gallery videos come via _sendFromGallery().
+  /// Квадратное видеосообщение с камеры (пункт «Видеосообщение» в меню +).
   Future<void> _sendVideo() async {
     if (_isSending) return;
     if (!_looksLikePublicKey(_resolvedPeerId)) {
@@ -1701,52 +2633,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _sendActivity(Activity.stopped);
     if (videoPath == null || !mounted) return;
 
-    setState(() => _isSending = true);
-    try {
-      final path = await ImageService.instance.saveVideo(videoPath, isSquare: true);
-      final msgId = _uuid.v4();
-      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
-          ? _resolvedPeerId
-          : widget.peerId;
-
-      bool wasQueued = false;
-      if (RelayService.instance.isConnected) {
-        unawaited(MediaUploadQueue.instance.enqueue(
-          msgId: msgId,
-          filePath: path,
-          recipientKey: _resolvedPeerId,
-          fromId: myId,
-          isVideo: true,
-          isSquare: true,
-        ));
-        wasQueued = true;
-      } else {
-        final bytes = await File(path).readAsBytes();
-        await _sendMedia(
-          bytes: bytes, msgId: msgId, myId: myId,
-          isVideo: true, isSquare: true, filePath: path,
-        );
-      }
-
-      await _saveAndTrack(ChatMessage(
-        id: msgId,
-        peerId: targetPeerId,
-        text: '⬛ Видео',
-        isOutgoing: true,
-        timestamp: DateTime.now(),
-        status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
-        videoPath: path,
-      ), wasQueued: wasQueued);
-      _scrollToBottom();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSending = false);
-    }
+    await _publishSquareVideoFromDisk(videoPath);
   }
 
   Future<void> _sendFile() async {
@@ -1803,27 +2690,29 @@ class _ChatScreenState extends State<ChatScreen> {
           _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
       bool wasQueued = false;
 
-      if (fileSize > _kMaxBlobBytes) {
-        // Large file — enqueue directly, never load full content into RAM
-        unawaited(MediaUploadQueue.instance.enqueue(
-          msgId: msgId,
-          filePath: destPath,
-          recipientKey: _resolvedPeerId,
-          fromId: myId,
-          isFile: true,
-          fileName: originalName,
-        ));
-        wasQueued = true;
-      } else {
-        final fileBytes = await File(destPath).readAsBytes();
-        wasQueued = await _sendMedia(
-          bytes: fileBytes,
-          msgId: msgId,
-          myId: myId,
-          isFile: true,
-          fileName: originalName,
-          filePath: destPath,
-        );
+      if (!_savedMessagesLocalOnly) {
+        if (fileSize > _kMaxBlobBytes) {
+          // Large file — enqueue directly, never load full content into RAM
+          unawaited(MediaUploadQueue.instance.enqueue(
+            msgId: msgId,
+            filePath: destPath,
+            recipientKey: _resolvedPeerId,
+            fromId: myId,
+            isFile: true,
+            fileName: originalName,
+          ));
+          wasQueued = true;
+        } else {
+          final fileBytes = await File(destPath).readAsBytes();
+          wasQueued = await _sendMedia(
+            bytes: fileBytes,
+            msgId: msgId,
+            myId: myId,
+            isFile: true,
+            fileName: originalName,
+            filePath: destPath,
+          );
+        }
       }
 
       await _saveAndTrack(ChatMessage(
@@ -1863,33 +2752,75 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
+      if (!mounted) return;
+      try {
+        if (!_scrollController.hasClients) return;
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
           duration: const Duration(milliseconds: 250),
           curve: Curves.easeOut,
         );
+      } catch (_) {
+        // Контроллер уже dispose — игнорируем.
       }
     });
   }
 
+  double? _scrollDistanceFromBottom() {
+    if (!_scrollController.hasClients) return null;
+    final pos = _scrollController.position;
+    return pos.maxScrollExtent - pos.pixels;
+  }
+
+  void _preserveScrollAfterComposerResize(double? distFromBottom) {
+    if (distFromBottom == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      try {
+        if (!_scrollController.hasClients) return;
+        final pos = _scrollController.position;
+        final target = (pos.maxScrollExtent - distFromBottom)
+            .clamp(pos.minScrollExtent, pos.maxScrollExtent);
+        _scrollController.jumpTo(target);
+      } catch (_) {}
+    });
+  }
+
+  Future<void> _refreshGigachatVpnFlag() async {
+    try {
+      final results = await Connectivity().checkConnectivity();
+      if (!mounted) return;
+      final on = results.contains(ConnectivityResult.vpn);
+      if (on != _vpnProbablyActive) {
+        setState(() => _vpnProbablyActive = on);
+      }
+    } catch (_) {
+      // Desktop / неподдерживаемая платформа — плашку не показываем.
+    }
+  }
+
   void _startReply(ChatMessage msg) {
+    final dist = _scrollDistanceFromBottom();
     setState(() {
       _editingMessageId = null;
       _editingPreviewText = null;
       _replyToMessageId = msg.id;
       _replyPreviewText = msg.text;
     });
+    _preserveScrollAfterComposerResize(dist);
   }
 
   void _cancelReply() {
+    final dist = _scrollDistanceFromBottom();
     setState(() {
       _replyToMessageId = null;
       _replyPreviewText = null;
     });
+    _preserveScrollAfterComposerResize(dist);
   }
 
   void _startEdit(ChatMessage msg) {
+    final dist = _scrollDistanceFromBottom();
     setState(() {
       _replyToMessageId = null;
       _replyPreviewText = null;
@@ -1900,14 +2831,17 @@ class _ChatScreenState extends State<ChatScreen> {
         offset: _controller.text.length,
       );
     });
+    _preserveScrollAfterComposerResize(dist);
   }
 
   void _cancelEdit() {
+    final dist = _scrollDistanceFromBottom();
     setState(() {
       _editingMessageId = null;
       _editingPreviewText = null;
       _controller.clear();
     });
+    _preserveScrollAfterComposerResize(dist);
   }
 
   Future<void> _confirmAndDelete(ChatMessage msg) async {
@@ -1946,12 +2880,13 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       // Удаляем локально для мгновенного отклика.
       await ChatStorageService.instance.deleteMessage(msg.id);
-      // Просим получателя удалить копию.
-      await GossipRouter.instance.sendDeleteMessage(
-        messageId: msg.id,
-        senderId: CryptoService.instance.publicKeyHex,
-        recipientId: _resolvedPeerId,
-      );
+      if (!_savedMessagesLocalOnly) {
+        await GossipRouter.instance.sendDeleteMessage(
+          messageId: msg.id,
+          senderId: CryptoService.instance.publicKeyHex,
+          recipientId: _resolvedPeerId,
+        );
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1964,6 +2899,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _onLongPressMessage(ChatMessage msg) async {
+    final stickerSourcePath = msg.imagePath == null
+        ? null
+        : (ImageService.instance.resolveStoredPath(msg.imagePath) ??
+            msg.imagePath);
     await showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -2006,6 +2945,31 @@ class _ChatScreenState extends State<ChatScreen> {
                 unawaited(_pickForwardTargetAndNavigate(msg));
               },
             ),
+            if (stickerSourcePath != null &&
+                File(stickerSourcePath).existsSync())
+              ListTile(
+                leading: const Icon(Icons.bookmark_add_outlined),
+                title: const Text('В коллекцию стикеров'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    await StickerCollectionService.instance
+                        .importChatImageToCollection(stickerSourcePath);
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Добавлено в стикеры')),
+                    );
+                  } catch (e) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Не удалось: $e'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
+                },
+              ),
             if (msg.isOutgoing) ...[
               ListTile(
                 leading: const Icon(Icons.edit),
@@ -2039,12 +3003,37 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _toggleReaction(ChatMessage msg, String emoji) async {
     await ChatStorageService.instance
         .toggleReaction(msg.id, emoji, CryptoService.instance.publicKeyHex);
-    await GossipRouter.instance.sendReaction(
-      messageId: msg.id,
-      emoji: emoji,
-      fromId: CryptoService.instance.publicKeyHex,
-      recipientId: _resolvedPeerId,
-    );
+    if (!_savedMessagesLocalOnly) {
+      await GossipRouter.instance.sendReaction(
+        messageId: msg.id,
+        emoji: emoji,
+        fromId: CryptoService.instance.publicKeyHex,
+        recipientId: _resolvedPeerId,
+      );
+    }
+  }
+
+  Future<void> _quickReaction(ChatMessage msg) async {
+    final emoji = AppSettings.instance.quickReactionEmoji.trim();
+    if (emoji.isEmpty) return;
+    await _toggleReaction(msg, emoji);
+  }
+
+  void _onMessagePointerDownQuickReact(PointerDownEvent e, ChatMessage msg) {
+    if (e.kind != PointerDeviceKind.mouse) return;
+    if ((e.buttons & kPrimaryButton) == 0) return;
+    if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) return;
+    final now = DateTime.now();
+    if (_lastQuickPointerMsgId == msg.id &&
+        _lastQuickPointerAt != null &&
+        now.difference(_lastQuickPointerAt!) < const Duration(milliseconds: 450)) {
+      _lastQuickPointerMsgId = null;
+      _lastQuickPointerAt = null;
+      unawaited(_quickReaction(msg));
+      return;
+    }
+    _lastQuickPointerMsgId = msg.id;
+    _lastQuickPointerAt = now;
   }
 
   Future<void> _pickChatBackground() async {
@@ -2057,7 +3046,30 @@ class _ChatScreenState extends State<ChatScreen> {
     await AppSettings.instance.setChatBgForPeer(_resolvedPeerId, null);
   }
 
+  Future<void> _exportChatToFile() async {
+    try {
+      final f = await ChatStorageService.instance
+          .exportDirectChatToJsonFile(_resolvedPeerId);
+      await Share.shareXFiles([XFile(f.path)], subject: 'Rlink — экспорт чата');
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось экспортировать: $e')),
+        );
+      }
+    }
+  }
+
   void _openPeerProfile() {
+    if (_isAiBot) {
+      Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => const ProfileScreen(),
+        ),
+      );
+      return;
+    }
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -2127,47 +3139,67 @@ class _ChatScreenState extends State<ChatScreen> {
             emoji: widget.peerAvatarEmoji,
             imagePath: widget.peerAvatarImagePath,
             size: 38,
-            isOnline: BleService.instance.isPeerConnected(_resolvedPeerId) ||
-                (RelayService.instance.isConnected && RelayService.instance.isPeerOnline(_resolvedPeerId)),
+            isOnline: !_isAiBot &&
+                (BleService.instance.isPeerConnected(_resolvedPeerId) ||
+                    (RelayService.instance.isConnected &&
+                        RelayService.instance
+                            .isPeerOnline(_resolvedPeerId))),
           ),
           const SizedBox(width: 10),
           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(widget.peerNickname,
                 style:
                     const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-            ValueListenableBuilder<int>(
-              valueListenable: TypingService.instance.version,
-              builder: (_, __, ___) {
-                final activity = TypingService.instance.activityFor(_resolvedPeerId);
-                if (activity != Activity.stopped) {
-                  final label = TypingService.instance.label(activity);
-                  return Text(label,
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF1DB954)),
-                  );
-                }
-                return ValueListenableBuilder<int>(
-                  valueListenable: BleService.instance.peersCount,
-                  builder: (_, __, ___) {
-                    return ValueListenableBuilder<int>(
-                      valueListenable: RelayService.instance.presenceVersion,
-                      builder: (_, __, ___) {
-                        final online = BleService.instance.isPeerConnected(_resolvedPeerId);
-                        final relayOnline = RelayService.instance.isConnected &&
-                            RelayService.instance.isPeerOnline(_resolvedPeerId);
-                        final isOnline = online || relayOnline;
-                        return Text(
-                          isOnline ? 'в сети' : 'не в сети',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isOnline ? Colors.green : Colors.grey.shade500,
-                          ),
-                        );
-                      },
+            if (_isAiBot)
+              Text(
+                'ИИ · GigaChat (Сбер)',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              )
+            else
+              ValueListenableBuilder<int>(
+                valueListenable: TypingService.instance.version,
+                builder: (_, __, ___) {
+                  final activity =
+                      TypingService.instance.activityFor(_resolvedPeerId);
+                  if (activity != Activity.stopped) {
+                    final label = TypingService.instance.label(activity);
+                    return Text(label,
+                      style: const TextStyle(
+                          fontSize: 12, color: Color(0xFF1DB954)),
                     );
-                  },
-                );
-              },
-            ),
+                  }
+                  return ValueListenableBuilder<int>(
+                    valueListenable: BleService.instance.peersCount,
+                    builder: (_, __, ___) {
+                      return ValueListenableBuilder<int>(
+                        valueListenable: RelayService.instance.presenceVersion,
+                        builder: (_, __, ___) {
+                          final online = BleService.instance
+                              .isPeerConnected(_resolvedPeerId);
+                          final relayOnline =
+                              RelayService.instance.isConnected &&
+                                  RelayService.instance
+                                      .isPeerOnline(_resolvedPeerId);
+                          final isOnline = online || relayOnline;
+                          return Text(
+                            isOnline ? 'в сети' : 'не в сети',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: isOnline
+                                  ? Colors.green
+                                  : Colors.grey.shade500,
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
           ]),
         ]),
         actions: [
@@ -2176,12 +3208,19 @@ class _ChatScreenState extends State<ChatScreen> {
               final hasBg = (AppSettings.instance.chatBgForPeer(_resolvedPeerId) ?? AppSettings.instance.chatBgForPeer('__global__')) != null;
               return [
                 const PopupMenuItem(value: 'profile', child: Text('Профиль')),
+                if (!_isAiBot)
+                  const PopupMenuItem(
+                    value: 'peer_stickers',
+                    child: Text('Стикеры из чата'),
+                  ),
                 const PopupMenuItem(
                     value: 'chat_cal',
                     child: Text('Календарь чата')),
                 const PopupMenuItem(value: 'background', child: Text('Фон чата')),
                 if (hasBg)
                   const PopupMenuItem(value: 'remove_bg', child: Text('Убрать фон')),
+                const PopupMenuItem(
+                    value: 'export', child: Text('Экспорт в файл')),
                 const PopupMenuItem(value: 'delete', child: Text('Удалить чат')),
               ];
             },
@@ -2189,12 +3228,30 @@ class _ChatScreenState extends State<ChatScreen> {
               switch (v) {
                 case 'profile':
                   _openPeerProfile();
+                  break;
+                case 'peer_stickers':
+                  await Navigator.push<void>(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => PeerStickersScreen(
+                        peerId: _resolvedPeerId,
+                        peerName: widget.peerNickname,
+                      ),
+                    ),
+                  );
+                  break;
                 case 'chat_cal':
                   unawaited(_openChatCalendar());
+                  break;
                 case 'background':
                   _pickChatBackground();
+                  break;
                 case 'remove_bg':
                   _removeChatBackground();
+                  break;
+                case 'export':
+                  await _exportChatToFile();
+                  break;
                 case 'delete':
                   final ok = await showDialog<bool>(
                     context: context,
@@ -2214,13 +3271,70 @@ class _ChatScreenState extends State<ChatScreen> {
                     await ChatStorageService.instance.deleteChat(_resolvedPeerId);
                     if (context.mounted) Navigator.pop(context);
                   }
+                  break;
               }
             },
           ),
         ],
       ),
-      body: Column(children: [
+      body: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Column(children: [
         // Sending / uploading status bar
+        if (_aiThinking)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: Row(children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Theme.of(context).colorScheme.onSecondaryContainer,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'GigaChat формирует ответ…',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.onSecondaryContainer,
+                ),
+              ),
+            ]),
+          ),
+        if (_isAiBot && _vpnProbablyActive)
+          Material(
+            color: Theme.of(context).colorScheme.tertiaryContainer,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.info_outline_rounded,
+                    size: 20,
+                    color: Theme.of(context).colorScheme.onTertiaryContainer,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Включён VPN: GigaChat может не ответить или ругаться на сертификат. '
+                      'При ошибках попробуйте отключить VPN.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.3,
+                        color: Theme.of(context).colorScheme.onTertiaryContainer,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         if (_isSending || _uploadingMsgIds.isNotEmpty)
           ValueListenableBuilder<Map<String, double>>(
             valueListenable: MediaUploadQueue.instance.progressMap,
@@ -2258,7 +3372,10 @@ class _ChatScreenState extends State<ChatScreen> {
             },
           ),
         // ── Add-contact banner — shown for any non-contact peer ──────
-        if (!_isContact && !_strangerBannerDismissed)
+        if (!_isContact &&
+            !_strangerBannerDismissed &&
+            !_savedMessagesLocalOnly &&
+            !_isAiBot)
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -2331,6 +3448,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       emoji: myProfile.avatarEmoji,
                       x25519Key: CryptoService.instance.x25519PublicKeyBase64,
                       tags: myProfile.tags,
+                      statusEmoji: myProfile.statusEmoji,
                     );
                   }
                   if (context.mounted) {
@@ -2386,8 +3504,22 @@ class _ChatScreenState extends State<ChatScreen> {
                   final pinBar = _pinnedIdsChrono.isEmpty
                       ? null
                       : _buildPinnedBar(messages);
-                  WidgetsBinding.instance
-                      .addPostFrameCallback((_) => _onScrollForPins());
+                  final n = messages.length;
+                  if (n != _lastPinSyncMessageCount &&
+                      !_pendingMessageCountPinSync) {
+                    _pendingMessageCountPinSync = true;
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      _pendingMessageCountPinSync = false;
+                      if (!mounted) return;
+                      final live = ChatStorageService.instance
+                          .messagesNotifier(_resolvedPeerId)
+                          .value
+                          .length;
+                      if (live == _lastPinSyncMessageCount) return;
+                      _lastPinSyncMessageCount = live;
+                      _onScrollForPins();
+                    });
+                  }
                   return Column(
                     children: [
                       if (pinBar != null) pinBar,
@@ -2404,17 +3536,29 @@ class _ChatScreenState extends State<ChatScreen> {
                           !_sameDay(messages[i - 1].timestamp, msg.timestamp);
                       return Column(children: [
                         if (showDate) _DateDivider(date: msg.timestamp),
-                        GestureDetector(
-                          onLongPress: () => _onLongPressMessage(msg),
-                          child: _MessageBubble(
-                            msg: msg,
-                            replyPreviewText: msg.replyToMessageId == null
-                                ? null
-                                : messageTextById[msg.replyToMessageId],
-                            onDownloadImage: _saveImageToGallery,
-                            onCollabPersist: _patchSharedCollab,
-                            onForwardedAuthorTap: _openForwardedAuthorProfile,
-                            onRequestMissingMedia: _onRequestMissingDmMedia,
+                        SwipeToReply(
+                          isOutgoing: msg.isOutgoing,
+                          onReply: () => _startReply(msg),
+                          child: Listener(
+                            behavior: HitTestBehavior.translucent,
+                            onPointerDown: (e) =>
+                                _onMessagePointerDownQuickReact(e, msg),
+                            child: GestureDetector(
+                              onLongPress: () => _onLongPressMessage(msg),
+                              onDoubleTap: () => unawaited(_quickReaction(msg)),
+                              child: _MessageBubble(
+                                msg: msg,
+                                replyPreviewText: msg.replyToMessageId == null
+                                    ? null
+                                    : messageTextById[msg.replyToMessageId],
+                                onDownloadImage: _saveImageToGallery,
+                                onCollabPersist: _patchSharedCollab,
+                                onForwardContextTap: _onForwardContextTap,
+                                onRequestMissingMedia: _onRequestMissingDmMedia,
+                                playbackThread: messages,
+                                playbackIndex: i,
+                              ),
+                            ),
                           ),
                         ),
                       ]);
@@ -2506,22 +3650,97 @@ class _ChatScreenState extends State<ChatScreen> {
           controller: _controller,
           isSending: _isSending,
           isRecording: _isRecording,
+          isHoldVideoStarting: _dmHoldVideoStarting,
           recordingSecondsNotifier: _recordingSecondsNotifier,
-          maxLength: _kMaxMessageLength,
+          maxLength: _isAiBot ? 12000 : _kMaxMessageLength,
+          hintText: _isAiBot ? 'Сообщение для GigaChat…' : null,
+          aiTextOnlyComposer: _isAiBot,
           locationActive: _pendingLat != null,
           onSend: _send,
           onLongPressSend: _scheduleSendDialog,
-          onPickTodo: _composeAndSendTodo,
-          onPickCalendar: _composeAndSendCalendar,
-          onPickImage: _sendFromGallery,
-          onPickVideoGallery: _sendVideoFromGallery,
-          onPickVideo: _sendVideo,
+          onPickTodo: _isAiBot ? null : _composeAndSendTodo,
+          onPickCalendar: _isAiBot ? null : _composeAndSendCalendar,
+          onOpenMediaGallery: _openMediaGallery,
+          onPickSquareVideo: _sendVideo,
           onPickFile: _sendFile,
-          onMicDown: _startVoiceRecording,
-          onMicUp: _stopAndSendVoice,
+          onVoiceHoldStart: _startVoiceRecording,
+          onVideoHoldStart: _startDmHoldSquareVideo,
+          onHoldReleaseSend: () async {
+            if (_dmHoldVideoCam != null) {
+              await _finishDmHoldSquareVideo(send: true);
+            } else {
+              await _stopAndSendVoice();
+            }
+          },
+          onHoldCancelDiscard: _cancelActiveMediaRecording,
           onLocation: _toggleLocation,
+          holdVideoPausedListenable: _dmHoldVideoPausedNotifier,
+          onHoldRecordingLockChanged: _onHoldRecordingLockChanged,
+          onHoldVideoLockedPauseToggle: _toggleDmHoldVideoPause,
         ),
-      ]),
+          ]),
+          if (_dmHoldVideoCam != null)
+            ValueListenableBuilder<bool>(
+              valueListenable: _dmHoldVideoPausedNotifier,
+              builder: (ctx, paused, __) {
+                return ListenableBuilder(
+                  listenable: _dmHoldVideoCam!,
+                  builder: (ctx2, _) {
+                    final cam = _dmHoldVideoCam;
+                    if (cam == null || !cam.value.isInitialized) {
+                      return const SizedBox.shrink();
+                    }
+                    final w = MediaQuery.sizeOf(ctx2).width;
+                    final squareSize = w * 0.82;
+                    return Positioned.fill(
+                      child: Material(
+                        color: Colors.black.withValues(alpha: 0.72),
+                        child: SafeArea(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              SquareVideoFramedCameraView(
+                                controller: cam,
+                                squareSize: squareSize,
+                                isRecording: true,
+                                recordingSeconds: _recordingSecondsNotifier,
+                                maxDuration: 15,
+                                showFlipButton: _dmHoldCameraList.length > 1,
+                                onFlipCamera: () =>
+                                    unawaited(_switchDmHoldCamera()),
+                                isSwitchingCamera: _dmHoldSwitchingCam,
+                                pulseController: null,
+                                recordingPaused: paused,
+                                isPaused: paused,
+                                onToggleRecordingPause: () =>
+                                    unawaited(_toggleDmHoldVideoPause()),
+                              ),
+                              const SizedBox(height: 20),
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 24),
+                                child: Text(
+                                  _dmHoldLockedWhileVideo
+                                      ? 'Закреплено: сверху отправка, пауза или удаление'
+                                      : 'Отпустите палец — отправить · вверх — закрепить',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.grey.shade400,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+        ],
+      ),
     );
   }
 
@@ -2561,6 +3780,242 @@ class _DateDivider extends StatelessWidget {
   }
 }
 
+// ── Приглашения в канал / группу в ЛС ───────────────────────────
+
+Map<String, dynamic>? _dmInviteMap(ChatMessage msg) {
+  final raw = msg.invitePayloadJson;
+  if (raw != null && raw.isNotEmpty) {
+    try {
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      final k = m['kind'] as String?;
+      if (k == 'channel' || k == 'group') return m;
+    } catch (_) {}
+  }
+  if (msg.voicePath != null ||
+      msg.imagePath != null ||
+      msg.videoPath != null ||
+      msg.filePath != null) {
+    return null;
+  }
+  final chName = InviteDmCodec.channelNameFromInvitePreview(msg.text);
+  if (chName != null) {
+    final matches = ChannelService.instance.pendingChannelInvites.value
+        .where((i) => i.channelName == chName)
+        .toList();
+    if (matches.length == 1) {
+      final i = matches.first;
+      return {
+        'kind': 'channel',
+        'channelId': i.channelId,
+        'channelName': i.channelName,
+        'adminId': i.adminId,
+        'inviterId': i.inviterId,
+        'inviterNick': i.inviterNick,
+        'avatarColor': i.avatarColor,
+        'avatarEmoji': i.avatarEmoji,
+        'description': i.description,
+        'createdAt': i.createdAt,
+      };
+    }
+  }
+  final gName = InviteDmCodec.groupNameFromInvitePreview(msg.text);
+  if (gName != null) {
+    final matches = GroupService.instance.pendingInvites.value
+        .where((i) => i.groupName == gName)
+        .toList();
+    if (matches.length == 1) {
+      final i = matches.first;
+      return {
+        'kind': 'group',
+        'groupId': i.groupId,
+        'groupName': i.groupName,
+        'inviterId': i.inviterId,
+        'inviterNick': i.inviterNick,
+        'creatorId': i.creatorId,
+        'memberIds': i.memberIds,
+        'avatarColor': i.avatarColor,
+        'avatarEmoji': i.avatarEmoji,
+        'createdAt': i.createdAt,
+      };
+    }
+  }
+  return null;
+}
+
+class _DmInviteBubbleActions extends StatelessWidget {
+  final Map<String, dynamic> data;
+  final bool isOut;
+  final ColorScheme cs;
+
+  const _DmInviteBubbleActions({
+    required this.data,
+    required this.isOut,
+    required this.cs,
+  });
+
+  Future<void> _openChannel(BuildContext context) async {
+    final adminId = data['adminId'] as String?;
+    final channelId = data['channelId'] as String?;
+    final name = data['channelName'] as String? ?? '';
+    if (adminId == null || channelId == null) return;
+    final ch = Channel(
+      id: channelId,
+      name: name,
+      adminId: adminId,
+      subscriberIds: [adminId],
+      avatarColor: data['avatarColor'] as int? ?? 0xFF42A5F5,
+      avatarEmoji: data['avatarEmoji'] as String? ?? '📢',
+      description: data['description'] as String?,
+      createdAt: data['createdAt'] as int? ??
+          DateTime.now().millisecondsSinceEpoch,
+    );
+    await ChannelService.instance.saveChannelFromBroadcast(ch);
+    if (!context.mounted) return;
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => ChannelViewScreen(channel: ch),
+      ),
+    );
+  }
+
+  Future<void> _subscribeChannel(BuildContext context) async {
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) return;
+    final channelId = data['channelId'] as String?;
+    final name = data['channelName'] as String? ?? '';
+    final adminId = data['adminId'] as String?;
+    if (channelId == null || adminId == null) return;
+    final existing = await ChannelService.instance.getChannel(channelId);
+    if (existing != null &&
+        (existing.subscriberIds.contains(myId) || existing.adminId == myId)) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Вы уже подписаны на этот канал')),
+        );
+      }
+      return;
+    }
+    final channel = Channel(
+      id: channelId,
+      name: name,
+      adminId: adminId,
+      subscriberIds: [adminId, myId],
+      avatarColor: data['avatarColor'] as int? ?? 0xFF42A5F5,
+      avatarEmoji: data['avatarEmoji'] as String? ?? '📢',
+      description: data['description'] as String?,
+      createdAt: data['createdAt'] as int? ??
+          DateTime.now().millisecondsSinceEpoch,
+    );
+    await ChannelService.instance.saveChannelFromBroadcast(channel);
+    await ChannelService.instance.subscribe(channelId, myId);
+    ChannelService.instance.removeChannelInvite(channelId);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Вы подписались на канал')),
+      );
+    }
+  }
+
+  Future<void> _joinGroup(BuildContext context) async {
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) return;
+    final groupId = data['groupId'] as String?;
+    final name = data['groupName'] as String? ?? '';
+    final creatorId = data['creatorId'] as String?;
+    final rawMembers = data['memberIds'];
+    if (groupId == null || creatorId == null || rawMembers is! List) return;
+    final memberIds = rawMembers.cast<String>();
+    final myProfile = ProfileService.instance.profile;
+    final group = Group(
+      id: groupId,
+      name: name,
+      creatorId: creatorId,
+      memberIds: [...memberIds, myId],
+      avatarColor: data['avatarColor'] as int? ?? 0xFF5C6BC0,
+      avatarEmoji: data['avatarEmoji'] as String? ?? '👥',
+      createdAt: data['createdAt'] as int? ??
+          DateTime.now().millisecondsSinceEpoch,
+    );
+    await GroupService.instance.saveGroupFromInvite(group);
+    GroupService.instance.removeInvite(groupId);
+    await GossipRouter.instance.sendGroupAccept(
+      groupId: groupId,
+      accepterId: myId,
+      accepterNick: myProfile?.nickname ?? '',
+    );
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Вы в группе')),
+    );
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => GroupChatScreen(group: group),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final kind = data['kind'] as String?;
+    if (kind == 'channel') {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OutlinedButton(
+            onPressed: () => unawaited(_openChannel(context)),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: isOut ? cs.onPrimary : cs.primary,
+              side: BorderSide(
+                color: isOut
+                    ? cs.onPrimary.withValues(alpha: 0.5)
+                    : cs.primary.withValues(alpha: 0.5),
+              ),
+            ),
+            child: const Text('Открыть канал'),
+          ),
+          const SizedBox(height: 6),
+          ListenableBuilder(
+            listenable: ChannelService.instance.version,
+            builder: (context, _) {
+              final myId = CryptoService.instance.publicKeyHex;
+              final channelId = data['channelId'] as String? ?? '';
+              return FutureBuilder<Channel?>(
+                key: ValueKey(
+                    '${ChannelService.instance.version.value}_$channelId'),
+                future: ChannelService.instance.getChannel(channelId),
+                builder: (context, snap) {
+                  final ch = snap.data;
+                  final subscribed = myId.isNotEmpty &&
+                      ch != null &&
+                      (ch.subscriberIds.contains(myId) || ch.adminId == myId);
+                  return FilledButton(
+                    onPressed: subscribed || myId.isEmpty
+                        ? null
+                        : () => unawaited(_subscribeChannel(context)),
+                    child: Text(subscribed ? 'Вы подписаны' : 'Подписаться'),
+                  );
+                },
+              );
+            },
+          ),
+        ],
+      );
+    }
+    if (kind == 'group') {
+      return SizedBox(
+        width: double.infinity,
+        child: FilledButton(
+          onPressed: () => unawaited(_joinGroup(context)),
+          child: const Text('Стать участником'),
+        ),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+}
+
 // ── Пузырь сообщения ─────────────────────────────────────────────
 
 class _MessageBubble extends StatelessWidget {
@@ -2569,17 +4024,20 @@ class _MessageBubble extends StatelessWidget {
   final Function(String)? onDownloadImage;
   final Future<void> Function(ChatMessage msg, String newEncoded)?
       onCollabPersist;
-  final void Function(String authorKey, String? nickHint)?
-      onForwardedAuthorTap;
+  final void Function(ChatMessage msg)? onForwardContextTap;
   final void Function(ChatMessage msg)? onRequestMissingMedia;
+  final List<ChatMessage>? playbackThread;
+  final int? playbackIndex;
 
   const _MessageBubble({
     required this.msg,
     this.replyPreviewText,
     this.onDownloadImage,
     this.onCollabPersist,
-    this.onForwardedAuthorTap,
+    this.onForwardContextTap,
     this.onRequestMissingMedia,
+    this.playbackThread,
+    this.playbackIndex,
   });
 
   @override
@@ -2587,6 +4045,7 @@ class _MessageBubble extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final isOut = msg.isOutgoing;
     final missing = dmMessageMissingLocalMedia(msg);
+    final inviteMap = _dmInviteMap(msg);
 
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0.0, end: 1.0),
@@ -2615,16 +4074,14 @@ class _MessageBubble extends StatelessWidget {
           crossAxisAlignment:
               isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
-            if (msg.forwardFromId != null &&
-                onForwardedAuthorTap != null) ...[
+            if ((msg.forwardFromId != null ||
+                    msg.forwardFromChannelId != null) &&
+                onForwardContextTap != null) ...[
               Align(
                 alignment:
                     isOut ? Alignment.centerRight : Alignment.centerLeft,
                 child: InkWell(
-                  onTap: () => onForwardedAuthorTap!(
-                    msg.forwardFromId!,
-                    msg.forwardFromNick,
-                  ),
+                  onTap: () => onForwardContextTap!(msg),
                   borderRadius: BorderRadius.circular(8),
                   child: Padding(
                     padding:
@@ -2642,7 +4099,9 @@ class _MessageBubble extends StatelessWidget {
                           child: Text(
                             msg.forwardFromNick?.isNotEmpty == true
                                 ? msg.forwardFromNick!
-                                : '${msg.forwardFromId!.substring(0, 8)}…',
+                                : (msg.forwardFromChannelId != null
+                                    ? 'Канал'
+                                    : '${msg.forwardFromId!.substring(0, 8)}…'),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -2678,50 +4137,78 @@ class _MessageBubble extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: _VoiceMessageBubble(
-                    voicePath: msg.voicePath!, isOut: isOut),
+                  voicePath: msg.voicePath!,
+                  isOut: isOut,
+                  onPlayWithQueue: playbackThread != null &&
+                          playbackIndex != null
+                      ? () => unawaited(VoiceService.instance.playQueue(
+                            _dmPlaybackQueueFrom(
+                                playbackThread!, playbackIndex!),
+                          ))
+                      : null,
+                ),
               ),
             if (msg.videoPath != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: _VideoMessageBubble(
-                    videoPath: msg.videoPath!, isOut: isOut),
+                  videoPath: msg.videoPath!,
+                  isOut: isOut,
+                  onPlaySquareWithQueue:
+                      playbackThread != null &&
+                              playbackIndex != null &&
+                              _dmVideoPathIsSquare(msg.videoPath!)
+                          ? () => unawaited(VoiceService.instance.playQueue(
+                                _dmPlaybackQueueFrom(
+                                    playbackThread!, playbackIndex!),
+                              ))
+                          : null,
+                ),
               ),
             if (msg.imagePath != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
-                child: _UploadProgressOverlay(
-                  msgId: msg.id,
-                  child: GestureDetector(
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => _FullScreenImageViewer(
-                          imagePath: msg.imagePath!),
+                child: Builder(
+                  builder: (context) {
+                    final isSticker =
+                        p.basename(msg.imagePath!).startsWith('stk_');
+                    return _UploadProgressOverlay(
+                      msgId: msg.id,
+                      child: GestureDetector(
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => _FullScreenImageViewer(
+                                imagePath: msg.imagePath!),
+                          ),
+                        ),
+                        child: Stack(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(
+                                  isSticker ? 10 : 12),
+                              child: Image.file(
+                                File(msg.imagePath!),
+                                width: isSticker ? 132 : 220,
+                                height: isSticker ? 132 : null,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                            Positioned(
+                              top: 8,
+                              right: 8,
+                              child: IconButton(
+                                icon: const Icon(Icons.download, color: Colors.white),
+                                onPressed: () => onDownloadImage?.call(msg.imagePath!),
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                    child: Stack(
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.file(
-                            File(msg.imagePath!),
-                            width: 220,
-                            fit: BoxFit.cover,
-                          ),
-                        ),
-                        Positioned(
-                          top: 8,
-                          right: 8,
-                          child: IconButton(
-                            icon: const Icon(Icons.download, color: Colors.white),
-                            onPressed: () => onDownloadImage?.call(msg.imagePath!),
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                    );
+                  },
                 ),
               ),
             if (msg.filePath != null)
@@ -2735,6 +4222,13 @@ class _MessageBubble extends StatelessWidget {
                     fileName: msg.fileName ?? 'Файл',
                     fileSize: msg.fileSize,
                     isOut: isOut,
+                    onAudioQueueFromHere: playbackThread != null &&
+                            playbackIndex != null
+                        ? () => unawaited(VoiceService.instance.playQueue(
+                              _dmPlaybackQueueFrom(
+                                  playbackThread!, playbackIndex!),
+                            ))
+                        : null,
                   ),
                 ),
               ),
@@ -2791,6 +4285,27 @@ class _MessageBubble extends StatelessWidget {
                 cs: cs,
                 isOutgoing: isOut,
               )
+            else if (inviteMap != null)
+              Column(
+                crossAxisAlignment: isOut
+                    ? CrossAxisAlignment.end
+                    : CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    msg.text,
+                    style: TextStyle(
+                      color: isOut ? cs.onPrimary : cs.onSurface,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _DmInviteBubbleActions(
+                    data: inviteMap,
+                    isOut: isOut,
+                    cs: cs,
+                  ),
+                ],
+              )
             else if (msg.text.isNotEmpty &&
                 msg.voicePath == null &&
                 !(missing && isSyntheticMediaCaption(msg.text)))
@@ -2806,6 +4321,7 @@ class _MessageBubble extends StatelessWidget {
                       contacts,
                       ProfileService.instance.profile,
                     ),
+                    onMentionTap: (hex) => openDmFromMentionKey(context, hex),
                   );
                 },
               ),
@@ -3050,39 +4566,54 @@ class _InputBar extends StatefulWidget {
   final TextEditingController controller;
   final bool isSending;
   final bool isRecording;
+  final bool isHoldVideoStarting;
   final ValueNotifier<double> recordingSecondsNotifier;
   final int maxLength;
+  final String? hintText;
+  /// Чат с ИИ: только текст (без медиа и вложений).
+  final bool aiTextOnlyComposer;
   final bool locationActive;
   final VoidCallback onSend;
   final VoidCallback? onLongPressSend;
   final VoidCallback? onPickTodo;
   final VoidCallback? onPickCalendar;
-  final VoidCallback onPickImage;
-  final VoidCallback onPickVideoGallery;
-  final VoidCallback onPickVideo;
+  final VoidCallback onOpenMediaGallery;
+  final VoidCallback onPickSquareVideo;
   final VoidCallback onPickFile;
-  final VoidCallback onMicDown;
-  final VoidCallback onMicUp;
+  final VoidCallback onVoiceHoldStart;
+  final Future<void> Function() onVideoHoldStart;
+  final Future<void> Function() onHoldReleaseSend;
+  final Future<void> Function() onHoldCancelDiscard;
   final VoidCallback onLocation;
+  final ValueListenable<bool> holdVideoPausedListenable;
+  final void Function(bool locked) onHoldRecordingLockChanged;
+  final Future<void> Function() onHoldVideoLockedPauseToggle;
 
   const _InputBar({
     required this.controller,
     required this.isSending,
     required this.isRecording,
+    required this.isHoldVideoStarting,
     required this.recordingSecondsNotifier,
     required this.maxLength,
+    this.hintText,
+    this.aiTextOnlyComposer = false,
     required this.locationActive,
     required this.onSend,
     this.onLongPressSend,
     this.onPickTodo,
     this.onPickCalendar,
-    required this.onPickImage,
-    required this.onPickVideoGallery,
-    required this.onPickVideo,
+    required this.onOpenMediaGallery,
+    required this.onPickSquareVideo,
     required this.onPickFile,
-    required this.onMicDown,
-    required this.onMicUp,
+    required this.onVoiceHoldStart,
+    required this.onVideoHoldStart,
+    required this.onHoldReleaseSend,
+    required this.onHoldCancelDiscard,
     required this.onLocation,
+    required this.holdVideoPausedListenable,
+    required this.onHoldRecordingLockChanged,
+    required this.onHoldVideoLockedPauseToggle,
   });
 
   @override
@@ -3095,9 +4626,14 @@ class _InputBarState extends State<_InputBar> {
   /// Панель B/I/S… не перекрывает поле — открывается кнопкой при выделении.
   bool _showFormatStrip = false;
 
+  void _onAppSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
+    AppSettings.instance.addListener(_onAppSettingsChanged);
     widget.controller.addListener(() {
       if (mounted) {
         setState(() {
@@ -3113,6 +4649,7 @@ class _InputBarState extends State<_InputBar> {
 
   @override
   void dispose() {
+    AppSettings.instance.removeListener(_onAppSettingsChanged);
     _focusNode.dispose();
     super.dispose();
   }
@@ -3180,83 +4717,91 @@ class _InputBarState extends State<_InputBar> {
                   ? 'Скрыть формат'
                   : 'Формат выделенного текста',
             ),
-          PopupMenuButton<String>(
-            onSelected: (value) {
-              if (widget.isSending) return;
-              switch (value) {
-                case 'photo': widget.onPickImage(); break;
-                case 'video_gallery': widget.onPickVideoGallery(); break;
-                case 'file': widget.onPickFile(); break;
-                case 'location': widget.onLocation(); break;
-                case 'todo': widget.onPickTodo?.call(); break;
-                case 'cal': widget.onPickCalendar?.call(); break;
-              }
-            },
-            icon: AnimatedRotation(
-              turns: widget.locationActive ? 0.125 : 0,
-              duration: const Duration(milliseconds: 200),
-              child: Icon(Icons.add_rounded,
-                color: widget.locationActive ? cs.primary : cs.onSurfaceVariant,
-                size: 26,
+          if (!widget.aiTextOnlyComposer) ...[
+            PopupMenuButton<String>(
+              onSelected: (value) {
+                if (widget.isSending) return;
+                switch (value) {
+                  case 'square_video':
+                    widget.onPickSquareVideo();
+                    break;
+                  case 'file': widget.onPickFile(); break;
+                  case 'location': widget.onLocation(); break;
+                  case 'todo': widget.onPickTodo?.call(); break;
+                  case 'cal': widget.onPickCalendar?.call(); break;
+                }
+              },
+              icon: AnimatedRotation(
+                turns: widget.locationActive ? 0.125 : 0,
+                duration: const Duration(milliseconds: 200),
+                child: Icon(Icons.add_rounded,
+                  color: widget.locationActive ? cs.primary : cs.onSurfaceVariant,
+                  size: 26,
+                ),
               ),
-            ),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            position: PopupMenuPosition.over,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'photo',
-                child: Row(children: [
-                  Icon(Icons.photo_library_outlined, size: 20),
-                  SizedBox(width: 12),
-                  Text('Фото'),
-                ]),
-              ),
-              const PopupMenuItem(value: 'video_gallery',
-                child: Row(children: [
-                  Icon(Icons.video_library_outlined, size: 20),
-                  SizedBox(width: 12),
-                  Text('Видео'),
-                ]),
-              ),
-              const PopupMenuItem(value: 'file',
-                child: Row(children: [
-                  Icon(Icons.attach_file_outlined, size: 20),
-                  SizedBox(width: 12),
-                  Text('Файл'),
-                ]),
-              ),
-              PopupMenuItem(value: 'location',
-                child: Row(children: [
-                  Icon(widget.locationActive ? Icons.location_on : Icons.location_on_outlined,
-                    size: 20,
-                    color: widget.locationActive ? cs.primary : null,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              position: PopupMenuPosition.over,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                  value: 'square_video',
+                  child: Row(children: [
+                    Icon(Icons.videocam_rounded, size: 20),
+                    SizedBox(width: 12),
+                    Text('Видеосообщение'),
+                  ]),
+                ),
+                const PopupMenuItem(value: 'file',
+                  child: Row(children: [
+                    Icon(Icons.attach_file_outlined, size: 20),
+                    SizedBox(width: 12),
+                    Text('Файл'),
+                  ]),
+                ),
+                PopupMenuItem(value: 'location',
+                  child: Row(children: [
+                    Icon(widget.locationActive ? Icons.location_on : Icons.location_on_outlined,
+                      size: 20,
+                      color: widget.locationActive ? cs.primary : null,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(widget.locationActive ? 'Убрать геометку' : 'Геометка'),
+                  ]),
+                ),
+                if (widget.onPickTodo != null)
+                  const PopupMenuItem(
+                    value: 'todo',
+                    child: Row(children: [
+                      Icon(Icons.checklist_rtl, size: 20),
+                      SizedBox(width: 12),
+                      Text('Список дел'),
+                    ]),
                   ),
-                  const SizedBox(width: 12),
-                  Text(widget.locationActive ? 'Убрать геометку' : 'Геометка'),
-                ]),
-              ),
-              if (widget.onPickTodo != null)
-                const PopupMenuItem(
-                  value: 'todo',
-                  child: Row(children: [
-                    Icon(Icons.checklist_rtl, size: 20),
-                    SizedBox(width: 12),
-                    Text('Список дел'),
-                  ]),
-                ),
-              if (widget.onPickCalendar != null)
-                const PopupMenuItem(
-                  value: 'cal',
-                  child: Row(children: [
-                    Icon(Icons.event_available_outlined, size: 20),
-                    SizedBox(width: 12),
-                    Text('Событие'),
-                  ]),
-                ),
-            ],
-          ),
-          const SizedBox(width: 4),
+                if (widget.onPickCalendar != null)
+                  const PopupMenuItem(
+                    value: 'cal',
+                    child: Row(children: [
+                      Icon(Icons.event_available_outlined, size: 20),
+                      SizedBox(width: 12),
+                      Text('Событие'),
+                    ]),
+                  ),
+              ],
+            ),
+            IconButton(
+              onPressed: widget.isSending ? null : widget.onOpenMediaGallery,
+              icon: Icon(Icons.photo_library_outlined,
+                  color: widget.isSending
+                      ? cs.onSurface.withValues(alpha: 0.3)
+                      : cs.onSurfaceVariant,
+                  size: 24),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              tooltip: 'Отправить из галереи',
+            ),
+            const SizedBox(width: 2),
+          ],
           Expanded(
             child: Container(
               decoration: BoxDecoration(
@@ -3290,7 +4835,7 @@ class _InputBarState extends State<_InputBar> {
                     decoration: InputDecoration(
                       hintText: widget.isRecording
                           ? 'Запись... ${s}s.$t'
-                          : 'Сообщение...',
+                          : (widget.hintText ?? 'Сообщение...'),
                       hintStyle: TextStyle(color: cs.onSurfaceVariant.withValues(alpha: 0.6)),
                       border: InputBorder.none,
                       contentPadding:
@@ -3311,32 +4856,22 @@ class _InputBarState extends State<_InputBar> {
             ),
           ),
           const SizedBox(width: 8),
-          GestureDetector(
-            onTap: widget.isRecording ? widget.onMicUp : widget.onMicDown,
-            onLongPressStart: (_) {
-              if (!widget.isRecording) widget.onMicDown();
-            },
-            onLongPressEnd: (_) {
-              if (widget.isRecording) widget.onMicUp();
-            },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: widget.isRecording
-                    ? Colors.redAccent
-                    : cs.primary,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                widget.isRecording ? Icons.stop_rounded : Icons.mic_rounded,
-                color: cs.onPrimary,
-                size: 20,
-              ),
+          if (!widget.aiTextOnlyComposer) ...[
+            TelegramMediaRecordButton(
+              isSending: widget.isSending,
+              isRecording: widget.isRecording,
+              isHoldVideoStarting: widget.isHoldVideoStarting,
+              colorScheme: cs,
+              onVoiceHoldStart: widget.onVoiceHoldStart,
+              onVideoHoldStart: widget.onVideoHoldStart,
+              onHoldReleaseSend: widget.onHoldReleaseSend,
+              onHoldCancelDiscard: widget.onHoldCancelDiscard,
+              onHoldLockChanged: widget.onHoldRecordingLockChanged,
+              onLockedVideoPauseToggle: widget.onHoldVideoLockedPauseToggle,
+              lockedVideoPausedListenable: widget.holdVideoPausedListenable,
             ),
-          ),
-          const SizedBox(width: 8),
+            const SizedBox(width: 8),
+          ],
           if (hasText || widget.isSending)
             GestureDetector(
               onTap: widget.isSending || over || widget.isRecording
@@ -3367,22 +4902,6 @@ class _InputBarState extends State<_InputBar> {
                     : Icon(Icons.send_rounded,
                         color: cs.onPrimary, size: 20),
               ),
-            )
-          else
-            GestureDetector(
-              onTap: widget.isSending ? null : widget.onPickVideo,
-              child: Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: widget.isSending
-                      ? cs.onSurface.withValues(alpha: 0.3)
-                      : cs.primary,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(Icons.videocam_rounded,
-                    color: cs.onPrimary, size: 22),
-              ),
             ),
           ]),
         ],
@@ -3400,6 +4919,7 @@ class _FileMessageBubble extends StatelessWidget {
   final String fileName;
   final int? fileSize;
   final bool isOut;
+  final VoidCallback? onAudioQueueFromHere;
 
   const _FileMessageBubble({
     required this.msgId,
@@ -3407,6 +4927,7 @@ class _FileMessageBubble extends StatelessWidget {
     required this.fileName,
     required this.fileSize,
     required this.isOut,
+    this.onAudioQueueFromHere,
   });
 
   static const _audioExts = {
@@ -3438,8 +4959,11 @@ class _FileMessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     if (_isAudio && File(filePath).existsSync()) {
       return _AudioFileBubble(
-        filePath: filePath, fileName: fileName,
-        fileSize: fileSize, isOut: isOut,
+        filePath: filePath,
+        fileName: fileName,
+        fileSize: fileSize,
+        isOut: isOut,
+        onPlayWithQueue: onAudioQueueFromHere,
       );
     }
     final cs = Theme.of(context).colorScheme;
@@ -3501,12 +5025,14 @@ class _AudioFileBubble extends StatelessWidget {
   final String fileName;
   final int? fileSize;
   final bool isOut;
+  final VoidCallback? onPlayWithQueue;
 
   const _AudioFileBubble({
     required this.filePath,
     required this.fileName,
     required this.fileSize,
     required this.isOut,
+    this.onPlayWithQueue,
   });
 
   String _fmtSize(int? bytes) {
@@ -3544,9 +5070,15 @@ class _AudioFileBubble extends StatelessWidget {
                   onPressed: () async {
                     try {
                       if (isPlaying) {
-                        await VoiceService.instance.stop();
+                        await VoiceService.instance.stopPlayback();
+                      } else if (onPlayWithQueue != null) {
+                        onPlayWithQueue!();
                       } else {
-                        await VoiceService.instance.play(filePath);
+                        await VoiceService.instance.play(
+                          filePath,
+                          title: fileName,
+                          kind: PlaybackMediaKind.audioFile,
+                        );
                       }
                     } catch (e) {
                       debugPrint('[Audio] Playback error: $e');
@@ -3569,7 +5101,11 @@ class _AudioFileBubble extends StatelessWidget {
                     child: CustomPaint(
                       painter: _WaveformPainter(
                         seed: filePath.hashCode,
-                        progress: isPlaying ? progress : 0,
+                        progress: isPlaying
+                            ? (progress.isFinite
+                                ? progress.clamp(0.0, 1.0)
+                                : 0.0)
+                            : 0,
                         activeColor: activeColor,
                         inactiveColor: inactiveColor,
                       ),
@@ -3605,7 +5141,13 @@ class _AudioFileBubble extends StatelessWidget {
 class _VoiceMessageBubble extends StatelessWidget {
   final String voicePath;
   final bool isOut;
-  const _VoiceMessageBubble({required this.voicePath, required this.isOut});
+  final VoidCallback? onPlayWithQueue;
+
+  const _VoiceMessageBubble({
+    required this.voicePath,
+    required this.isOut,
+    this.onPlayWithQueue,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -3628,7 +5170,9 @@ class _VoiceMessageBubble extends StatelessWidget {
               onPressed: () async {
                 try {
                   if (isPlaying) {
-                    await VoiceService.instance.stop();
+                    await VoiceService.instance.stopPlayback();
+                  } else if (onPlayWithQueue != null) {
+                    onPlayWithQueue!();
                   } else {
                     await VoiceService.instance.play(voicePath);
                   }
@@ -3653,7 +5197,11 @@ class _VoiceMessageBubble extends StatelessWidget {
                 child: CustomPaint(
                   painter: _WaveformPainter(
                     seed: voicePath.hashCode,
-                    progress: isPlaying ? progress : 0,
+                    progress: isPlaying
+                        ? (progress.isFinite
+                            ? progress.clamp(0.0, 1.0)
+                            : 0.0)
+                        : 0,
                     activeColor: activeColor,
                     inactiveColor: inactiveColor,
                   ),
@@ -3686,7 +5234,8 @@ class _WaveformPainter extends CustomPainter {
     final spacing = size.width / barCount;
     final barWidth = spacing * 0.55;
     final rng = math.Random(seed);
-    final activeBar = (progress * barCount).floor();
+    final p = progress.isFinite ? progress.clamp(0.0, 1.0) : 0.0;
+    final activeBar = (p * barCount).floor().clamp(0, barCount);
     final activePaint = Paint()..color = activeColor;
     final inactivePaint = Paint()..color = inactiveColor;
 
@@ -3715,8 +5264,13 @@ class _WaveformPainter extends CustomPainter {
 class _VideoMessageBubble extends StatefulWidget {
   final String videoPath;
   final bool isOut;
+  final VoidCallback? onPlaySquareWithQueue;
 
-  const _VideoMessageBubble({required this.videoPath, required this.isOut});
+  const _VideoMessageBubble({
+    required this.videoPath,
+    required this.isOut,
+    this.onPlaySquareWithQueue,
+  });
 
   @override
   State<_VideoMessageBubble> createState() => _VideoMessageBubbleState();
@@ -3726,12 +5280,33 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
   VideoPlayerController? _ctrl;
   bool _initialized = false;
   bool _playing = false;
+  int _embedPauseGen = 0;
 
-  bool get _isSquare => widget.videoPath.endsWith('_sq.mp4');
+  bool get _isSquare =>
+      _ChatScreenState._videoPathIsSquare(widget.videoPath);
+
+  void _onEmbedPauseBus() {
+    if (!mounted) return;
+    final g = EmbeddedVideoPauseBus.instance.generation.value;
+    if (g != _embedPauseGen) {
+      _embedPauseGen = g;
+      _pauseFromGlobalBus();
+    }
+  }
+
+  void _pauseFromGlobalBus() {
+    if (_ctrl == null) return;
+    try {
+      _ctrl!.pause();
+    } catch (_) {}
+    if (mounted) setState(() => _playing = false);
+  }
 
   @override
   void initState() {
     super.initState();
+    _embedPauseGen = EmbeddedVideoPauseBus.instance.generation.value;
+    EmbeddedVideoPauseBus.instance.generation.addListener(_onEmbedPauseBus);
     if (File(widget.videoPath).existsSync()) {
       _initPlayer();
     }
@@ -3763,20 +5338,29 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
 
   @override
   void dispose() {
+    EmbeddedVideoPauseBus.instance.generation.removeListener(_onEmbedPauseBus);
     _ctrl?.dispose();
     super.dispose();
   }
 
   void _togglePlay() {
     if (_ctrl == null || !_initialized) return;
-    setState(() {
-      if (_playing) {
-        _ctrl!.pause();
-        _playing = false;
-      } else {
-        _ctrl!.play();
-        _playing = true;
-      }
+    if (_playing) {
+      _ctrl!.pause();
+      setState(() => _playing = false);
+      return;
+    }
+    if (widget.onPlaySquareWithQueue != null) {
+      widget.onPlaySquareWithQueue!();
+      return;
+    }
+    EmbeddedVideoPauseBus.instance.bump();
+    unawaited(VoiceService.instance.stopPlayback());
+    _embedPauseGen = EmbeddedVideoPauseBus.instance.generation.value;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _ctrl == null) return;
+      _ctrl!.play();
+      setState(() => _playing = true);
     });
   }
 
@@ -3847,10 +5431,11 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
 
     return GestureDetector(
       onTap: exists
-          ? () => Navigator.push(
-                context,
+          ? () => Navigator.of(context, rootNavigator: true).push(
                 MaterialPageRoute(
-                  builder: (_) => _VideoPlayerScreen(path: widget.videoPath),
+                  fullscreenDialog: true,
+                  builder: (_) =>
+                      DmVideoFullscreenPage(path: widget.videoPath),
                 ),
               )
           : null,
@@ -3873,10 +5458,10 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
                   children: [
                     // Dark backdrop
                     Container(color: const Color(0xFF111111)),
-                    // First-frame preview via VideoPlayer
+                    // Превью без обрезки до квадрата — сохраняем пропорции ролика.
                     if (_initialized && _ctrl != null)
                       FittedBox(
-                        fit: BoxFit.cover,
+                        fit: BoxFit.contain,
                         child: SizedBox(
                           width: _ctrl!.value.size.width,
                           height: _ctrl!.value.size.height,
@@ -3905,78 +5490,6 @@ class _VideoMessageBubbleState extends State<_VideoMessageBubble> {
                   ],
                 ),
         ),
-      ),
-    );
-  }
-}
-
-// ── Встроенный видеоплеер ─────────────────────────────────────────
-
-class _VideoPlayerScreen extends StatefulWidget {
-  final String path;
-  const _VideoPlayerScreen({required this.path});
-
-  @override
-  State<_VideoPlayerScreen> createState() => _VideoPlayerScreenState();
-}
-
-class _VideoPlayerScreenState extends State<_VideoPlayerScreen> {
-  late VideoPlayerController _ctrl;
-  bool _initialized = false;
-  bool _error = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = VideoPlayerController.file(File(widget.path))
-      ..initialize().then((_) {
-        if (mounted) setState(() => _initialized = true);
-        _ctrl.play();
-      }).catchError((e) {
-        debugPrint('[VideoPlayer] init error: $e');
-        if (mounted) setState(() => _error = true);
-      });
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        iconTheme: const IconThemeData(color: Colors.white),
-        actions: [
-          if (_initialized)
-            ValueListenableBuilder<VideoPlayerValue>(
-              valueListenable: _ctrl,
-              builder: (_, val, __) => IconButton(
-                icon: Icon(
-                  val.isPlaying ? Icons.pause : Icons.play_arrow,
-                  color: Colors.white,
-                ),
-                onPressed: () {
-                  val.isPlaying ? _ctrl.pause() : _ctrl.play();
-                },
-              ),
-            ),
-        ],
-      ),
-      body: Center(
-        child: _error
-            ? const Text('Ошибка воспроизведения',
-                style: TextStyle(color: Colors.white))
-            : _initialized
-                ? AspectRatio(
-                    aspectRatio: _ctrl.value.aspectRatio,
-                    child: VideoPlayer(_ctrl),
-                  )
-                : const CircularProgressIndicator(color: Color(0xFF1DB954)),
       ),
     );
   }

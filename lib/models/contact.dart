@@ -1,4 +1,5 @@
 import '../services/image_service.dart';
+import 'user_profile.dart';
 
 class Contact {
   final String publicKeyHex;
@@ -14,6 +15,8 @@ class Contact {
   final String? bannerImagePath;     // баннер профиля контакта
   /// Локальный путь к треку «музыка в профиле» (после приёма с ретранслятора/BLE).
   final String? profileMusicPath;
+  /// Эмодзи-статус из профиля контакта (gossip `st`).
+  final String statusEmoji;
 
   const Contact({
     required this.publicKeyHex,
@@ -28,6 +31,7 @@ class Contact {
     this.tags = const [],
     this.bannerImagePath,
     this.profileMusicPath,
+    this.statusEmoji = '',
   });
 
   String get initials {
@@ -44,24 +48,34 @@ class Contact {
     String? nickname,
     String? username,
     String? avatarImagePath,
+    bool setAvatarImagePath = false,
     String? x25519Key,
     List<String>? tags,
     String? bannerImagePath,
+    bool setBannerImagePath = false,
     String? profileMusicPath,
+    bool setProfileMusicPath = false,
+    String? statusEmoji,
+    int? avatarColor,
+    String? avatarEmoji,
   }) =>
       Contact(
         publicKeyHex: publicKeyHex,
         nickname: nickname ?? this.nickname,
         username: username ?? this.username,
-        avatarColor: avatarColor,
-        avatarEmoji: avatarEmoji,
-        avatarImagePath: avatarImagePath ?? this.avatarImagePath,
+        avatarColor: avatarColor ?? this.avatarColor,
+        avatarEmoji: avatarEmoji ?? this.avatarEmoji,
+        avatarImagePath:
+            setAvatarImagePath ? avatarImagePath : this.avatarImagePath,
         x25519Key: x25519Key ?? this.x25519Key,
         addedAt: addedAt,
         lastSeen: lastSeen ?? this.lastSeen,
         tags: tags ?? this.tags,
-        bannerImagePath: bannerImagePath ?? this.bannerImagePath,
-        profileMusicPath: profileMusicPath ?? this.profileMusicPath,
+        bannerImagePath:
+            setBannerImagePath ? bannerImagePath : this.bannerImagePath,
+        profileMusicPath:
+            setProfileMusicPath ? profileMusicPath : this.profileMusicPath,
+        statusEmoji: statusEmoji ?? this.statusEmoji,
       );
 
   Map<String, dynamic> toMap() => {
@@ -77,6 +91,7 @@ class Contact {
         'tags': tags.isEmpty ? null : tags.join(','),
         'banner_img_path': bannerImagePath,
         'profile_music_path': profileMusicPath,
+        'status_emoji': statusEmoji.isEmpty ? null : statusEmoji,
       };
 
   factory Contact.fromMap(Map<String, dynamic> m) => Contact(
@@ -102,5 +117,7 @@ class Contact {
             m['banner_img_path'] as String?),
         profileMusicPath: ImageService.instance.resolveStoredPath(
             m['profile_music_path'] as String?),
+        statusEmoji: UserProfile.normalizeStatusEmoji(
+            (m['status_emoji'] as String?) ?? ''),
       );
 }

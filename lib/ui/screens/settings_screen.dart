@@ -2,18 +2,17 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 
+import '../../app_version.dart';
 import '../../l10n/app_l10n.dart';
 import '../../models/contact.dart';
-import '../../app_route_observer.dart';
+import '../../models/user_profile.dart';
 import '../../services/app_settings.dart';
 import '../../services/app_icon_service.dart';
 import '../widgets/message_cache_clear_dialog.dart';
@@ -22,15 +21,20 @@ import '../../services/connection_transport.dart';
 import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
+import '../../services/gigachat_service.dart';
 import '../../services/group_service.dart';
 import '../../services/media_upload_queue.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
 import '../../services/story_service.dart';
 import '../screens/onboarding_screen.dart';
+import '../screens/stickers_hub_screen.dart';
 import '../screens/chat_screen.dart';
+import '../widgets/avatar_widget.dart';
 import '../screens/about_screen.dart';
+import '../../main.dart' show sendProfileToAllContacts;
 import '../screens/admin_screen.dart';
+import '../widgets/reactions.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -163,7 +167,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     runSpacing: 8,
                     children: [
                       _AppIconChoiceChip(
-                        label: 'Rlink',
+                        label: AppL10n.t('settings_app_icon_variant_classic'),
                         selected: settings.appIconVariant == 0,
                         onTap: () async {
                           await settings.setAppIconVariant(0);
@@ -179,19 +183,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         },
                       ),
                       _AppIconChoiceChip(
-                        label: 'Mirror',
+                        label: AppL10n.t('settings_app_icon_variant_ai'),
                         selected: settings.appIconVariant == 2,
                         onTap: () async {
                           await settings.setAppIconVariant(2);
                           await AppIconService.setVariant(2);
-                        },
-                      ),
-                      _AppIconChoiceChip(
-                        label: AppL10n.t('settings_app_icon_variant_ai'),
-                        selected: settings.appIconVariant == 3,
-                        onTap: () async {
-                          await settings.setAppIconVariant(3);
-                          await AppIconService.setVariant(3);
                         },
                       ),
                     ],
@@ -370,29 +366,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
             trailing: Text(settings.quickReactionEmoji,
                 style: const TextStyle(fontSize: 22)),
             onTap: () async {
-              final ctrl =
-                  TextEditingController(text: settings.quickReactionEmoji);
               final picked = await showDialog<String>(
                 context: context,
                 builder: (ctx) => AlertDialog(
                   title: Text(AppL10n.t('settings_quick_reaction_title')),
-                  content: TextField(
-                    controller: ctrl,
-                    autofocus: true,
-                    decoration: InputDecoration(
-                      hintText: AppL10n.t('settings_quick_reaction_hint'),
-                      border: const OutlineInputBorder(),
+                  content: SizedBox(
+                    width: 320,
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      alignment: WrapAlignment.center,
+                      children: kReactionEmojis.map((e) {
+                        return InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () => Navigator.pop(ctx, e),
+                          child: Container(
+                            width: 48,
+                            height: 48,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: e == settings.quickReactionEmoji
+                                    ? Theme.of(ctx).colorScheme.primary
+                                    : Theme.of(ctx)
+                                        .colorScheme
+                                        .outlineVariant,
+                                width: e == settings.quickReactionEmoji ? 2 : 1,
+                              ),
+                            ),
+                            child: Text(e, style: const TextStyle(fontSize: 26)),
+                          ),
+                        );
+                      }).toList(),
                     ),
                   ),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.pop(ctx),
                       child: Text(AppL10n.t('cancel')),
-                    ),
-                    FilledButton(
-                      onPressed: () =>
-                          Navigator.pop(ctx, ctrl.text.trim()),
-                      child: Text(AppL10n.t('save')),
                     ),
                   ],
                 ),
@@ -492,6 +504,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ? (v) => settings.setNotifyChannels(v)
                 : null,
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.65),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                    color: cs.outlineVariant.withValues(alpha: 0.45)),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.info_outline_rounded,
+                        size: 20, color: cs.primary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        AppL10n.t('settings_notif_background_warning'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.35,
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
 
           // ── Конфиденциальность ─────────────────────────────────
           _SectionHeader(AppL10n.t('settings_privacy')),
@@ -523,10 +567,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             current: settings.onlineStatusMode,
             onChanged: (mode) => settings.setOnlineStatusMode(mode),
           ),
-
-          // ── Разрешения ─────────────────────────────────────────
-          _SectionHeader(AppL10n.t('settings_section_permissions')),
-          const _PermissionsSection(),
 
           // ── Память / кэш ───────────────────────────────────────
           _SectionHeader(AppL10n.t('settings_section_memory')),
@@ -563,6 +603,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           // ── Профиль ────────────────────────────────────────────
           _SectionHeader(AppL10n.t('settings_profile')),
+          if (profile != null)
+            ListTile(
+              leading: Icon(Icons.emoji_emotions_outlined, color: cs.primary),
+              title: const Text('Эмодзи-статус'),
+              subtitle: Text(
+                profile.statusEmoji.isEmpty
+                    ? 'Рядом с именем в меню; виден контактам в сети'
+                    : profile.statusEmoji,
+                style: TextStyle(
+                  fontSize: profile.statusEmoji.isEmpty ? 12 : 20,
+                  color: profile.statusEmoji.isEmpty
+                      ? cs.onSurfaceVariant
+                      : cs.onSurface,
+                ),
+              ),
+              trailing: profile.statusEmoji.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear),
+                      tooltip: 'Убрать',
+                      onPressed: () => _clearEmojiStatus(context),
+                    )
+                  : null,
+              onTap: () => _pickEmojiStatus(context),
+            ),
+          ListTile(
+            leading: Icon(Icons.auto_awesome_motion_outlined, color: cs.primary),
+            title: const Text('Стикеры и наборы'),
+            subtitle: const Text(
+              'Свои наборы и добавление стикеров из переписки',
+              style: TextStyle(fontSize: 12),
+            ),
+            onTap: () => Navigator.push<void>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const StickersHubScreen(),
+                  ),
+                ),
+          ),
           ListTile(
             leading: const Icon(Icons.key_outlined),
             title: Text(AppL10n.t('settings_public_key')),
@@ -826,16 +904,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onTap: _handleVersionTap,
               child: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 24),
-                child: FutureBuilder<PackageInfo>(
-                  future: PackageInfo.fromPlatform(),
-                  builder: (context, snap) {
-                    final v = snap.data?.version ?? '0.0.5';
-                    return Text(
-                      'Rlink v$v • ${AppL10n.t('footer_ble_mesh')}',
-                      style: TextStyle(
-                          color: Theme.of(context).hintColor, fontSize: 12),
-                    );
-                  },
+                child: Text(
+                  'Rlink v${AppVersion.label} • ${AppL10n.t('footer_ble_mesh')}',
+                  style: TextStyle(
+                      color: Theme.of(context).hintColor, fontSize: 12),
                 ),
               ),
             ),
@@ -994,6 +1066,56 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Future<void> _pickEmojiStatus(BuildContext context) async {
+    final p = ProfileService.instance.profile;
+    if (p == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Эмодзи-статус',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                height: 300,
+                child: SingleChildScrollView(
+                  child: AvatarEmojiPicker(
+                    selected: p.statusEmoji.isNotEmpty
+                        ? p.statusEmoji
+                        : UserProfile.avatarEmojis.first,
+                    onSelected: (e) async {
+                      Navigator.pop(ctx);
+                      await ProfileService.instance.updateProfile(
+                        statusEmoji: UserProfile.normalizeStatusEmoji(e),
+                      );
+                      if (!context.mounted) return;
+                      setState(() {});
+                      await sendProfileToAllContacts();
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _clearEmojiStatus(BuildContext context) async {
+    await ProfileService.instance.updateProfile(statusEmoji: '');
+    if (mounted) setState(() {});
+    await sendProfileToAllContacts();
+  }
+
   void _showSearchById(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -1065,6 +1187,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
     await storage.deleteAll();
+    await GigachatService.instance.clear();
 
     // 4. Force-regenerate identity keys immediately so the new onboarding
     //    session uses fresh keys rather than the old in-memory ones.
@@ -1418,275 +1541,6 @@ class _OnlineStatusSelector extends StatelessWidget {
         const SizedBox(height: 8),
       ],
     );
-  }
-}
-
-// ── Разрешения ────────────────────────────────────────────────────
-
-class _PermissionsSection extends StatefulWidget {
-  const _PermissionsSection();
-
-  @override
-  State<_PermissionsSection> createState() => _PermissionsSectionState();
-}
-
-class _PermissionsSectionState extends State<_PermissionsSection>
-    with WidgetsBindingObserver, RouteAware {
-  final Map<Permission, PermissionStatus> _statuses = {};
-  bool _loading = true;
-  Timer? _pollTimer;
-  PageRoute<dynamic>? _subscribedRoute;
-
-  static List<(Permission, IconData)> get _permissions => [
-    if (Platform.isAndroid) ...[
-      (Permission.bluetoothScan, Icons.bluetooth_searching),
-      (Permission.bluetoothConnect, Icons.bluetooth_connected),
-      (Permission.bluetoothAdvertise, Icons.settings_bluetooth),
-    ],
-    if (Platform.isIOS) (Permission.bluetooth, Icons.bluetooth),
-    (Permission.locationWhenInUse, Icons.location_on_outlined),
-    (Permission.microphone, Icons.mic_outlined),
-    (Permission.camera, Icons.camera_alt_outlined),
-    (Permission.notification, Icons.notifications_outlined),
-    (Permission.photos, Icons.photo_library_outlined),
-    if (Platform.isAndroid)
-      (Permission.nearbyWifiDevices, Icons.wifi),
-  ];
-
-  static String _permissionLabel(Permission p) {
-    switch (p) {
-      case Permission.bluetoothScan:
-        return AppL10n.t('perm_bluetooth_scan');
-      case Permission.bluetoothConnect:
-        return AppL10n.t('perm_bluetooth_connect');
-      case Permission.bluetoothAdvertise:
-        return AppL10n.t('perm_bluetooth_advertise');
-      case Permission.bluetooth:
-        return AppL10n.t('perm_bluetooth');
-      case Permission.locationWhenInUse:
-        return AppL10n.t('perm_location');
-      case Permission.microphone:
-        return AppL10n.t('perm_microphone');
-      case Permission.camera:
-        return AppL10n.t('perm_camera');
-      case Permission.notification:
-        return AppL10n.t('perm_notification');
-      case Permission.photos:
-        return AppL10n.t('perm_photos');
-      case Permission.nearbyWifiDevices:
-        return AppL10n.t('perm_wifi_devices');
-      default:
-        return p.toString();
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _loadStatuses();
-    _pollTimer = Timer.periodic(const Duration(seconds: 12), (_) {
-      if (mounted) _loadStatuses();
-    });
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final route = ModalRoute.of(context);
-    if (route is PageRoute<dynamic> && route != _subscribedRoute) {
-      if (_subscribedRoute != null) {
-        appRouteObserver.unsubscribe(this);
-      }
-      _subscribedRoute = route;
-      appRouteObserver.subscribe(this, route);
-    }
-  }
-
-  @override
-  void dispose() {
-    _pollTimer?.cancel();
-    appRouteObserver.unsubscribe(this);
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didPopNext() => _refreshAfterRouteVisible();
-
-  @override
-  void didPush() => _refreshAfterRouteVisible();
-
-  void _refreshAfterRouteVisible() {
-    if (!mounted) return;
-    _loadStatuses();
-    Future.delayed(const Duration(milliseconds: 450), () {
-      if (mounted) _loadStatuses();
-    });
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // После системных настроек iOS иногда отстаёт кэш permission_handler —
-    // делаем два опроса с задержкой.
-    if (state == AppLifecycleState.resumed && mounted) {
-      Future.delayed(const Duration(milliseconds: 800), () {
-        if (mounted) _loadStatuses();
-      });
-      Future.delayed(const Duration(milliseconds: 2600), () {
-        if (mounted) _loadStatuses();
-      });
-    }
-  }
-
-  Future<void> _loadStatuses() async {
-    final results = <Permission, PermissionStatus>{};
-    for (final (perm, _) in _permissions) {
-      try {
-        // Используем actual текущий статус от ОС (без кеша).
-        results[perm] = await perm.status;
-      } catch (_) {
-        // Некоторые разрешения могут быть недоступны на платформе — пропускаем.
-      }
-    }
-    if (!mounted) return;
-    setState(() {
-      // Полностью заменяем — чтобы устаревшие записи не остались.
-      _statuses
-        ..clear()
-        ..addAll(results);
-      _loading = false;
-    });
-  }
-
-  /// Единая классификация статуса разрешения.
-  /// Возвращает одно из: 'granted', 'limited', 'denied', 'permanent', 'restricted'.
-  String _classify(PermissionStatus s) {
-    // isProvisional (iOS тихие уведомления) считаем как выданное.
-    if (s.isGranted || s.isProvisional) return 'granted';
-    if (s.isLimited) return 'limited';
-    if (s.isRestricted) return 'restricted';
-    if (s.isPermanentlyDenied) return 'permanent';
-    return 'denied';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_loading) {
-      return const Padding(
-        padding: EdgeInsets.all(16),
-        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-      );
-    }
-
-    final cs = Theme.of(context).colorScheme;
-    final items = <Widget>[];
-
-    for (final (perm, icon) in _permissions) {
-      final status = _statuses[perm];
-      if (status == null) continue; // недоступно на этой платформе
-
-      final kind = _classify(status);
-      final allowed = kind == 'granted' || kind == 'limited';
-
-      final String subtitleText;
-      final Color subtitleColor;
-      switch (kind) {
-        case 'granted':
-          subtitleText = AppL10n.t('perm_status_granted');
-          subtitleColor = Colors.green;
-          break;
-        case 'limited':
-          subtitleText = AppL10n.t('perm_status_limited');
-          subtitleColor = Colors.green;
-          break;
-        case 'permanent':
-          subtitleText = AppL10n.t('perm_status_permanent');
-          subtitleColor = Colors.redAccent;
-          break;
-        case 'restricted':
-          subtitleText = AppL10n.t('perm_status_restricted');
-          subtitleColor = Colors.grey;
-          break;
-        default:
-          subtitleText = AppL10n.t('perm_status_denied');
-          subtitleColor = Colors.orange;
-      }
-
-      items.add(ListTile(
-        leading: Icon(icon, color: allowed ? cs.primary : Colors.grey),
-        title: Text(_permissionLabel(perm)),
-        subtitle: Text(
-          subtitleText,
-          style: TextStyle(fontSize: 12, color: subtitleColor),
-        ),
-        trailing: allowed
-            ? const Icon(Icons.check_circle, color: Colors.green, size: 20)
-            : kind == 'restricted'
-                ? const Icon(Icons.block, color: Colors.grey, size: 20)
-                : TextButton(
-                    onPressed: () async {
-                      // На iOS после первого denied повторный request() ничего не делает —
-                      // единственный путь это openAppSettings(). Так же для permanent.
-                      if (kind == 'permanent' ||
-                          (Platform.isIOS && kind == 'denied')) {
-                        await openAppSettings();
-                        return;
-                      }
-                      final result = await perm.request();
-                      if (mounted) {
-                        setState(() => _statuses[perm] = result);
-                        Future.delayed(const Duration(milliseconds: 400), () {
-                          if (mounted) _loadStatuses();
-                        });
-                      }
-                    },
-                    child: Text(
-                      kind == 'permanent'
-                          ? AppL10n.t('perm_open')
-                          : AppL10n.t('perm_grant'),
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-        dense: true,
-      ));
-    }
-
-    return Column(children: [
-      ...items,
-      const SizedBox(height: 8),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Row(children: [
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: _loadStatuses,
-              icon: const Icon(Icons.refresh, size: 18),
-              label: Text(AppL10n.t('perm_refresh_list')),
-              style: OutlinedButton.styleFrom(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: () => openAppSettings(),
-              icon: const Icon(Icons.settings_outlined, size: 18),
-              label: Text(AppL10n.t('perm_os_settings')),
-              style: OutlinedButton.styleFrom(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-            ),
-          ),
-        ]),
-      ),
-      const SizedBox(height: 8),
-    ]);
   }
 }
 

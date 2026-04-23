@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../../main.dart';
+import '../../services/app_settings.dart';
 import '../../services/ble_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
@@ -28,15 +29,21 @@ class _HomeScreenState extends State<HomeScreen> with UpdateAvailableBannerMixin
   bool _isSending = false;
   bool _isScanning = false;
 
+  void _onAppSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
+    AppSettings.instance.addListener(_onAppSettingsChanged);
     registerUpdateBannerListener();
     _msgSub = incomingMessageController.stream.listen(_onIncoming);
   }
 
   @override
   void dispose() {
+    AppSettings.instance.removeListener(_onAppSettingsChanged);
     unregisterUpdateBannerListener();
     _msgSub?.cancel();
     _controller.dispose();
@@ -365,6 +372,7 @@ class _MessageInput extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sendOnEnter = AppSettings.instance.sendOnEnter;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.all(8),
@@ -378,8 +386,13 @@ class _MessageInput extends StatelessWidget {
                 contentPadding:
                     EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               ),
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => onSend(),
+              maxLines: sendOnEnter ? 1 : 4,
+              minLines: 1,
+              textInputAction: sendOnEnter
+                  ? TextInputAction.send
+                  : TextInputAction.newline,
+              onSubmitted:
+                  sendOnEnter ? (_) => onSend() : null,
             ),
           ),
           const SizedBox(width: 8),

@@ -34,7 +34,34 @@
 	<string>Rlink использует геолокацию для меток сообщений</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Rlink использует камеру для записи видеосообщений</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Rlink нужен доступ к фото и видео для отправки из галереи</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Rlink может сохранять полученные медиафайлы в вашу библиотеку</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Rlink использует микрофон для голосовых сообщений</string>
+	<key>GIDClientID</key>
+	<string>180782636430-tv1bfpbg6n9ogce07q9vtt8hq7ngt83t.apps.googleusercontent.com</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.rendergames.rlink.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>rlink</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.180782636430-tv1bfpbg6n9ogce07q9vtt8hq7ngt83t</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

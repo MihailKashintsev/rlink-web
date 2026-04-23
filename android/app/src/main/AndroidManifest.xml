@@ -34,6 +34,11 @@
 
     <!-- Скачивание файлов -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Фон: relay + BLE после сворачивания / снятия с недавних -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
@@ -71,7 +76,29 @@
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="rlink" android:host="channel" />
+            </intent-filter>
+            <!-- Публичные ссылки https://rendergames.online/rlink/... (после Digital Asset Links — открытие в приложении). -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="rendergames.online"
+                    android:pathPrefix="/rlink" />
+            </intent-filter>
         </activity>
+
+        <service
+            android:name=".RlinkForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|dataSync" />
 
         <!-- Смена иконки на рабочем столе (как в Telegram): только один alias активен. -->
         <activity-alias
@@ -90,17 +117,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_mono"
-            android:targetActivity=".MainActivity">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
-        <activity-alias
-            android:name=".LauncherIconMirror"
-            android:enabled="false"
-            android:exported="true"
-            android:icon="@mipmap/ic_launcher_mirror"
             android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

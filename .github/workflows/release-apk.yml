@@ -4,8 +4,8 @@ name: Release APK (public)
 # в публичный репозиторий MihailKashintsev/Rlink-releases.
 #
 # Запуск:
-#   1) Тег вида v0.0.5 / v0.1.0:
-#        git tag v0.0.5 && git push origin v0.0.5
+#   1) Тег вида v0.0.6 / v0.1.0:
+#        git tag v0.0.6 && git push origin v0.0.6
 #   2) Вручную со страницы Actions (workflow_dispatch).
 #
 # Требуется секрет RELEASES_PAT в Settings → Secrets and variables →
@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Версия (например v0.0.5)'
+        description: 'Версия (например v0.0.6)'
         required: true
 
 permissions:

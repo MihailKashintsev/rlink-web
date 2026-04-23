@@ -34,6 +34,21 @@ class VideoCropPlugin {
                             }
                         }.start()
                     }
+                    "mergeVideos" -> {
+                        @Suppress("UNCHECKED_CAST")
+                        val inputs = call.argument<List<String>>("inputs")
+                        val output = call.argument<String>("output")
+                        if (inputs == null || output == null || inputs.size < 2) {
+                            result.error("ARGS", "mergeVideos: need inputs + output", null)
+                            return@setMethodCallHandler
+                        }
+                        Thread {
+                            val success = mergeVideos(inputs, output)
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                result.success(success)
+                            }
+                        }.start()
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -109,6 +124,111 @@ class VideoCropPlugin {
 
             } catch (e: Exception) {
                 Log.e(TAG, "cropToSquare failed: ${e.message}")
+                return false
+            }
+        }
+
+        /// Склейка MP4 с тем же кодеком/разрешением (камера medium — обычно совпадает).
+        private fun mergeVideos(inputs: List<String>, outputPath: String): Boolean {
+            if (inputs.size < 2) return false
+            var muxer: MediaMuxer? = null
+            try {
+                File(outputPath).delete()
+
+                val probe = MediaExtractor()
+                probe.setDataSource(inputs.first())
+                var videoFormat: MediaFormat? = null
+                var audioFormat: MediaFormat? = null
+                for (i in 0 until probe.trackCount) {
+                    val f = probe.getTrackFormat(i)
+                    val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+                    when {
+                        mime.startsWith("video/") && videoFormat == null -> videoFormat = f
+                        mime.startsWith("audio/") && audioFormat == null -> audioFormat = f
+                    }
+                }
+                probe.release()
+                if (videoFormat == null) {
+                    Log.e(TAG, "mergeVideos: no video in first file")
+                    return false
+                }
+
+                muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                val muxVideo = muxer.addTrack(videoFormat!!)
+                val muxAudio = if (audioFormat != null) muxer.addTrack(audioFormat!!) else -1
+                muxer.start()
+
+                val buf = ByteBuffer.allocate(512 * 1024)
+                val bi = MediaCodec.BufferInfo()
+                var offsetUs = 0L
+
+                for (path in inputs) {
+                    val ex = MediaExtractor()
+                    ex.setDataSource(path)
+                    var vIn = -1
+                    var aIn = -1
+                    for (i in 0 until ex.trackCount) {
+                        val f = ex.getTrackFormat(i)
+                        val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+                        if (mime.startsWith("video/") && vIn < 0) vIn = i
+                        if (mime.startsWith("audio/") && aIn < 0) aIn = i
+                    }
+
+                    if (vIn >= 0) {
+                        ex.selectTrack(vIn)
+                        while (true) {
+                            bi.offset = 0
+                            bi.size = ex.readSampleData(buf, 0)
+                            if (bi.size < 0) break
+                            bi.presentationTimeUs = ex.sampleTime + offsetUs
+                            bi.flags = ex.sampleFlags
+                            muxer.writeSampleData(muxVideo, buf, bi)
+                            ex.advance()
+                        }
+                        ex.unselectTrack(vIn)
+                    }
+
+                    if (muxAudio >= 0 && aIn >= 0) {
+                        ex.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                        ex.selectTrack(aIn)
+                        val t0 = offsetUs
+                        while (true) {
+                            bi.offset = 0
+                            bi.size = ex.readSampleData(buf, 0)
+                            if (bi.size < 0) break
+                            bi.presentationTimeUs = ex.sampleTime + t0
+                            bi.flags = ex.sampleFlags
+                            muxer.writeSampleData(muxAudio, buf, bi)
+                            ex.advance()
+                        }
+                        ex.unselectTrack(aIn)
+                    }
+
+                    ex.release()
+
+                    val retriever = MediaMetadataRetriever()
+                    retriever.setDataSource(path)
+                    val durMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    retriever.release()
+                    offsetUs += durMs * 1000L
+                }
+
+                muxer.stop()
+                muxer.release()
+                muxer = null
+                Log.d(TAG, "mergeVideos OK → $outputPath (${File(outputPath).length()} bytes)")
+                return true
+            } catch (e: Exception) {
+                Log.e(TAG, "mergeVideos failed: ${e.message}", e)
+                try {
+                    muxer?.stop()
+                } catch (_: Exception) {
+                }
+                try {
+                    muxer?.release()
+                } catch (_: Exception) {
+                }
+                File(outputPath).delete()
                 return false
             }
         }

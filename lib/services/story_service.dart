@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../utils/reaction_limit.dart';
+
 class StoryItem {
   final String id;
   final String authorId; // Ed25519 public key
@@ -209,12 +211,13 @@ class StoryService {
   StoryItem? toggleReaction(String storyId, String emoji, String reactorId) {
     final s = findStory(storyId);
     if (s == null) return null;
-    final list = s.reactions.putIfAbsent(emoji, () => <String>[]);
-    if (list.contains(reactorId)) {
+    final list = s.reactions[emoji];
+    if (list != null && list.contains(reactorId)) {
       list.remove(reactorId);
       if (list.isEmpty) s.reactions.remove(emoji);
     } else {
-      list.add(reactorId);
+      if (!reactionAddAllowed(s.reactions, emoji, reactorId)) return s;
+      s.reactions.putIfAbsent(emoji, () => <String>[]).add(reactorId);
     }
     version.value++;
     _save();

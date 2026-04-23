@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../app_version.dart';
 import '../../l10n/app_l10n.dart';
 
 class AboutScreen extends StatelessWidget {
@@ -35,10 +35,9 @@ class AboutScreen extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(vertical: 32),
             alignment: Alignment.center,
-            child: FutureBuilder<PackageInfo>(
-              future: PackageInfo.fromPlatform(),
-              builder: (context, snap) {
-                final version = snap.data?.version ?? '0.0.5';
+            child: Builder(
+              builder: (context) {
+                final version = AppVersion.label;
                 return Column(children: [
               Container(
                 width: 88,
@@ -135,19 +134,13 @@ class AboutScreen extends StatelessWidget {
           const SizedBox(height: 32),
 
           // ── Tech info ────────────────────────────────────────────
-          FutureBuilder<PackageInfo>(
-            future: PackageInfo.fromPlatform(),
-            builder: (context, snap) {
-              final version = snap.data?.version ?? '0.0.5';
-              return Center(
-                child: Text(
-                  'Rlink v$version • BLE Mesh Messenger\nFlutter • Dart • Ed25519 + ChaCha20',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      fontSize: 11, color: Theme.of(context).hintColor),
-                ),
-              );
-            },
+          Center(
+            child: Text(
+              'Rlink v${AppVersion.label} • BLE Mesh Messenger\nFlutter • Dart • Ed25519 + ChaCha20',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 11, color: Theme.of(context).hintColor),
+            ),
           ),
           const SizedBox(height: 24),
         ],

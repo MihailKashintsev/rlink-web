@@ -1,4 +1,5 @@
 import '../models/channel.dart';
+import '../models/chat_message.dart';
 import '../models/group.dart';
 import '../models/message_poll.dart';
 import '../models/shared_collab.dart';
@@ -32,6 +33,23 @@ String formatMessagePreview(String? text, {String? pollJson}) {
   if (text.startsWith('📎 ')) return text;
 
   return text;
+}
+
+/// Превью для последнего сообщения личного чата (список диалогов).
+String dmLastMessagePreview(ChatMessage m) {
+  var t = formatMessagePreview(m.text.isEmpty ? null : m.text);
+  if (t.isNotEmpty) return t;
+  if (m.imagePath != null) {
+    if (m.imagePath!.toLowerCase().endsWith('.gif')) return '🎞 GIF';
+    return '📷 Фото';
+  }
+  if (m.voicePath != null) return '🎤 Голосовое';
+  if (m.videoPath != null) return '📹 Видео';
+  if (m.filePath != null) {
+    if (m.text.startsWith('📎 ')) return m.text;
+    return '📎 Файл';
+  }
+  return '';
 }
 
 /// Превью последнего сообщения группы (учёт медиа без текста).

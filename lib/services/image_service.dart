@@ -132,6 +132,35 @@ class ImageService {
     return result.path;
   }
 
+  /// Квадратный стикер после обрезки: JPEG до ~512 px, имя `stk_*.jpg`.
+  Future<String> saveStickerFromBytes(Uint8List croppedBytes) async {
+    final dir = await _imagesDir();
+    final tmpPath = p.join(dir.path, 'stk_crop_${_uuid.v4()}.png');
+    final tmpFile = File(tmpPath);
+    await tmpFile.writeAsBytes(croppedBytes);
+    final out = p.join(dir.path, 'stk_${_uuid.v4()}.jpg');
+    try {
+      final result = await FlutterImageCompress.compressAndGetFile(
+        tmpPath,
+        out,
+        minWidth: 512,
+        minHeight: 512,
+        quality: 86,
+        format: CompressFormat.jpeg,
+      );
+      if (result != null) return result.path;
+    } catch (_) {
+      // fall through to PNG fallback
+    } finally {
+      try {
+        await tmpFile.delete();
+      } catch (_) {}
+    }
+    final fallback = p.join(dir.path, 'stk_${_uuid.v4()}.png');
+    await File(fallback).writeAsBytes(croppedBytes);
+    return fallback;
+  }
+
   /// Фото из галереи: GIF копируем без перекодирования (анимация сохраняется).
   Future<String> saveChatImageFromPicker(String sourcePath) async {
     if (sourcePath.toLowerCase().endsWith('.gif')) {
@@ -304,7 +333,9 @@ class ImageService {
         name = 'avatar_$key.jpg';
       }
     } else {
-      name = '${_uuid.v4()}.jpg';
+      name = assembly.isSticker
+          ? 'stk_${_uuid.v4()}.jpg'
+          : '${_uuid.v4()}.jpg';
     }
     final path = p.join(dir.path, name);
     await File(path).writeAsBytes(data);
@@ -331,11 +362,15 @@ class ImageService {
       bool isVideo = false,
       bool isSquare = false,
       bool isFile = false,
+      bool isSticker = false,
       bool isStory = false,
       String? fileName,
       String? storyId,
       String fromId = '',
-      bool viewOnce = false}) {
+      bool viewOnce = false,
+      String? forwardFromId,
+      String? forwardFromNick,
+      String? forwardFromChannelId}) {
     // Skip if this msgId was already fully assembled via another delivery path
     if (_completedMsgIds.contains(msgId)) return;
     _assemblies.putIfAbsent(
@@ -347,11 +382,15 @@ class ImageService {
         isVideo: isVideo,
         isSquare: isSquare,
         isFile: isFile,
+        isSticker: isSticker,
         isStory: isStory,
         fileName: fileName,
         storyId: storyId,
         fromId: fromId,
         viewOnce: viewOnce,
+        forwardFromId: forwardFromId,
+        forwardFromNick: forwardFromNick,
+        forwardFromChannelId: forwardFromChannelId,
       ),
     );
   }
@@ -361,12 +400,20 @@ class ImageService {
   bool isVideoAssembly(String msgId) => _assemblies[msgId]?.isVideo ?? false;
   bool isSquareAssembly(String msgId) => _assemblies[msgId]?.isSquare ?? false;
   bool isFileAssembly(String msgId) => _assemblies[msgId]?.isFile ?? false;
+  bool isStickerAssembly(String msgId) =>
+      _assemblies[msgId]?.isSticker ?? false;
   bool isStoryAssembly(String msgId) => _assemblies[msgId]?.isStory ?? false;
   bool isViewOnceAssembly(String msgId) =>
       _assemblies[msgId]?.viewOnce ?? false;
   String? assemblyStoryId(String msgId) => _assemblies[msgId]?.storyId;
   String? assemblyFileName(String msgId) => _assemblies[msgId]?.fileName;
   String assemblyFromId(String msgId) => _assemblies[msgId]?.fromId ?? '';
+  String? assemblyForwardFromId(String msgId) =>
+      _assemblies[msgId]?.forwardFromId;
+  String? assemblyForwardFromNick(String msgId) =>
+      _assemblies[msgId]?.forwardFromNick;
+  String? assemblyForwardFromChannelId(String msgId) =>
+      _assemblies[msgId]?.forwardFromChannelId;
 
   void cancelAssembly(String msgId) => _assemblies.remove(msgId);
 
@@ -408,6 +455,29 @@ class ImageService {
   /// Native platform channel for square video cropping.
   static const _videoCropChannel = MethodChannel('com.rendergames.rlink/video_crop');
 
+  /// Склеивает несколько MP4 (последовательных фрагментов записи, например после смены камеры).
+  /// На iOS/Android через нативный muxer/composition. При ошибке возвращает null.
+  Future<String?> mergeVideoSegments(List<String> inputPaths) async {
+    if (inputPaths.isEmpty) return null;
+    if (inputPaths.length == 1) return inputPaths.first;
+    if (!Platform.isIOS && !Platform.isAndroid) return inputPaths.last;
+    final temp = await getTemporaryDirectory();
+    final out = p.join(temp.path, 'merge_${_uuid.v4()}.mp4');
+    try {
+      final ok = await _videoCropChannel.invokeMethod<bool>('mergeVideos', {
+        'inputs': inputPaths,
+        'output': out,
+      });
+      if (ok == true) {
+        final f = File(out);
+        if (await f.exists() && await f.length() > 0) return out;
+      }
+    } catch (e) {
+      debugPrint('[VideoMerge] native merge failed: $e');
+    }
+    return null;
+  }
+
   /// Saves a video with native compression (no FFmpeg / no external Maven).
   /// Uses platform-native codec (Android MediaCodec / iOS AVFoundation).
   /// When [isSquare] is true, the video is first center-cropped to 1:1 via
@@ -442,6 +512,10 @@ class ImageService {
 
     // Step 2: Compress
     debugPrint('[VideoSave] Compressing via native codec (isSquare=$isSquare)…');
+    MediaInfo? infoBefore;
+    try {
+      infoBefore = await VideoCompress.getMediaInfo(inputForCompress);
+    } catch (_) {}
     try {
       final mediaInfo = await VideoCompress.compressVideo(
         inputForCompress,
@@ -451,13 +525,46 @@ class ImageService {
       );
       if (mediaInfo?.path != null) {
         final origKB = (await File(sourcePath).length()) ~/ 1024;
-        final outKB  = (await File(mediaInfo!.path!).length()) ~/ 1024;
+        final outKB = (await File(mediaInfo!.path!).length()) ~/ 1024;
         debugPrint('[VideoSave] Compressed: ${origKB}KB → ${outKB}KB');
-        await File(mediaInfo.path!).copy(targetPath);
+
+        var useCompressed = true;
+        final beforeMeta = infoBefore;
+        if (!isSquare &&
+            beforeMeta != null &&
+            beforeMeta.width != null &&
+            beforeMeta.height != null &&
+            beforeMeta.width! > 0 &&
+            beforeMeta.height! > 0) {
+          try {
+            final infoAfter = await VideoCompress.getMediaInfo(mediaInfo.path!);
+            if (infoAfter.width != null &&
+                infoAfter.height != null &&
+                infoAfter.width! > 0 &&
+                infoAfter.height! > 0) {
+              final rBefore = beforeMeta.width! / beforeMeta.height!;
+              final rAfter = infoAfter.width! / infoAfter.height!;
+              final drift = (rBefore - rAfter).abs() / rBefore;
+              if (drift > 0.07) {
+                useCompressed = false;
+                debugPrint(
+                    '[VideoSave] Aspect ratio changed ($rBefore → $rAfter), keeping original');
+              }
+            }
+          } catch (_) {}
+        }
+
+        if (useCompressed) {
+          await File(mediaInfo.path!).copy(targetPath);
+        } else {
+          await File(inputForCompress).copy(targetPath);
+        }
         await VideoCompress.deleteAllCache();
         // Clean up intermediate cropped file
         if (inputForCompress != sourcePath) {
-          try { await File(inputForCompress).delete(); } catch (_) {}
+          try {
+            await File(inputForCompress).delete();
+          } catch (_) {}
         }
         return targetPath;
       }
@@ -519,11 +626,15 @@ class _ImageAssembly {
   final bool isVideo;
   final bool isSquare;
   final bool isFile;
+  final bool isSticker;
   final bool isStory;
   final bool viewOnce;
   final String? fileName;
   final String? storyId;
   final String fromId;
+  final String? forwardFromId;
+  final String? forwardFromNick;
+  final String? forwardFromChannelId;
   final Map<int, Uint8List> _chunks = {};
   int? _totalOverride; // set by receiveBlobData for relay blobs
 
@@ -534,11 +645,15 @@ class _ImageAssembly {
     this.isVideo = false,
     this.isSquare = false,
     this.isFile = false,
+    this.isSticker = false,
     this.isStory = false,
     this.viewOnce = false,
     this.fileName,
     this.storyId,
     this.fromId = '',
+    this.forwardFromId,
+    this.forwardFromNick,
+    this.forwardFromChannelId,
   });
 
   void add(int index, Uint8List data) => _chunks[index] = data;

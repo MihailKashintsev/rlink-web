@@ -74,6 +74,7 @@ class RelayService {
       bool isVideo,
       bool isSquare,
       bool isFile,
+      bool isSticker,
       String? fileName,
       bool viewOnce)? onBlobReceived;
 
@@ -84,6 +85,9 @@ class RelayService {
   /// recipient is offline. The argument is the recipient's public key.
   /// Used by [MediaUploadQueue] to abort and re-queue inflight uploads.
   void Function(String recipientKey)? onDeliveryFailed;
+
+  /// Зашифрованный снимок аккаунта (список каналов + ревизия), пришёл с relay.
+  void Function(String sealedBlob)? onAccountSyncBlob;
 
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
@@ -328,6 +332,7 @@ class RelayService {
     bool isVideo = false,
     bool isSquare = false,
     bool isFile = false,
+    bool isSticker = false,
     String? fileName,
     bool viewOnce = false,
   }) async {
@@ -345,6 +350,7 @@ class RelayService {
       if (isVideo) 'video': true,
       if (isSquare) 'sq': true,
       if (isFile) 'file': true,
+      if (isSticker) 'stk': true,
       if (fileName != null) 'fname': fileName,
       if (viewOnce) 'vo': true,
     };
@@ -371,6 +377,7 @@ class RelayService {
     bool isVideo = false,
     bool isSquare = false,
     bool isFile = false,
+    bool isSticker = false,
     String? fileName,
     bool viewOnce = false,
   }) async {
@@ -389,6 +396,7 @@ class RelayService {
       if (chunkIdx == 0 && isVideo) 'video': true,
       if (chunkIdx == 0 && isSquare) 'sq': true,
       if (chunkIdx == 0 && isFile) 'file': true,
+      if (chunkIdx == 0 && isSticker) 'stk': true,
       if (chunkIdx == 0 && fileName != null) 'fname': fileName,
       if (chunkIdx == 0 && viewOnce) 'vo': true,
     };
@@ -553,9 +561,33 @@ class RelayService {
       case 'pong':
         break; // keep-alive response
 
+      case 'account_sync_blob':
+        final data = msg['data'] as String?;
+        if (data != null && data.isNotEmpty) {
+          onAccountSyncBlob?.call(data);
+        }
+        break;
+
+      case 'account_sync_ack':
+        break;
+
       case 'error':
         debugPrint('[RLINK][Relay] Server error: ${msg['msg']}');
         break;
+    }
+  }
+
+  /// Сохранить на relay зашифрованный бокс аккаунта (тот же формат, что admin_cfg2).
+  Future<void> putAccountSyncBlob(String sealedBoxJson) async {
+    if (!isConnected) return;
+    if (sealedBoxJson.length > 131072) return;
+    try {
+      _channel?.sink.add(jsonEncode({
+        'type': 'account_sync_put',
+        'data': sealedBoxJson,
+      }));
+    } catch (e) {
+      debugPrint('[RLINK][Relay] account_sync_put failed: $e');
     }
   }
 
@@ -703,11 +735,12 @@ class RelayService {
         final isVideo = (msg['video'] as bool?) ?? false;
         final isSquare = (msg['sq'] as bool?) ?? false;
         final isFile = (msg['file'] as bool?) ?? false;
+        final isSticker = (msg['stk'] as bool?) ?? false;
         final fileName = msg['fname'] as String?;
         final viewOnce = (msg['vo'] as bool?) ?? false;
         debugPrint('[RLINK][Relay] Received blob ${bytes.length} bytes for $msgId');
         onBlobReceived?.call(from, msgId, Uint8List.fromList(bytes),
-            isVoice, isVideo, isSquare, isFile, fileName, viewOnce);
+            isVoice, isVideo, isSquare, isFile, isSticker, fileName, viewOnce);
         return;
       }
 
@@ -723,6 +756,7 @@ class RelayService {
         assembly.isVideo = (msg['video'] as bool?) ?? false;
         assembly.isSquare = (msg['sq'] as bool?) ?? false;
         assembly.isFile = (msg['file'] as bool?) ?? false;
+        assembly.isSticker = (msg['stk'] as bool?) ?? false;
         assembly.fileName = msg['fname'] as String?;
         assembly.viewOnce = (msg['vo'] as bool?) ?? false;
       }
@@ -747,7 +781,8 @@ class RelayService {
         debugPrint('[RLINK][Relay] Assembled chunked blob ${full.length} bytes for $msgId');
         onBlobReceived?.call(from, msgId, full,
             assembly.isVoice, assembly.isVideo, assembly.isSquare,
-            assembly.isFile, assembly.fileName, assembly.viewOnce);
+            assembly.isFile, assembly.isSticker, assembly.fileName,
+            assembly.viewOnce);
       }
     } catch (e) {
       debugPrint('[RLINK][Relay] Failed to decode blob: $e');
@@ -803,6 +838,7 @@ class _BlobAssembly {
   bool isVideo = false;
   bool isSquare = false;
   bool isFile = false;
+  bool isSticker = false;
   bool viewOnce = false;
   String? fileName;
   _BlobAssembly({required this.total, required this.from});

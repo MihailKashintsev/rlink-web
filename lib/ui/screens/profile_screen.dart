@@ -7,7 +7,10 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../models/user_profile.dart';
+import '../../services/gigachat_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
@@ -15,6 +18,7 @@ import '../../services/profile_service.dart';
 import '../../main.dart'
     show broadcastMyAvatar, broadcastMyBanner, broadcastMyProfileMusic, sendProfileToAllContacts;
 import '../widgets/avatar_widget.dart';
+import '../widgets/desktop_image_picker.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -36,6 +40,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late TextEditingController _tagController;
   late int _selectedColor;
   late String _selectedEmoji;
+  late String _statusEmoji;
   String? _selectedImagePath;
   String? _bannerImagePath;
   String? _profileMusicPath;
@@ -43,6 +48,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _editing = false;
   bool _saving = false;
   bool _showEmojiPicker = false;
+  bool _showStatusEmojiPicker = false;
 
   final _picker = ImagePicker();
 
@@ -55,6 +61,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _tagController = TextEditingController();
     _selectedColor = p.avatarColor;
     _selectedEmoji = p.avatarEmoji;
+    _statusEmoji = p.statusEmoji;
     _selectedImagePath = p.avatarImagePath;
     _bannerImagePath = p.bannerImagePath;
     _profileMusicPath = p.profileMusicPath;
@@ -62,20 +69,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _pickImage() async {
-    final picked = await _picker.pickImage(source: ImageSource.gallery);
-    if (picked == null) return;
+    final raw = await pickImagePathDesktopAware(imagePicker: _picker);
+    if (raw == null) return;
     final path = await ImageService.instance.compressAndSave(
-      picked.path,
+      raw,
       isAvatar: true,
     );
     setState(() => _selectedImagePath = path);
   }
 
   Future<void> _pickBanner() async {
-    final picked = await _picker.pickImage(source: ImageSource.gallery);
-    if (picked == null) return;
+    final raw = await pickImagePathDesktopAware(imagePicker: _picker);
+    if (raw == null) return;
     final path = await ImageService.instance.compressAndSave(
-      picked.path,
+      raw,
       maxSize: 1200,
     );
     setState(() => _bannerImagePath = path);
@@ -135,10 +142,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
         tags: _tags,
         bannerImagePath: _bannerImagePath,
         profileMusicPath: _profileMusicPath,
+        statusEmoji: _statusEmoji,
       );
       setState(() {
         _editing = false;
         _showEmojiPicker = false;
+        _showStatusEmojiPicker = false;
       });
       // Send updated profile directly to all contacts via relay
       sendProfileToAllContacts();
@@ -152,6 +161,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         emoji: updated.avatarEmoji,
         x25519Key: x25519,
         tags: updated.tags,
+        statusEmoji: updated.statusEmoji,
       );
       // Если аватар/баннер реально изменились — перешлём изображения контактам,
       // чтобы у них обновилась картинка (а не только метаданные профиля).
@@ -254,17 +264,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
             child: Stack(children: [
               GestureDetector(
                 onTap: _editing
-                    ? () => setState(() => _showEmojiPicker = !_showEmojiPicker)
+                    ? () => setState(() {
+                          _showEmojiPicker = !_showEmojiPicker;
+                          _showStatusEmojiPicker = false;
+                        })
                     : null,
-                child: AvatarWidget(
-                  initials: (_editing && _controller.text.isNotEmpty)
-                      ? _controller.text[0].toUpperCase()
-                      : profile.initials,
-                  color: _editing ? _selectedColor : profile.avatarColor,
-                  emoji: _editing ? _selectedEmoji : profile.avatarEmoji,
-                  imagePath:
-                      _editing ? _selectedImagePath : profile.avatarImagePath,
-                  size: 88,
+                child: Hero(
+                  tag: 'avatar_my_profile',
+                  child: Material(
+                    color: Colors.transparent,
+                    child: AvatarWidget(
+                      initials: (_editing && _controller.text.isNotEmpty)
+                          ? _controller.text[0].toUpperCase()
+                          : profile.initials,
+                      color: _editing ? _selectedColor : profile.avatarColor,
+                      emoji: _editing ? _selectedEmoji : profile.avatarEmoji,
+                      imagePath: _editing
+                          ? _selectedImagePath
+                          : profile.avatarImagePath,
+                      size: 88,
+                    ),
+                  ),
                 ),
               ),
               if (_editing) ...[
@@ -273,8 +293,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   right: 0,
                   bottom: 0,
                   child: GestureDetector(
-                    onTap: () =>
-                        setState(() => _showEmojiPicker = !_showEmojiPicker),
+                    onTap: () => setState(() {
+                      _showEmojiPicker = !_showEmojiPicker;
+                      _showStatusEmojiPicker = false;
+                    }),
                     child: Container(
                       width: 28,
                       height: 28,
@@ -342,6 +364,31 @@ class _ProfileScreenState extends State<ProfileScreen> {
               onSelected: (c) => setState(() => _selectedColor = c),
             ),
             const SizedBox(height: 20),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeInOut,
+              child: _showStatusEmojiPicker
+                  ? Container(
+                      padding: const EdgeInsets.all(12),
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: AvatarEmojiPicker(
+                        selected: _statusEmoji.isNotEmpty
+                            ? _statusEmoji
+                            : UserProfile.avatarEmojis.first,
+                        onSelected: (e) => setState(() {
+                          _statusEmoji = UserProfile.normalizeStatusEmoji(e);
+                          _showStatusEmojiPicker = false;
+                        }),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
           ],
 
           // Имя
@@ -359,6 +406,59 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   onChanged: (_) => setState(() {}),
                 )
               : _InfoTile(label: 'Имя', value: profile.nickname),
+
+          const SizedBox(height: 12),
+
+          // Эмодзи-статус (рядом с именем в списках)
+          _editing
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Эмодзи-статус',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(context).hintColor)),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Material(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(12),
+                          child: InkWell(
+                            onTap: () => setState(() {
+                              _showStatusEmojiPicker = !_showStatusEmojiPicker;
+                              _showEmojiPicker = false;
+                            }),
+                            borderRadius: BorderRadius.circular(12),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 14, vertical: 10),
+                              child: Text(
+                                _statusEmoji.isEmpty ? '—' : _statusEmoji,
+                                style: const TextStyle(fontSize: 22),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        if (_statusEmoji.isNotEmpty)
+                          TextButton(
+                            onPressed: () =>
+                                setState(() => _statusEmoji = ''),
+                            child: const Text('Убрать'),
+                          ),
+                      ],
+                    ),
+                  ],
+                )
+              : _InfoTile(
+                  label: 'Эмодзи-статус',
+                  value: profile.statusEmoji.isEmpty
+                      ? 'Не задан'
+                      : profile.statusEmoji,
+                ),
 
           const SizedBox(height: 12),
 
@@ -505,6 +605,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           const SizedBox(height: 12),
 
+          const _GigaChatProfileCard(),
+          const SizedBox(height: 12),
+
           _InfoTile(
             label: 'Полный ID (для поиска через &)',
             value: profile.publicKeyHex,
@@ -517,6 +620,221 @@ class _ProfileScreenState extends State<ProfileScreen> {
             },
           ),
         ]),
+      ),
+    );
+  }
+}
+
+class _GigaChatProfileCard extends StatefulWidget {
+  const _GigaChatProfileCard();
+
+  @override
+  State<_GigaChatProfileCard> createState() => _GigaChatProfileCardState();
+}
+
+class _GigaChatProfileCardState extends State<_GigaChatProfileCard> {
+  late final TextEditingController _keyCtrl;
+  bool _obscure = true;
+  bool _loading = true;
+  bool _saving = false;
+  bool _insecureTlsWorkaround = false;
+  bool _savingTlsOption = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _keyCtrl = TextEditingController();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    final k = await GigachatService.instance.readAuthorizationKey();
+    final insecure =
+        await GigachatService.instance.readInsecureTlsWorkaroundEnabled();
+    if (!mounted) return;
+    setState(() {
+      _keyCtrl.text = k ?? '';
+      _insecureTlsWorkaround = insecure;
+      _loading = false;
+    });
+  }
+
+  Future<void> _setInsecureTlsWorkaround(bool value) async {
+    setState(() => _savingTlsOption = true);
+    try {
+      await GigachatService.instance.setInsecureTlsWorkaroundEnabled(value);
+      if (!mounted) return;
+      setState(() => _insecureTlsWorkaround = value);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              value
+                  ? 'Включён обход проверки сертификата для узлов GigaChat'
+                  : 'Проверка сертификата снова обычная',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _savingTlsOption = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _keyCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      await GigachatService.instance
+          .saveAuthorizationKey(_keyCtrl.text.trim());
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ключ GigaChat сохранён')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _clear() async {
+    setState(() => _saving = true);
+    try {
+      _keyCtrl.clear();
+      await GigachatService.instance.saveAuthorizationKey(null);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ключ удалён')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _openDoc() async {
+    final u = Uri.parse(
+        'https://developers.sber.ru/docs/ru/gigachat/quickstart/legal-using-api');
+    if (await canLaunchUrl(u)) {
+      await launchUrl(u, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(16),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        leading: const Icon(Icons.smart_toy_outlined),
+        title: const Text('ИИ-чат (GigaChat)'),
+        subtitle: const Text(
+          'Ключ для бота в списке чатов',
+          style: TextStyle(fontSize: 12),
+        ),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: _keyCtrl,
+                  obscureText: _obscure,
+                  maxLines: 1,
+                  decoration: InputDecoration(
+                    labelText: 'Authorization Key',
+                    hintText: 'Ключ из личного кабинета Сбера',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                          _obscure ? Icons.visibility : Icons.visibility_off),
+                      onPressed: () => setState(() => _obscure = !_obscure),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton(
+                      onPressed: _saving ? null : _save,
+                      child: _saving
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Сохранить'),
+                    ),
+                    OutlinedButton(
+                      onPressed: _saving ? null : _clear,
+                      child: const Text('Удалить ключ'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Обход проверки сертификата (GigaChat)'),
+                  subtitle: Text(
+                    'Только хосты *.devices.sberbank.ru. Включайте, если из‑за VPN или '
+                    'корпоративной сети видите ошибку сертификата. Снижает защиту от перехвата трафика.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  value: _insecureTlsWorkaround,
+                  onChanged: _savingTlsOption
+                      ? null
+                      : (v) => unawaited(_setInsecureTlsWorkaround(v)),
+                ),
+                const Divider(height: 28),
+                Text(
+                  'Как получить ключ',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '1. Откройте портал Сбер для разработчиков (developers.sber.ru) и войдите в аккаунт.\n'
+                  '2. Создайте проект с подключением GigaChat API (раздел продуктов и API).\n'
+                  '3. В настройках проекта получите Client ID и Client Secret или сразу скопируйте '
+                  'готовое значение «Ключ авторизации» (Authorization Key) — длинная строка Base64.\n'
+                  '4. Вставьте ключ в поле выше. Если в кабинете ключ без слова Basic — приложение '
+                  'добавит префикс само.\n'
+                  '5. Для физических лиц используется область доступа GIGACHAT_API_PERS (уже выбрана в приложении).\n'
+                  '6. Тексты из чата с ботом отправляются на серверы Сбера; не передавайте туда пароли и персональные данные третьих лиц.\n\n'
+                  'Если запросы не проходят, проверьте интернет и что сертификаты устройства доверяют узлам Сбера.',
+                  style: TextStyle(
+                    fontSize: 13,
+                    height: 1.4,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: _openDoc,
+                  icon: const Icon(Icons.open_in_new, size: 18),
+                  label: const Text('Документация: быстрый старт GigaChat'),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

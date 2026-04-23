@@ -1,13 +1,17 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../models/channel.dart';
 import '../../services/channel_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
+import '../../utils/rlink_deep_link.dart';
 import '../widgets/avatar_widget.dart';
+import 'channel_admin_settings_screen.dart';
 
 /// Профиль канала (баннер, аватар, описание) — доступен подписчикам.
 class ChannelProfileScreen extends StatefulWidget {
@@ -60,6 +64,13 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
         userId: myId,
         unsubscribe: false,
       );
+      final lastPost = await ChannelService.instance.getLastPost(ch.id);
+      unawaited(GossipRouter.instance.sendChannelHistoryRequest(
+        channelId: ch.id,
+        requesterId: myId,
+        adminId: ch.adminId,
+        sinceTs: lastPost?.timestamp ?? 0,
+      ));
     }
     await _load();
   }
@@ -86,6 +97,47 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
           SliverAppBar(
             expandedHeight: hasBanner ? 200 : 120,
             pinned: true,
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.share_outlined),
+                tooltip: 'Поделиться каналом',
+                onPressed: () {
+                  unawaited(RlinkDeepLink.shareChannelInvite(
+                    context: context,
+                    channelTitle: ch.name,
+                    channelId: ch.id,
+                  ));
+                },
+              ),
+              IconButton(
+                icon: const Icon(Icons.link_rounded),
+                tooltip: 'Копировать ссылку',
+                onPressed: () {
+                  final uri = RlinkDeepLink.channelInviteWebUri(ch.id);
+                  Clipboard.setData(ClipboardData(text: uri.toString()));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Ссылка скопирована: $uri'),
+                    ),
+                  );
+                },
+              ),
+              if (isAdmin)
+                IconButton(
+                  icon: const Icon(Icons.settings_outlined),
+                  tooltip: 'Настройки канала',
+                  onPressed: () {
+                    Navigator.push<void>(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) => ChannelAdminSettingsScreen(
+                          channelId: ch.id,
+                        ),
+                      ),
+                    ).then((_) => _load());
+                  },
+                ),
+            ],
             flexibleSpace: FlexibleSpaceBar(
               title: Text(ch.name,
                   maxLines: 1, overflow: TextOverflow.ellipsis),

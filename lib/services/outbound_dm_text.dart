@@ -48,6 +48,30 @@ class OutboundDmText {
     final parts = splitChunks(fullText);
     if (parts.isEmpty) return;
 
+    // Чат с самим собой — только локальное сохранение.
+    if (targetPeerId == myId) {
+      for (var i = 0; i < parts.length; i++) {
+        final partText = parts[i];
+        final isFirst = i == 0;
+        final msgId = _uuid.v4();
+        final msg = ChatMessage(
+          id: msgId,
+          peerId: targetPeerId,
+          text: partText,
+          replyToMessageId: isFirst ? replyToMessageId : null,
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: MessageStatus.sending,
+        );
+        await ChatStorageService.instance.saveMessage(msg);
+        await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
+          msgId,
+          MessageStatus.sent,
+        );
+      }
+      return;
+    }
+
     var x25519Key = BleService.instance.getPeerX25519Key(targetPeerId);
     if (x25519Key == null || x25519Key.isEmpty) {
       x25519Key = RelayService.instance.getPeerX25519Key(targetPeerId);

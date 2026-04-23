@@ -184,6 +184,35 @@ class CryptoService {
   }
 
   /// Дешифрует сообщение, зашифрованное для нас.
+  /// Симметричное AEAD (ChaCha20-Poly1305) для бэкапа канала и др. локальных блобов.
+  Future<Uint8List> sealSymmetric(Uint8List plain, List<int> key32) async {
+    if (key32.length != 32) {
+      throw ArgumentError.value(key32.length, 'key32', 'expected 32 bytes');
+    }
+    final rng = Random.secure();
+    final nonce = List<int>.generate(12, (_) => rng.nextInt(256));
+    final box = await _chacha.encrypt(
+      plain,
+      secretKey: SecretKey(key32),
+      nonce: nonce,
+    );
+    return Uint8List.fromList([...nonce, ...box.cipherText, ...box.mac.bytes]);
+  }
+
+  Future<Uint8List?> openSymmetric(Uint8List sealed, List<int> key32) async {
+    if (key32.length != 32 || sealed.length < 12 + 16) return null;
+    final nonce = sealed.sublist(0, 12);
+    final mac = Mac(sealed.sublist(sealed.length - 16));
+    final ct = sealed.sublist(12, sealed.length - 16);
+    try {
+      final box = SecretBox(ct, nonce: nonce, mac: mac);
+      final out = await _chacha.decrypt(box, secretKey: SecretKey(key32));
+      return Uint8List.fromList(out);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<String?> decryptMessage(EncryptedMessage msg) async {
     try {
       final ephemeralPubKeyBytes = base64.decode(msg.ephemeralPublicKey);

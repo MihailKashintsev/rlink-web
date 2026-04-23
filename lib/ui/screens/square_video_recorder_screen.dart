@@ -1,9 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:permission_handler/permission_handler.dart';
+
+import '../../services/image_service.dart';
+import '../../services/embedded_video_pause_bus.dart';
+import '../../services/voice_service.dart';
+import '../widgets/hold_square_video_review_screen.dart';
+import '../widgets/square_video_recording_widgets.dart';
 
 /// Показывает квадратный видеорекордер-оверлей поверх чата с блюром.
 /// Возвращает путь к файлу или null.
@@ -39,15 +45,16 @@ class _VideoOverlayState extends State<_VideoOverlay>
   List<CameraDescription> _cameras = [];
   int _selectedCamera = -1;
   bool _isRecording = false;
-  double _recordingSeconds = 0;
+  bool _recordingPaused = false;
+  /// Прогресс записи без setState на каждый тик — меньше лагов превью.
+  final ValueNotifier<double> _recordingSeconds = ValueNotifier(0);
   Timer? _recordingTimer;
   bool _isInitializing = true;
   bool _isSwitching = false;
   String? _initError;
-  bool _needSettings = false; // true when permission is permanently denied
-  double _zoom = 1.0;
-  double _scaleStartZoom = 1.0;
-  double _maxZoomLevel = 1.0;
+
+  /// Уже завершённые фрагменты записи (склейка при остановке, если сменили камеру).
+  final List<String> _recordedSegmentPaths = [];
 
   late AnimationController _pulseController;
 
@@ -66,6 +73,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
   @override
   void dispose() {
     _recordingTimer?.cancel();
+    _recordingSeconds.dispose();
     _pulseController.dispose();
     _controller?.dispose();
     super.dispose();
@@ -75,44 +83,12 @@ class _VideoOverlayState extends State<_VideoOverlay>
     setState(() {
       _isInitializing = true;
       _initError = null;
-      _needSettings = false;
     });
     try {
-      // Camera permission — handle permanentlyDenied (iOS: user must open Settings)
-      var camStatus = await Permission.camera.request();
-      if (camStatus.isPermanentlyDenied || camStatus.isRestricted) {
-        setState(() {
-          _initError = 'Доступ к камере запрещён.\nОткройте Настройки и разрешите доступ.';
-          _needSettings = true;
-          _isInitializing = false;
-        });
-        return;
-      }
-      if (!camStatus.isGranted) {
-        setState(() {
-          _initError = 'Нет доступа к камере';
-          _isInitializing = false;
-        });
-        return;
-      }
-      // Microphone permission — separate check for clear error message
-      var micStatus = await Permission.microphone.request();
-      if (micStatus.isPermanentlyDenied || micStatus.isRestricted) {
-        setState(() {
-          _initError = 'Доступ к микрофону запрещён.\nОткройте Настройки и разрешите доступ.';
-          _needSettings = true;
-          _isInitializing = false;
-        });
-        return;
-      }
-      if (!micStatus.isGranted) {
-        setState(() {
-          _initError = 'Нет доступа к микрофону';
-          _isInitializing = false;
-        });
-        return;
-      }
-      _cameras = await availableCameras();
+      // Разрешения запрашивает ОС при инициализации камеры / старте записи
+      // (отдельный чек через permission_handler на iOS мешал записи квадратика).
+      final raw = await availableCameras();
+      _cameras = logicalCamerasForSquareVideo(raw);
       if (_cameras.isEmpty) {
         setState(() {
           _initError = 'Камера недоступна';
@@ -138,7 +114,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
   Future<void> _setupController(int cameraIndex) async {
     final controller = CameraController(
       _cameras[cameraIndex],
-      ResolutionPreset.medium,
+      ResolutionPreset.low,
       enableAudio: true,
       imageFormatGroup: ImageFormatGroup.jpeg,
     );
@@ -146,13 +122,6 @@ class _VideoOverlayState extends State<_VideoOverlay>
     try {
       await controller.setFocusMode(FocusMode.auto);
     } catch (_) {}
-    _zoom = 1.0;
-    try {
-      _maxZoomLevel = await controller.getMaxZoomLevel();
-      await controller.setZoomLevel(_zoom);
-    } catch (_) {
-      _maxZoomLevel = 1.0;
-    }
     if (!mounted) {
       controller.dispose();
       return;
@@ -173,15 +142,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
   Future<void> _switchCamera() async {
     if (_cameras.length < 2 || _isSwitching) return;
     if (_isRecording) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-                'Платформа записывает одним клипом — остановите запись, чтобы сменить камеру'),
-            duration: Duration(seconds: 3),
-          ),
-        );
-      }
+      await _switchCameraWhileRecording();
       return;
     }
     setState(() => _isSwitching = true);
@@ -198,25 +159,95 @@ class _VideoOverlayState extends State<_VideoOverlay>
     }
   }
 
+  Future<void> _switchCameraWhileRecording() async {
+    final ctrl = _controller;
+    if (ctrl == null ||
+        !ctrl.value.isInitialized ||
+        !ctrl.value.isRecordingVideo ||
+        _isSwitching) {
+      return;
+    }
+    setState(() => _isSwitching = true);
+    try {
+      final file = await ctrl.stopVideoRecording();
+      _recordedSegmentPaths.add(file.path);
+      final next = (_selectedCamera + 1) % _cameras.length;
+      final old = _controller;
+      _controller = null;
+      await old?.dispose();
+      await _setupController(next);
+      final c2 = _controller;
+      if (c2 != null && c2.value.isInitialized) {
+        await c2.startVideoRecording();
+      }
+    } catch (e) {
+      debugPrint('[SquareVideo] switchCamera while recording: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось сменить камеру: $e')),
+        );
+      }
+      _recordingTimer?.cancel();
+      if (mounted) {
+        setState(() => _isRecording = false);
+      }
+    } finally {
+      if (mounted) setState(() => _isSwitching = false);
+    }
+  }
+
+  Future<void> _deleteTempVideos(List<String> paths) async {
+    for (final path in paths) {
+      try {
+        final f = File(path);
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+    }
+  }
+
   Future<void> _startRecording() async {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized || _isRecording) return;
     try {
+      EmbeddedVideoPauseBus.instance.bump();
+      await VoiceService.instance.stopPlayback();
+      _recordedSegmentPaths.clear();
+      _recordingPaused = false;
       await ctrl.startVideoRecording();
       _pulseController.repeat(reverse: true);
-      setState(() {
-        _isRecording = true;
-        _recordingSeconds = 0;
-      });
+      _recordingSeconds.value = 0;
+      setState(() => _isRecording = true);
       _recordingTimer?.cancel();
       _recordingTimer =
-          Timer.periodic(const Duration(milliseconds: 100), (_) {
+          Timer.periodic(const Duration(milliseconds: 250), (_) {
         if (!mounted || !_isRecording) return;
-        setState(() => _recordingSeconds += 0.1);
-        if (_recordingSeconds >= _maxDuration) _stopAndSend();
+        if (_recordingPaused) return;
+        _recordingSeconds.value += 0.25;
+        if (_recordingSeconds.value >= _maxDuration) _stopAndSend();
       });
     } catch (e) {
       debugPrint('[SquareVideo] startVideoRecording error: $e');
+    }
+  }
+
+  Future<void> _toggleRecordingPause() async {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized || !_isRecording) return;
+    try {
+      if (_recordingPaused) {
+        await ctrl.resumeVideoRecording();
+        if (mounted) setState(() => _recordingPaused = false);
+      } else {
+        await ctrl.pauseVideoRecording();
+        if (mounted) setState(() => _recordingPaused = true);
+      }
+    } catch (e) {
+      debugPrint('[SquareVideo] pause toggle: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Пауза записи недоступна: $e')),
+        );
+      }
     }
   }
 
@@ -230,16 +261,64 @@ class _VideoOverlayState extends State<_VideoOverlay>
     if (ctrl == null) return;
     try {
       final file = await ctrl.stopVideoRecording();
-      setState(() => _isRecording = false);
       if (!mounted) return;
-      if (_recordingSeconds >= 0.5) {
-        Navigator.pop(context, file.path);
+
+      final paths = [..._recordedSegmentPaths, file.path];
+      _recordedSegmentPaths.clear();
+
+      String outPath;
+      if (paths.length == 1) {
+        outPath = paths.single;
       } else {
-        Navigator.pop(context);
+        final merged = await ImageService.instance.mergeVideoSegments(paths);
+        if (merged != null) {
+          outPath = merged;
+          await _deleteTempVideos(paths);
+        } else {
+          outPath = paths.last;
+          await _deleteTempVideos(paths.sublist(0, paths.length - 1));
+        }
       }
+
+      if (!mounted) return;
+      final recLen = _recordingSeconds.value;
+      setState(() {
+        _isRecording = false;
+        _recordingPaused = false;
+      });
+      if (recLen < 0.5) {
+        await _deleteTempVideos([outPath]);
+        if (!mounted) return;
+        return;
+      }
+
+      if (!mounted) return;
+      final nav = Navigator.of(context);
+      final chosen = await nav.push<String?>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (ctx) => HoldSquareVideoReviewScreen(
+            videoPath: outPath,
+            allowTrim: true,
+          ),
+        ),
+      );
+      if (!mounted) return;
+      if (chosen == null || chosen.isEmpty) {
+        await _deleteTempVideos([outPath]);
+        return;
+      }
+      if (chosen != outPath) {
+        await _deleteTempVideos([outPath]);
+      }
+      if (!mounted) return;
+      Navigator.pop(context, chosen);
     } catch (e) {
       debugPrint('[SquareVideo] stopVideoRecording error: $e');
-      setState(() => _isRecording = false);
+      setState(() {
+        _isRecording = false;
+        _recordingPaused = false;
+      });
       if (mounted) Navigator.pop(context);
     }
   }
@@ -248,226 +327,147 @@ class _VideoOverlayState extends State<_VideoOverlay>
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
     final squareSize = screenWidth * 0.82;
-    final secs = _recordingSeconds.floor();
-    final tenths = ((_recordingSeconds % 1) * 10).floor();
-    final progress = _recordingSeconds / _maxDuration;
 
     return Material(
       type: MaterialType.transparency,
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-        child: Container(
-          color: Colors.black.withValues(alpha: 0.5),
-          child: SafeArea(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                // Square camera preview
-                Center(
-                  child: Container(
-                    width: squareSize + 6,
-                    height: squareSize + 6,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: _isRecording ? Colors.red : Colors.white24,
-                        width: 3,
-                      ),
-                    ),
-                    child: Stack(
-                      children: [
-                        // Square preview
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(17),
-                          child: SizedBox(
-                            width: squareSize,
-                            height: squareSize,
-                            child: _buildPreview(squareSize),
-                          ),
-                        ),
-                        // Progress bar at top
-                        if (_isRecording)
-                          Positioned(
-                            top: 0,
-                            left: 0,
-                            right: 0,
-                            child: ClipRRect(
-                              borderRadius: const BorderRadius.vertical(
-                                  top: Radius.circular(17)),
-                              child: LinearProgressIndicator(
-                                value: progress,
-                                minHeight: 3,
-                                color: Colors.red,
-                                backgroundColor: Colors.white24,
-                              ),
-                            ),
-                          ),
-                        // Camera switch button (top right)
-                        if (_cameras.length > 1)
-                          Positioned(
-                            top: 10,
-                            right: 10,
-                            child: GestureDetector(
-                              onTap: _switchCamera,
-                              child: Container(
-                                width: 40,
-                                height: 40,
-                                decoration: BoxDecoration(
-                                  color: Colors.black54,
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                      color: Colors.white24, width: 1),
-                                ),
-                                child: AnimatedRotation(
-                                  turns: _isSwitching ? 0.5 : 0,
-                                  duration: const Duration(milliseconds: 300),
-                                  child: const Icon(
-                                    Icons.flip_camera_ios_rounded,
-                                    color: Colors.white,
-                                    size: 20,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        // Recording timer overlay (bottom left)
-                        if (_isRecording)
-                          Positioned(
-                            bottom: 10,
-                            left: 12,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.black54,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  AnimatedBuilder(
-                                    animation: _pulseController,
-                                    builder: (_, __) => Container(
-                                      width: 7,
-                                      height: 7,
-                                      decoration: BoxDecoration(
-                                        color: Colors.red.withValues(
-                                            alpha: 0.5 +
-                                                _pulseController.value * 0.5),
-                                        shape: BoxShape.circle,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    '0:${secs.toString().padLeft(2, '0')}.$tenths',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w500,
-                                      fontFeatures: [
-                                        FontFeature.tabularFigures()
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
+      child: _isRecording
+          ? Container(
+              color: Colors.black.withValues(alpha: 0.72),
+              child: SafeArea(
+                child: _buildRecorderColumn(context, squareSize),
+              ),
+            )
+          : BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: Container(
+                color: Colors.black.withValues(alpha: 0.45),
+                child: SafeArea(
+                  child: _buildRecorderColumn(context, squareSize),
                 ),
-                const SizedBox(height: 24),
-                // Controls
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    // Close
-                    GestureDetector(
-                      onTap: _isRecording ? null : () => Navigator.pop(context),
-                      child: Container(
-                        width: 52,
-                        height: 52,
-                        decoration: BoxDecoration(
-                          color: _isRecording
-                              ? Colors.grey.shade800.withValues(alpha: 0.3)
-                              : Colors.grey.shade800,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          Icons.close_rounded,
-                          color:
-                              _isRecording ? Colors.grey.shade700 : Colors.white,
-                          size: 24,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 32),
-                    // Record button
-                    GestureDetector(
-                      onTapDown: (_) => _startRecording(),
-                      onTapUp: (_) {
-                        if (_isRecording) _stopAndSend();
-                      },
-                      onTapCancel: () {
-                        if (_isRecording) _stopAndSend();
-                      },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        width: _isRecording ? 80 : 72,
-                        height: _isRecording ? 80 : 72,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: _isRecording ? Colors.red : Colors.white,
-                            width: _isRecording ? 4 : 3,
-                          ),
-                        ),
-                        child: Center(
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            width: _isRecording ? 32 : 58,
-                            height: _isRecording ? 32 : 58,
-                            decoration: BoxDecoration(
-                              color: _isRecording
-                                  ? Colors.red
-                                  : const Color(0xFF1DB954),
-                              borderRadius:
-                                  BorderRadius.circular(_isRecording ? 8 : 29),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 32),
-                    // Spacer
-                    const SizedBox(width: 52, height: 52),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 200),
-                  child: Text(
-                    _isRecording
-                        ? 'Нажмите для остановки'
-                        : 'Нажмите для записи',
-                    key: ValueKey(_isRecording),
-                    style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
-        ),
-      ),
     );
   }
 
-  Widget _buildPreview(double size) {
+  Widget _buildRecorderColumn(BuildContext context, double squareSize) {
+    final ctrl = _controller;
+    final previewReady = ctrl != null &&
+        ctrl.value.isInitialized &&
+        !_isInitializing &&
+        _initError == null;
+
+    return Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              previewReady
+                  ? SquareVideoFramedCameraView(
+                      controller: ctrl,
+                      squareSize: squareSize,
+                      isRecording: _isRecording,
+                      recordingSeconds: _recordingSeconds,
+                      maxDuration: _maxDuration,
+                      showFlipButton: _cameras.length > 1,
+                      onFlipCamera: _switchCamera,
+                      isSwitchingCamera: _isSwitching,
+                      pulseController: _pulseController,
+                      isPaused: _recordingPaused,
+                      onToggleRecordingPause: _isRecording
+                          ? () => unawaited(_toggleRecordingPause())
+                          : null,
+                      recordingPaused: _recordingPaused,
+                    )
+                  : SizedBox(
+                      width: squareSize + 6,
+                      height: squareSize + 6,
+                      child: Center(child: _buildPlaceholderPreview()),
+                    ),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  GestureDetector(
+                    onTap: _isRecording ? null : () => Navigator.pop(context),
+                    child: Container(
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        color: _isRecording
+                            ? Colors.grey.shade800.withValues(alpha: 0.3)
+                            : Colors.grey.shade800,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.close_rounded,
+                        color:
+                            _isRecording ? Colors.grey.shade700 : Colors.white,
+                        size: 24,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 32),
+                  GestureDetector(
+                    onTapDown: (_) => _startRecording(),
+                    onTapUp: (_) {
+                      if (_isRecording) _stopAndSend();
+                    },
+                    onTapCancel: () {
+                      if (_isRecording) _stopAndSend();
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: _isRecording ? 80 : 72,
+                      height: _isRecording ? 80 : 72,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _isRecording ? Colors.red : Colors.white,
+                          width: _isRecording ? 4 : 3,
+                        ),
+                      ),
+                      child: Center(
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          width: _isRecording ? 32 : 58,
+                          height: _isRecording ? 32 : 58,
+                          decoration: BoxDecoration(
+                            color: _isRecording
+                                ? Colors.red
+                                : const Color(0xFF1DB954),
+                            borderRadius:
+                                BorderRadius.circular(_isRecording ? 8 : 29),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 32),
+                  const SizedBox(width: 52, height: 52),
+                ],
+              ),
+              const SizedBox(height: 14),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: Text(
+                  _isRecording
+                      ? 'Нажмите для остановки · пауза на превью'
+                      : 'Нажмите для записи',
+                  key: ValueKey(_isRecording),
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          );
+  }
+
+  Widget _buildPlaceholderPreview() {
     if (_isInitializing) {
       return Container(
-        color: const Color(0xFF111111),
+        decoration: BoxDecoration(
+          color: const Color(0xFF111111),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white24, width: 3),
+        ),
         child: const Center(
           child: CircularProgressIndicator(
             color: Color(0xFF1DB954),
@@ -478,7 +478,11 @@ class _VideoOverlayState extends State<_VideoOverlay>
     }
     if (_initError != null) {
       return Container(
-        color: const Color(0xFF111111),
+        decoration: BoxDecoration(
+          color: const Color(0xFF111111),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white24, width: 3),
+        ),
         child: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -493,78 +497,24 @@ class _VideoOverlayState extends State<_VideoOverlay>
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white54, fontSize: 13),
                 ),
-                if (_needSettings) ...[
-                  const SizedBox(height: 16),
-                  OutlinedButton.icon(
-                    onPressed: () async {
-                      await openAppSettings();
-                    },
-                    icon: const Icon(Icons.settings, size: 16),
-                    label: const Text('Открыть Настройки'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white70,
-                      side: const BorderSide(color: Colors.white24),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextButton(
-                    onPressed: _initCamera,
-                    child: const Text('Повторить',
+                const SizedBox(height: 16),
+                TextButton(
+                  onPressed: _initCamera,
+                  child: const Text('Повторить',
                       style: TextStyle(color: Colors.white38, fontSize: 12)),
-                  ),
-                ],
+                ),
               ],
             ),
           ),
         ),
       );
     }
-    final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized) {
-      return Container(color: const Color(0xFF111111));
-    }
-    // Cover-crop: fill the square without stretching.
-    // FittedBox.cover scales uniformly so the preview fills the square,
-    // ClipRect trims overflow — no distortion on any aspect ratio.
-    return LayoutBuilder(
-      builder: (ctx, constraints) {
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (d) async {
-            try {
-              final box = ctx.findRenderObject() as RenderBox?;
-              if (box == null) return;
-              final local = box.globalToLocal(d.globalPosition);
-              final nx = (local.dx / box.size.width).clamp(0.0, 1.0);
-              final ny = (local.dy / box.size.height).clamp(0.0, 1.0);
-              await ctrl.setFocusPoint(Offset(nx, ny));
-              await ctrl.setExposurePoint(Offset(nx, ny));
-            } catch (_) {}
-          },
-          onScaleStart: (_) {
-            _scaleStartZoom = _zoom;
-          },
-          onScaleUpdate: (details) async {
-            try {
-              final maxZ = _maxZoomLevel;
-              if (maxZ <= 1.01) return;
-              final next =
-                  (_scaleStartZoom * details.scale).clamp(1.0, maxZ);
-              await ctrl.setZoomLevel(next);
-              if (mounted) setState(() => _zoom = next);
-            } catch (_) {}
-          },
-          child: FittedBox(
-            fit: BoxFit.cover,
-            clipBehavior: Clip.hardEdge,
-            child: SizedBox(
-              width: ctrl.value.previewSize!.height,
-              height: ctrl.value.previewSize!.width,
-              child: CameraPreview(ctrl),
-            ),
-          ),
-        );
-      },
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF111111),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white24, width: 3),
+      ),
     );
   }
 }

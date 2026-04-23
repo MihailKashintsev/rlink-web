@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:characters/characters.dart';
+
 import '../services/image_service.dart';
 
 class UserProfile {
@@ -13,6 +15,8 @@ class UserProfile {
   final String? bannerImagePath; // баннер профиля
   /// Локальный путь к аудио «музыка в профиле».
   final String? profileMusicPath;
+  /// Эмодзи-статус (до нескольких эмодзи), показывается рядом с именем.
+  final String statusEmoji;
 
   const UserProfile({
     required this.publicKeyHex,
@@ -24,7 +28,17 @@ class UserProfile {
     this.tags = const [],
     this.bannerImagePath,
     this.profileMusicPath,
+    this.statusEmoji = '',
   });
+
+  /// Обрезка и нормализация строки статуса (графемы, не сырые code units).
+  static String normalizeStatusEmoji(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return '';
+    final c = t.characters;
+    if (c.length <= 4) return t;
+    return c.take(4).toString();
+  }
 
   String get initials {
     final parts = nickname.trim().split(' ');
@@ -45,6 +59,7 @@ class UserProfile {
         if (tags.isNotEmpty) 'tags': tags,
         if (bannerImagePath != null) 'bannerPath': bannerImagePath,
         if (profileMusicPath != null) 'musicPath': profileMusicPath,
+        if (statusEmoji.isNotEmpty) 'st': statusEmoji,
       };
 
   factory UserProfile.fromJson(Map<String, dynamic> j) => UserProfile(
@@ -60,6 +75,8 @@ class UserProfile {
             j['bannerPath'] as String?),
         profileMusicPath: ImageService.instance.resolveStoredPath(
             j['musicPath'] as String?),
+        statusEmoji:
+            normalizeStatusEmoji((j['st'] as String?) ?? ''),
       );
 
   String encode() => jsonEncode(toJson());

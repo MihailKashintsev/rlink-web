@@ -65,6 +65,33 @@ final Map<String, List<DateTime>> _rateLimits = {};
 const _rateWindow = Duration(seconds: 10);
 const _rateMax = 300; // max 300 messages per 10 seconds (media chunks need ~250)
 
+/// Opaque encrypted blobs per Ed25519 identity (список каналов + метаданные синхронизации
+/// аккаунта — клиент шифрует, relay не читает содержимое).
+final Map<String, String> _accountBlobs = {};
+
+void _loadAccountBlobs() {
+  try {
+    final f = File('account_blobs.json');
+    if (!f.existsSync()) return;
+    final decoded = jsonDecode(f.readAsStringSync());
+    if (decoded is! Map) return;
+    decoded.forEach((k, v) {
+      if (k is String && v is String) _accountBlobs[k] = v;
+    });
+    stdout.writeln('[RLINK][Relay] Loaded ${_accountBlobs.length} account sync blobs');
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] account_blobs load: $e');
+  }
+}
+
+void _persistAccountBlobs() {
+  try {
+    File('account_blobs.json').writeAsStringSync(jsonEncode(_accountBlobs));
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] account_blobs save: $e');
+  }
+}
+
 bool _checkRate(String publicKey) {
   final now = DateTime.now();
   final times = _rateLimits.putIfAbsent(publicKey, () => []);
@@ -118,7 +145,22 @@ void _handleMessage(_User user, dynamic raw) {
     case 'ping':
       user.ws.sink.add(jsonEncode({'type': 'pong'}));
       break;
+    case 'account_sync_put':
+      _handleAccountSyncPut(user, msg);
+      break;
   }
+}
+
+/// Клиент кладёт зашифрованный JSON (n/ct/m от ChaCha20), тот же формат что admin_cfg2.
+void _handleAccountSyncPut(_User user, Map<String, dynamic> msg) {
+  final data = msg['data'] as String?;
+  if (data == null || data.isEmpty || data.length > 131072) return;
+  _accountBlobs[user.publicKey] = data;
+  _persistAccountBlobs();
+  try {
+    user.ws.sink.add(jsonEncode({'type': 'account_sync_ack', 'ok': true}));
+  } catch (_) {}
+  print('[RLINK][Relay] account_sync_put ${user.shortId} (${data.length} chars)');
 }
 
 void _handlePacket(_User sender, Map<String, dynamic> msg) {
@@ -283,6 +325,16 @@ shelf.Handler _wsHandler() {
               'onlineCount': _users.length,
             }));
 
+            final accBlob = _accountBlobs[publicKey];
+            if (accBlob != null && accBlob.isNotEmpty) {
+              try {
+                ws.sink.add(jsonEncode({
+                  'type': 'account_sync_blob',
+                  'data': accBlob,
+                }));
+              } catch (_) {}
+            }
+
             // Send currently online peers to the new user
             for (final other in _users.values) {
               if (other.publicKey == publicKey) continue;
@@ -369,6 +421,7 @@ shelf.Response _infoHandler(shelf.Request request) {
 
 Future<void> main() async {
   final port = int.tryParse(Platform.environment['PORT'] ?? '') ?? 8080;
+  _loadAccountBlobs();
 
   // Cascade: try WebSocket first, then HTTP info
   final handler = shelf.Cascade()

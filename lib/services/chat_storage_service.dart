@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../models/chat_message.dart';
+import '../utils/reaction_limit.dart';
 import '../utils/message_preview_formatter.dart';
 import '../models/contact.dart';
 import 'image_service.dart';
@@ -81,7 +82,7 @@ class ChatStorageService {
     final path = join(dir.path, 'rlink.db');
     _db = await openDatabase(
       path,
-      version: 16,
+      version: 20,
       onCreate: (db, v) async {
         try { await db.rawQuery('PRAGMA journal_mode = WAL'); } catch (_) {}
         await db.execute('''
@@ -97,7 +98,8 @@ class ChatStorageService {
             last_seen         INTEGER,
             tags              TEXT,
             banner_img_path   TEXT,
-            profile_music_path TEXT
+            profile_music_path TEXT,
+            status_emoji       TEXT
           )
         ''');
         await db.execute('''
@@ -121,7 +123,10 @@ class ChatStorageService {
             view_once            INTEGER NOT NULL DEFAULT 0,
             view_once_opened     INTEGER NOT NULL DEFAULT 0,
             forward_from_id      TEXT,
-            forward_from_nick    TEXT
+            forward_from_nick    TEXT,
+            forward_from_channel_id TEXT,
+            invite_payload       TEXT,
+            gigachat_attachment_ids TEXT
           )
         ''');
         await db.execute(
@@ -298,6 +303,30 @@ class ChatStorageService {
           ''');
           await _backfillDmReadCursors(db);
         }
+        if (oldVersion < 17) {
+          try {
+            await db.execute(
+                'ALTER TABLE contacts ADD COLUMN status_emoji TEXT');
+          } catch (_) {}
+        }
+        if (oldVersion < 18) {
+          try {
+            await db.execute(
+                'ALTER TABLE messages ADD COLUMN forward_from_channel_id TEXT');
+          } catch (_) {}
+        }
+        if (oldVersion < 19) {
+          try {
+            await db.execute(
+                'ALTER TABLE messages ADD COLUMN invite_payload TEXT');
+          } catch (_) {}
+        }
+        if (oldVersion < 20) {
+          try {
+            await db.execute(
+                'ALTER TABLE messages ADD COLUMN gigachat_attachment_ids TEXT');
+          } catch (_) {}
+        }
       },
     );
     debugPrint('[RLINK][DB] Initialized');
@@ -351,6 +380,8 @@ class ChatStorageService {
         'tags': contact.tags.isEmpty ? null : contact.tags.join(','),
         'banner_img_path': contact.bannerImagePath,
         'profile_music_path': contact.profileMusicPath,
+        'status_emoji':
+            contact.statusEmoji.isEmpty ? null : contact.statusEmoji,
       },
       where: 'id = ?',
       whereArgs: [contact.publicKeyHex],
@@ -441,6 +472,30 @@ class ChatStorageService {
     );
     if (rows == null || rows.isEmpty) return null;
     return ChatMessage.fromMap(rows.first);
+  }
+
+  /// Сообщения со стикером (картинка `stk_*`) в чате с контактом, новые первыми.
+  Future<List<ChatMessage>> getStickerMessagesForPeer(
+    String peerId, {
+    int limit = 500,
+  }) async {
+    final rows = await _db?.query(
+      'messages',
+      where: 'peer_id = ? AND image_path IS NOT NULL',
+      whereArgs: [peerId],
+      orderBy: 'timestamp DESC',
+      limit: limit,
+    );
+    if (rows == null || rows.isEmpty) return const [];
+    final out = <ChatMessage>[];
+    for (final r in rows) {
+      final m = ChatMessage.fromMap(r);
+      final ip = m.imagePath;
+      if (ip != null && basename(ip).startsWith('stk_')) {
+        out.add(m);
+      }
+    }
+    return out;
   }
 
   // ── Отложенная отправка (личный чат) ───────────────────────────
@@ -578,6 +633,55 @@ class ChatStorageService {
         ) ??
         [];
     return rows.map(ChatMessage.fromMap).toList();
+  }
+
+  /// Последние [limit] сообщений в хронологическом порядке (для ИИ / контекста API).
+  Future<List<ChatMessage>> getRecentMessagesAscending(String peerId,
+      {int limit = 24}) async {
+    final rows = await _db?.rawQuery(
+          '''
+          SELECT * FROM messages
+          WHERE peer_id = ?
+          ORDER BY timestamp DESC, rowid DESC
+          LIMIT ?
+          ''',
+          [peerId, limit],
+        ) ??
+        [];
+    final list = rows.map(ChatMessage.fromMap).toList();
+    return list.reversed.toList();
+  }
+
+  /// Вся история диалога (для экспорта в файл).
+  Future<List<ChatMessage>> getAllMessages(String peerId) async {
+    final rows = await _db?.query(
+          'messages',
+          where: 'peer_id = ?',
+          whereArgs: [peerId],
+          orderBy: 'timestamp ASC',
+        ) ??
+        [];
+    return rows.map(ChatMessage.fromMap).toList();
+  }
+
+  /// JSON-файл во временной директории (пути к медиа — как в локальной БД).
+  Future<File> exportDirectChatToJsonFile(String peerId) async {
+    final msgs = await getAllMessages(peerId);
+    final contact = await getContact(peerId);
+    final export = <String, dynamic>{
+      'v': 1,
+      'type': 'rlink_dm_export',
+      'peerId': peerId,
+      if (contact != null) 'peerNick': contact.nickname,
+      'exportedAt': DateTime.now().millisecondsSinceEpoch,
+      'messages': msgs.map((m) => m.toMap()).toList(),
+    };
+    final dir = await getTemporaryDirectory();
+    final name =
+        'rlink_dm_${peerId.length >= 8 ? peerId.substring(0, 8) : peerId}_${DateTime.now().millisecondsSinceEpoch}.json';
+    final f = File(join(dir.path, name));
+    await f.writeAsString(const JsonEncoder.withIndent('  ').convert(export));
+    return f;
   }
 
   /// Все исходящие сообщения со статусом sending/failed — для очереди повторной отправки.
@@ -913,12 +1017,13 @@ class ChatStorageService {
 
     final reactions =
         msg.reactions.map((k, v) => MapEntry(k, List<String>.from(v)));
-    final senders = reactions.putIfAbsent(emoji, () => []);
-    if (senders.contains(fromId)) {
+    final senders = reactions[emoji];
+    if (senders != null && senders.contains(fromId)) {
       senders.remove(fromId);
       if (senders.isEmpty) reactions.remove(emoji);
     } else {
-      senders.add(fromId);
+      if (!reactionAddAllowed(reactions, emoji, fromId)) return;
+      reactions.putIfAbsent(emoji, () => []).add(fromId);
     }
 
     await _db?.update(

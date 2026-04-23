@@ -23,6 +23,19 @@ class VideoCropPlugin {
                         result(success)
                     }
                 }
+            case "mergeVideos":
+                guard let args = call.arguments as? [String: Any],
+                      let inputs = args["inputs"] as? [String],
+                      let output = args["output"] as? String,
+                      inputs.count >= 2 else {
+                    result(FlutterError(code: "ARGS", message: "mergeVideos: need inputs + output", details: nil))
+                    return
+                }
+                mergeVideos(inputPaths: inputs, outputPath: output) { success in
+                    DispatchQueue.main.async {
+                        result(success)
+                    }
+                }
             default:
                 result(FlutterMethodNotImplemented)
             }
@@ -123,6 +136,89 @@ class VideoCropPlugin {
                 completion(true)
             default:
                 NSLog("[VideoCrop] Export failed: %@",
+                      exportSession.error?.localizedDescription ?? "unknown")
+                completion(false)
+            }
+        }
+    }
+
+    /// Последовательная склейка клипов (смена фронт/тыл во время записи).
+    private static func mergeVideos(inputPaths: [String], outputPath: String, completion: @escaping (Bool) -> Void) {
+        let outputURL = URL(fileURLWithPath: outputPath)
+        try? FileManager.default.removeItem(at: outputURL)
+
+        let composition = AVMutableComposition()
+        guard let compVideo = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            completion(false)
+            return
+        }
+        let compAudio = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        )
+
+        var cursor = CMTime.zero
+        for path in inputPaths {
+            let url = URL(fileURLWithPath: path)
+            let asset = AVAsset(url: url)
+            let dur = asset.duration
+            if dur == .invalid || dur.seconds <= 0 {
+                NSLog("[VideoMerge] Skip empty asset: %@", path)
+                continue
+            }
+            if let v = asset.tracks(withMediaType: .video).first {
+                do {
+                    try compVideo.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: dur),
+                        of: v,
+                        at: cursor
+                    )
+                } catch {
+                    NSLog("[VideoMerge] insert video failed: %@", error.localizedDescription)
+                    completion(false)
+                    return
+                }
+            }
+            if let a = asset.tracks(withMediaType: .audio).first, let audioTrack = compAudio {
+                do {
+                    try audioTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: dur),
+                        of: a,
+                        at: cursor
+                    )
+                } catch {
+                    NSLog("[VideoMerge] insert audio failed: %@", error.localizedDescription)
+                }
+            }
+            cursor = CMTimeAdd(cursor, dur)
+        }
+
+        if cursor == .zero {
+            completion(false)
+            return
+        }
+
+        guard let exportSession = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetMediumQuality
+        ) else {
+            completion(false)
+            return
+        }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        exportSession.shouldOptimizeForNetworkUse = true
+
+        exportSession.exportAsynchronously {
+            switch exportSession.status {
+            case .completed:
+                NSLog("[VideoMerge] Export OK → %@", outputPath)
+                completion(true)
+            default:
+                NSLog("[VideoMerge] Export failed: %@",
                       exportSession.error?.localizedDescription ?? "unknown")
                 completion(false)
             }

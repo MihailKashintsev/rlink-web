@@ -7,8 +7,13 @@ import 'platform_layout.dart';
 /// Картинка в ленте канала / шапке поста: на ПК — компактнее, без полноэкранной ширины.
 class ChannelFeedImage extends StatelessWidget {
   final String resolvedPath;
+  final bool isSticker;
 
-  const ChannelFeedImage({super.key, required this.resolvedPath});
+  const ChannelFeedImage({
+    super.key,
+    required this.resolvedPath,
+    this.isSticker = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -16,6 +21,15 @@ class ChannelFeedImage extends StatelessWidget {
     if (!file.existsSync()) return const SizedBox.shrink();
     final pc = isDesktopShell();
     final sw = MediaQuery.sizeOf(context).width;
+    if (isSticker && !pc) {
+      return Image.file(
+        file,
+        width: 132,
+        height: 132,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+      );
+    }
     if (!pc) {
       return Image.file(
         file,
@@ -24,15 +38,17 @@ class ChannelFeedImage extends StatelessWidget {
         errorBuilder: (_, __, ___) => const SizedBox.shrink(),
       );
     }
-    final maxW = (sw * 0.38).clamp(200.0, 360.0);
-    const maxH = 280.0;
+    final maxW = isSticker
+        ? 132.0
+        : (sw * 0.38).clamp(200.0, 360.0);
+    final maxH = isSticker ? 132.0 : 280.0;
     return Align(
       alignment: Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxW, maxHeight: maxH),
         child: Image.file(
           file,
-          fit: BoxFit.contain,
+          fit: isSticker ? BoxFit.cover : BoxFit.contain,
           errorBuilder: (_, __, ___) => const SizedBox.shrink(),
         ),
       ),

@@ -2,11 +2,15 @@ package com.rendergames.rlink
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.util.Log
+import androidx.core.content.ContextCompat
 import android.os.Build
 import android.os.ParcelUuid
 import androidx.core.app.NotificationCompat
@@ -17,10 +21,15 @@ import io.flutter.plugin.common.MethodChannel
 import java.util.UUID
 
 class MainActivity : FlutterActivity() {
+
+    override fun getCachedEngineId(): String = RlinkApplication.ENGINE_ID
+
     companion object {
         const val METHOD_CHANNEL = "com.rendergames.rlink/ble"
         const val EVENT_CHANNEL  = "com.rendergames.rlink/ble_events"
         const val NOTIFICATION_CHANNEL_ID = "rlink_messages"
+        private const val APP_ICON_CHANNEL_ID = "rlink_app_icon"
+        private const val APP_ICON_NOTIFICATION_ID = 91001
         val SERVICE_UUID: UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef0")
         val TX_CHAR_UUID: UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef1")
         val CCCD_UUID:    UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -47,16 +56,32 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         isAppInForeground = true
+        try {
+            startService(
+                Intent(this, RlinkForegroundService::class.java)
+                    .setAction(RlinkForegroundService.ACTION_STOP)
+            )
+        } catch (_: Exception) { }
     }
 
     override fun onPause() {
         super.onPause()
         isAppInForeground = false
+        try {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, RlinkForegroundService::class.java)
+                    .setAction(RlinkForegroundService.ACTION_START)
+            )
+        } catch (e: Exception) {
+            Log.w("Rlink", "foreground service: ${e.message}")
+        }
     }
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
         createNotificationChannel()
+        ensureAppIconNotificationChannel()
     }
 
     private fun createNotificationChannel() {
@@ -166,12 +191,59 @@ class MainActivity : FlutterActivity() {
         VideoCropPlugin.register(flutterEngine.dartExecutor.binaryMessenger)
     }
 
+    private fun ensureAppIconNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val mgr = getSystemService(NotificationManager::class.java) ?: return
+        val ch = NotificationChannel(
+            APP_ICON_CHANNEL_ID,
+            "Иконка приложения",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Уведомление после смены ярлыка на рабочем столе"
+        }
+        mgr.createNotificationChannel(ch)
+    }
+
+    private fun showAppIconChangedNotification(variant: String) {
+        ensureAppIconNotificationChannel()
+        val variantLabel = when (variant) {
+            "mono" -> "моно"
+            "ai" -> "ИИ Rlink"
+            else -> "классическая"
+        }
+        val bigText =
+            "Установлена иконка: $variantLabel. На рабочем столе появится новый ярлык; старый можно удалить вручную, если лаунчер его ещё показывает."
+
+        val openApp = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE
+            } else {
+                0
+            }
+        val contentPending = PendingIntent.getActivity(this, 1, openApp, pendingFlags)
+
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notification = NotificationCompat.Builder(this, APP_ICON_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Иконка Rlink изменена")
+            .setContentText("Вариант: $variantLabel")
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .setContentIntent(contentPending)
+            .build()
+
+        mgr.notify(APP_ICON_NOTIFICATION_ID, notification)
+    }
+
     private fun setAppIcon(variant: String) {
         val pm = packageManager
         val pkg = packageName
         val def = ComponentName(pkg, "$pkg.LauncherIconDefault")
         val mono = ComponentName(pkg, "$pkg.LauncherIconMono")
-        val mir = ComponentName(pkg, "$pkg.LauncherIconMirror")
         val ai = ComponentName(pkg, "$pkg.LauncherIconAi")
         val off = PackageManager.COMPONENT_ENABLED_STATE_DISABLED
         val on = PackageManager.COMPONENT_ENABLED_STATE_ENABLED
@@ -179,29 +251,21 @@ class MainActivity : FlutterActivity() {
         when (variant) {
             "mono" -> {
                 pm.setComponentEnabledSetting(def, off, f)
-                pm.setComponentEnabledSetting(mir, off, f)
                 pm.setComponentEnabledSetting(ai, off, f)
                 pm.setComponentEnabledSetting(mono, on, f)
-            }
-            "mirror" -> {
-                pm.setComponentEnabledSetting(def, off, f)
-                pm.setComponentEnabledSetting(mono, off, f)
-                pm.setComponentEnabledSetting(ai, off, f)
-                pm.setComponentEnabledSetting(mir, on, f)
             }
             "ai" -> {
                 pm.setComponentEnabledSetting(def, off, f)
                 pm.setComponentEnabledSetting(mono, off, f)
-                pm.setComponentEnabledSetting(mir, off, f)
                 pm.setComponentEnabledSetting(ai, on, f)
             }
             else -> {
                 pm.setComponentEnabledSetting(mono, off, f)
-                pm.setComponentEnabledSetting(mir, off, f)
                 pm.setComponentEnabledSetting(ai, off, f)
                 pm.setComponentEnabledSetting(def, on, f)
             }
         }
+        showAppIconChangedNotification(variant)
     }
 
     private fun startGattServer() {

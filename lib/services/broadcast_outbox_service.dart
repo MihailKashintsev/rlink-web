@@ -115,8 +115,10 @@ class BroadcastOutboxService {
     bool hasVideo = false,
     bool hasVoice = false,
     bool hasFile = false,
+    bool isSticker = false,
     String? fileName,
     String? pollJson,
+    String? staffLabel,
   }) async {
     await _enqueue('channel_post', {
       'channelId': channelId,
@@ -129,8 +131,10 @@ class BroadcastOutboxService {
       if (hasVideo) 'hasVideo': true,
       if (hasVoice) 'hasVoice': true,
       if (hasFile) 'hasFile': true,
+      if (isSticker) 'isSticker': true,
       if (fileName != null) 'fileName': fileName,
       if (pollJson != null && pollJson.isNotEmpty) 'pollJson': pollJson,
+      if (staffLabel != null && staffLabel.isNotEmpty) 'staffLabel': staffLabel,
     });
     unawaited(_pump());
   }
@@ -319,8 +323,10 @@ class BroadcastOutboxService {
             hasVideo: payload['hasVideo'] as bool? ?? false,
             hasVoice: payload['hasVoice'] as bool? ?? false,
             hasFile: payload['hasFile'] as bool? ?? false,
+            isSticker: payload['isSticker'] as bool? ?? false,
             fileName: payload['fileName'] as String?,
             pollJson: payload['pollJson'] as String?,
+            staffLabel: payload['staffLabel'] as String?,
           );
           break;
         case 'channel_comment':

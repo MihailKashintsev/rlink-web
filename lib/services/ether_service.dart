@@ -13,6 +13,8 @@ class EtherMessage {
   // null = анонимно; non-null = открыто (содержит publicKeyHex отправителя)
   final String? senderId;
   final String? senderNick;
+  final double? latitude;
+  final double? longitude;
   // true if the message was filtered (contains a known name)
   final bool filtered;
 
@@ -24,6 +26,8 @@ class EtherMessage {
     this.isOwn = false,
     this.senderId,
     this.senderNick,
+    this.latitude,
+    this.longitude,
     this.filtered = false,
   });
 }
@@ -59,6 +63,8 @@ class EtherService {
         isOwn: msg.isOwn,
         senderId: msg.senderId,
         senderNick: msg.senderNick,
+        latitude: msg.latitude,
+        longitude: msg.longitude,
         filtered: true,
       );
     } else {
@@ -81,4 +87,25 @@ class EtherService {
   }
 
   void dispose() => _cleanupTimer?.cancel();
+}
+
+/// Режим отправки в Эфир (меню на вкладке «Эфир»).
+class EtherBroadcastOptions extends ChangeNotifier {
+  EtherBroadcastOptions._();
+  static final instance = EtherBroadcastOptions._();
+
+  bool anonymous = true;
+  bool attachGeo = false;
+
+  void setAnonymous(bool v) {
+    if (anonymous == v) return;
+    anonymous = v;
+    notifyListeners();
+  }
+
+  void setAttachGeo(bool v) {
+    if (attachGeo == v) return;
+    attachGeo = v;
+    notifyListeners();
+  }
 }

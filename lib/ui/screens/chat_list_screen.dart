@@ -6,7 +6,9 @@ import 'package:flutter/services.dart';
 import '../../main.dart';
 import '../../models/channel.dart';
 import '../../models/contact.dart';
+import '../../services/ai_bot_constants.dart';
 import '../../services/app_settings.dart';
+import '../../services/chat_inbox_service.dart';
 import '../../services/ble_service.dart';
 import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
@@ -22,31 +24,18 @@ import '../../services/story_service.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/mesh_radar_widget.dart';
 import '../widgets/update_available_banner.dart';
-import '../../utils/message_preview_formatter.dart';
+import '../../utils/message_preview_formatter.dart'
+    show formatChannelPostPreview, formatGroupMessagePreview, dmLastMessagePreview;
 import 'channels_screen.dart';
 import 'chat_screen.dart';
 import 'ether_screen.dart';
 import 'groups_screen.dart';
 import 'profile_screen.dart';
+import 'chat_inbox_filters_manage_screen.dart';
 import 'settings_screen.dart';
 import 'story_creator_screen.dart';
 import 'story_viewer_screen.dart';
-
-
-// ── Slide + fade page transition helper ─────────────────────────
-Route<T> slideRoute<T>(Widget page) {
-  return PageRouteBuilder<T>(
-    pageBuilder: (_, __, ___) => page,
-    transitionsBuilder: (_, animation, __, child) {
-      return SlideTransition(
-        position: Tween(begin: const Offset(0.3, 0), end: Offset.zero)
-            .animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic)),
-        child: FadeTransition(opacity: animation, child: child),
-      );
-    },
-    transitionDuration: const Duration(milliseconds: 300),
-  );
-}
+import '../rlink_nav_routes.dart';
 
 class ChatListScreen extends StatefulWidget {
   const ChatListScreen({super.key});
@@ -57,9 +46,11 @@ class ChatListScreen extends StatefulWidget {
 
 class _ChatListScreenState extends State<ChatListScreen>
     with UpdateAvailableBannerMixin {
-  int _currentTab = 0; // 0=Чаты, 1=Рядом, 2=Эфир
+  /// 0=Чаты, 1=Рядом, 2=Эфир, 3=Я
+  int _currentTab = 0;
   bool _searchActive = false;
   final _searchController = TextEditingController();
+  final ValueNotifier<bool> _nearbyShowRadar = ValueNotifier(true);
 
   @override
   void initState() {
@@ -72,6 +63,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   void dispose() {
     unregisterUpdateBannerListener();
     _searchController.dispose();
+    _nearbyShowRadar.dispose();
     super.dispose();
   }
 
@@ -177,21 +169,9 @@ class _ChatListScreenState extends State<ChatListScreen>
                     isPublic: isPublic,
                     description: descCtrl.text.trim().isNotEmpty ? descCtrl.text.trim() : null,
                   );
-                  GossipRouter.instance.broadcastChannelMeta(
-                    channelId: ch.id,
-                    name: ch.name,
-                    adminId: ch.adminId,
-                    avatarColor: ch.avatarColor,
-                    avatarEmoji: ch.avatarEmoji,
-                    description: ch.description,
-                    commentsEnabled: ch.commentsEnabled,
-                    createdAt: ch.createdAt,
-                    username: ch.username,
-                    universalCode: ch.universalCode,
-                    isPublic: ch.isPublic,
-                  );
+                  await ch.broadcastGossipMeta();
                   if (mounted) {
-                    Navigator.push(context, slideRoute(
+                    Navigator.push(context, rlinkPushRoute(
                       ChannelViewScreen(channel: ch),
                     ));
                   }
@@ -238,7 +218,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                   memberIds: [myId],
                 );
                 if (mounted) {
-                  Navigator.push(context, slideRoute(
+                  Navigator.push(context, rlinkPushRoute(
                     GroupChatScreen(group: group),
                   ));
                 }
@@ -257,12 +237,68 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
+  void _showEtherBroadcastOptions(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: cs.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: ListenableBuilder(
+            listenable: EtherBroadcastOptions.instance,
+            builder: (context, _) {
+              final o = EtherBroadcastOptions.instance;
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                    child: Row(
+                      children: [
+                        Icon(Icons.cell_tower_rounded,
+                            color: cs.primary, size: 22),
+                        const SizedBox(width: 10),
+                        Text(
+                          AppL10n.t('nav_ether'),
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SwitchListTile(
+                    value: o.anonymous,
+                    title: const Text('Анонимно'),
+                    secondary: const Icon(Icons.person_off_outlined),
+                    onChanged: o.setAnonymous,
+                  ),
+                  SwitchListTile(
+                    value: o.attachGeo,
+                    title: const Text('Прикреплять геолокацию'),
+                    secondary: const Icon(Icons.location_on_outlined),
+                    onChanged: o.setAttachGeo,
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final profile = ProfileService.instance.profile;
-
     return Scaffold(
       appBar: AppBar(
+        automaticallyImplyLeading: false,
         title: _searchActive
             ? TextField(
                 controller: _searchController,
@@ -278,37 +314,137 @@ class _ChatListScreenState extends State<ChatListScreen>
                   _triggerGlobalSearch(_searchController.text);
                 },
               )
-            : const Text('Rlink',
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22)),
+            : AnimatedSwitcher(
+                duration: const Duration(milliseconds: 320),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, anim) => FadeTransition(
+                  opacity: anim,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0, 0.06),
+                      end: Offset.zero,
+                    ).animate(anim),
+                    child: child,
+                  ),
+                ),
+                child: Text(
+                  _currentTab == 0
+                      ? 'Rlink'
+                      : _currentTab == 1
+                          ? AppL10n.t('nav_nearby')
+                          : _currentTab == 2
+                              ? AppL10n.t('nav_ether')
+                              : AppL10n.t('nav_me'),
+                  key: ValueKey<int>(_currentTab),
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w700, fontSize: 22),
+                ),
+              ),
         leading: _searchActive
             ? IconButton(
                 icon: const Icon(Icons.arrow_back),
                 onPressed: _toggleSearch,
               )
-            : GestureDetector(
-                onTap: () => Navigator.push(context, slideRoute(const ProfileScreen())),
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: profile != null
-                      ? Hero(
-                          tag: 'avatar_my_profile',
-                          child: AvatarWidget(
-                            initials: profile.initials,
-                            color: profile.avatarColor,
-                            emoji: profile.avatarEmoji,
-                            imagePath: profile.avatarImagePath,
-                            size: 36,
-                          ),
-                        )
-                      : const Icon(Icons.account_circle),
-                ),
-              ),
+            : null,
         actions: [
+          if (_currentTab == 0 && !_searchActive)
+            PopupMenuButton<String>(
+              tooltip: AppL10n.t('main_menu_tooltip'),
+              onSelected: (v) {
+                if (v == 'channel') _createChannel();
+                if (v == 'group') _createGroup();
+              },
+              itemBuilder: (ctx) => [
+                PopupMenuItem(
+                  value: 'channel',
+                  child: Row(children: [
+                    Icon(Icons.campaign_outlined,
+                        size: 20, color: Theme.of(ctx).colorScheme.primary),
+                    const SizedBox(width: 10),
+                    const Text('Новый канал'),
+                  ]),
+                ),
+                PopupMenuItem(
+                  value: 'group',
+                  child: Row(children: [
+                    Icon(Icons.group_add_outlined,
+                        size: 20, color: Theme.of(ctx).colorScheme.primary),
+                    const SizedBox(width: 10),
+                    const Text('Новая группа'),
+                  ]),
+                ),
+              ],
+            ),
           if (_currentTab == 1 && !_searchActive)
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              tooltip: 'Обновить',
-              onPressed: _rescan,
+            ValueListenableBuilder<bool>(
+              valueListenable: _nearbyShowRadar,
+              builder: (ctx, radar, _) {
+                final cs = Theme.of(ctx).colorScheme;
+                return PopupMenuButton<String>(
+                  icon: const Icon(Icons.more_vert),
+                  tooltip: 'Вид и обновление',
+                  onSelected: (v) {
+                    if (v == 'rescan') _rescan();
+                    if (v == 'radar') _nearbyShowRadar.value = true;
+                    if (v == 'list') _nearbyShowRadar.value = false;
+                  },
+                  itemBuilder: (ctx2) => [
+                    PopupMenuItem(
+                      value: 'rescan',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading:
+                            Icon(Icons.refresh, color: cs.primary, size: 22),
+                        title: const Text('Обновить поиск'),
+                        subtitle: const Text('Сканировать устройства рядом',
+                            style: TextStyle(fontSize: 11)),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'radar',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.radar, color: cs.primary, size: 22),
+                        title: const Text('Радар'),
+                        trailing: radar
+                            ? Icon(Icons.check, color: cs.primary)
+                            : null,
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'list',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading:
+                            Icon(Icons.list_rounded, color: cs.primary, size: 22),
+                        title: const Text('Список'),
+                        trailing: !radar
+                            ? Icon(Icons.check, color: cs.primary)
+                            : null,
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          if (_currentTab == 0 && !_searchActive)
+            ListenableBuilder(
+              listenable: ChatInboxService.instance,
+              builder: (ctx, _) {
+                final inbox = ChatInboxService.instance;
+                final cs = Theme.of(ctx).colorScheme;
+                return IconButton(
+                  icon: Icon(
+                    inbox.archiveView
+                        ? Icons.inventory_2
+                        : Icons.inventory_2_outlined,
+                    color: inbox.archiveView ? cs.primary : null,
+                  ),
+                  tooltip: 'Архив',
+                  onPressed: () => inbox.setArchiveView(!inbox.archiveView),
+                );
+              },
             ),
           if (_currentTab == 0)
             IconButton(
@@ -316,31 +452,11 @@ class _ChatListScreenState extends State<ChatListScreen>
               tooltip: _searchActive ? 'Закрыть' : 'Поиск',
               onPressed: _toggleSearch,
             ),
-          if (!_searchActive)
-            PopupMenuButton<String>(
-              icon: const Icon(Icons.more_vert),
-              onSelected: (v) {
-                switch (v) {
-                  case 'group': _createGroup();
-                  case 'channel': _createChannel();
-                  case 'settings': Navigator.push(context, slideRoute(const SettingsScreen()));
-                }
-              },
-              itemBuilder: (_) => [
-                const PopupMenuItem(value: 'group', child: ListTile(
-                  leading: Icon(Icons.group_add), title: Text('Новая группа'),
-                  dense: true, contentPadding: EdgeInsets.zero,
-                )),
-                const PopupMenuItem(value: 'channel', child: ListTile(
-                  leading: Icon(Icons.campaign), title: Text('Новый канал'),
-                  dense: true, contentPadding: EdgeInsets.zero,
-                )),
-                const PopupMenuDivider(),
-                const PopupMenuItem(value: 'settings', child: ListTile(
-                  leading: Icon(Icons.settings_outlined), title: Text('Настройки'),
-                  dense: true, contentPadding: EdgeInsets.zero,
-                )),
-              ],
+          if (_currentTab == 2 && !_searchActive)
+            IconButton(
+              tooltip: AppL10n.t('nav_ether'),
+              onPressed: () => _showEtherBroadcastOptions(context),
+              icon: const Icon(Icons.tune_rounded),
             ),
         ],
       ),
@@ -348,8 +464,9 @@ class _ChatListScreenState extends State<ChatListScreen>
         index: _currentTab,
         children: [
           _UnifiedChatsTab(searchQuery: _searchActive ? _searchController.text : ''),
-          _NearbyTab(),
+          _NearbyTab(showRadar: _nearbyShowRadar),
           const EtherScreen(),
+          const _MeTab(),
         ],
       ),
       bottomNavigationBar: _AnimatedNavBar(
@@ -384,6 +501,46 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 }
 
+// ── Аватар в нижнем меню (вкладка «Я») ────────────────────────────
+
+class _MeTabNavIcon extends StatelessWidget {
+  final bool selected;
+  const _MeTabNavIcon({required this.selected});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return ValueListenableBuilder<UserProfile?>(
+      valueListenable: ProfileService.instance.profileNotifier,
+      builder: (context, profile, _) {
+        if (profile == null) {
+          return Icon(
+            selected ? Icons.person : Icons.person_outline,
+            size: 24,
+          );
+        }
+        final avatar = AvatarWidget(
+          initials: profile.initials,
+          color: profile.avatarColor,
+          emoji: profile.avatarEmoji,
+          imagePath: profile.avatarImagePath,
+          size: selected ? 26 : 24,
+        );
+        if (!selected) {
+          return Opacity(opacity: 0.85, child: avatar);
+        }
+        return Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: cs.primary, width: 2),
+          ),
+          child: avatar,
+        );
+      },
+    );
+  }
+}
+
 // ── Animated bottom nav bar (4 tabs) ──────────────────────────────
 
 class _AnimatedNavBar extends StatelessWidget {
@@ -401,7 +558,7 @@ class _AnimatedNavBar extends StatelessWidget {
     return NavigationBar(
       selectedIndex: selectedIndex,
       onDestinationSelected: onDestinationSelected,
-      animationDuration: const Duration(milliseconds: 400),
+      animationDuration: const Duration(milliseconds: 520),
       indicatorColor: theme.colorScheme.primary.withValues(alpha: 0.15),
       indicatorShape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
@@ -445,6 +602,69 @@ class _AnimatedNavBar extends StatelessWidget {
           selectedIcon: const Icon(Icons.cell_tower),
           label: AppL10n.t('nav_ether'),
         ),
+        NavigationDestination(
+          icon: const _MeTabNavIcon(selected: false),
+          selectedIcon: const _MeTabNavIcon(selected: true),
+          label: AppL10n.t('nav_me'),
+        ),
+      ],
+    );
+  }
+}
+
+class _MeTab extends StatelessWidget {
+  const _MeTab();
+
+  @override
+  Widget build(BuildContext context) {
+    final profile = ProfileService.instance.profile;
+    final cs = Theme.of(context).colorScheme;
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+      children: [
+        if (profile != null)
+          Card(
+            margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: ListTile(
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              leading: Hero(
+                tag: 'avatar_my_profile',
+                child: Material(
+                  color: Colors.transparent,
+                  child: AvatarWidget(
+                    initials: profile.initials,
+                    color: profile.avatarColor,
+                    emoji: profile.avatarEmoji,
+                    imagePath: profile.avatarImagePath,
+                    size: 52,
+                  ),
+                ),
+              ),
+              title: Text(
+                profile.nickname,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Text(
+                profile.statusEmoji.isEmpty
+                    ? AppL10n.t('menu_open_profile')
+                    : '${profile.statusEmoji} · ${AppL10n.t('menu_open_profile')}',
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                rlinkPushRoute(const ProfileScreen()),
+              ),
+            ),
+          ),
+        ListTile(
+          leading: Icon(Icons.settings_outlined, color: cs.primary),
+          title: Text(AppL10n.t('settings')),
+          onTap: () => Navigator.push(
+            context,
+            rlinkPushRoute(const SettingsScreen()),
+          ),
+        ),
       ],
     );
   }
@@ -471,10 +691,15 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   VoidCallback? _bleListener;   // fires on BLE peer connect/disconnect
   VoidCallback? _contactListener; // fires when contactsNotifier updates
   VoidCallback? _readStateListener;
+  late final VoidCallback _inboxListener;
 
   @override
   void initState() {
     super.initState();
+    _inboxListener = () {
+      if (mounted) setState(() {});
+    };
+    ChatInboxService.instance.addListener(_inboxListener);
     _load();
     _sub = incomingMessageController.stream.listen((_) {
       _loadDebounce?.cancel();
@@ -510,6 +735,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     if (_readStateListener != null) {
       ChatStorageService.instance.readStateVersion.removeListener(_readStateListener!);
     }
+    ChatInboxService.instance.removeListener(_inboxListener);
     super.dispose();
   }
 
@@ -525,6 +751,8 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     final summaries = await ChatStorageService.instance.getChatSummaries();
     final summaryIds = <String>{};
     for (final s in summaries) {
+      if (s.peerId == kAiBotPeerId) continue;
+      if (myId.isNotEmpty && s.peerId == myId) continue;
       summaryIds.add(s.peerId);
       items.add(_ChatItem(
         type: _ChatItemType.personal,
@@ -543,6 +771,8 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     // 1б) Контакты без переписки — добавляем с пустым lastMessage
     final contacts = await ChatStorageService.instance.getContacts();
     for (final c in contacts) {
+      if (c.publicKeyHex == kAiBotPeerId) continue;
+      if (myId.isNotEmpty && c.publicKeyHex == myId) continue;
       if (summaryIds.contains(c.publicKeyHex)) continue;
       items.add(_ChatItem(
         type: _ChatItemType.personal,
@@ -586,7 +816,13 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     // 3) Каналы — только те, где я подписан или являюсь админом.
     final channels = await ChannelService.instance.getChannels();
     for (final ch in channels) {
-      if (ch.adminId != myId && !ch.subscriberIds.contains(myId)) continue;
+      if (myId.isEmpty) continue;
+      if (ch.adminId != myId &&
+          !ch.subscriberIds.contains(myId) &&
+          !ch.moderatorIds.contains(myId) &&
+          !ch.linkAdminIds.contains(myId)) {
+        continue;
+      }
       final lastPost = await ChannelService.instance.getLastPost(ch.id);
       items.add(_ChatItem(
         type: _ChatItemType.channel,
@@ -609,6 +845,52 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     // Сортируем по последнему сообщению (новые сверху)
     items.sort((a, b) => b.lastTime.compareTo(a.lastTime));
 
+    if (myId.isNotEmpty) {
+      final savedLast = await ChatStorageService.instance.getLastMessage(myId);
+      final savedPreview = savedLast != null
+          ? dmLastMessagePreview(savedLast)
+          : AppL10n.t('chat_saved_messages_empty');
+      final savedTime =
+          savedLast?.timestamp ?? DateTime.fromMillisecondsSinceEpoch(0);
+      items.insert(
+        0,
+        _ChatItem(
+          isSavedMessages: true,
+          savedHasMessages: savedLast != null,
+          id: myId,
+          nickname: AppL10n.t('chat_saved_messages'),
+          avatarColor: 0xFF26A69A,
+          avatarEmoji: '⭐',
+          avatarImagePath: null,
+          lastMessage: savedPreview,
+          lastTime: savedTime,
+          isOnline: false,
+          unreadCount: 0,
+        ),
+      );
+      final aiLast =
+          await ChatStorageService.instance.getLastMessage(kAiBotPeerId);
+      final aiPreview = aiLast != null
+          ? dmLastMessagePreview(aiLast)
+          : 'Чат с нейросетью Сбера — только текст';
+      items.insert(
+        1,
+        _ChatItem(
+          isAiBot: true,
+          id: kAiBotPeerId,
+          nickname: kAiBotNickname,
+          avatarColor: kAiBotAvatarColor,
+          avatarEmoji: kAiBotEmoji,
+          avatarImagePath: null,
+          lastMessage: aiPreview,
+          lastTime: aiLast?.timestamp ??
+              DateTime.fromMillisecondsSinceEpoch(0),
+          isOnline: false,
+          unreadCount: dmUnread[kAiBotPeerId] ?? 0,
+        ),
+      );
+    }
+
     if (!mounted) return;
     setState(() => _items = items);
   }
@@ -616,7 +898,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   Future<void> _navigate(BuildContext context, _ChatItem item) async {
     switch (item.type) {
       case _ChatItemType.personal:
-        await Navigator.push(context, slideRoute(ChatScreen(
+        await Navigator.push(context, rlinkChatRoute(ChatScreen(
           peerId: item.id,
           peerNickname: item.nickname,
           peerAvatarColor: item.avatarColor,
@@ -626,36 +908,320 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
       case _ChatItemType.group:
         final group = await GroupService.instance.getGroup(item.id);
         if (group == null || !context.mounted) return;
-        await Navigator.push(context, slideRoute(
+        await Navigator.push(context, rlinkPushRoute(
           GroupChatScreen(group: group),
         ));
       case _ChatItemType.channel:
         final channel = await ChannelService.instance.getChannel(item.id);
         if (channel == null || !context.mounted) return;
-        await Navigator.push(context, slideRoute(
+        await Navigator.push(context, rlinkPushRoute(
           ChannelViewScreen(channel: channel),
         ));
     }
-    _load();
+    if (mounted) _load();
+  }
+
+  List<_ChatItem> _storiesSource() {
+    final inbox = ChatInboxService.instance;
+    return _items
+        .where((it) => !inbox.isArchived(_chatItemInboxKey(it)))
+        .toList();
+  }
+
+  List<_ChatItem> _computeVisibleItems() {
+    final inbox = ChatInboxService.instance;
+    final tab = inbox.selectedTab;
+
+    Iterable<_ChatItem> pool = _items;
+    if (inbox.archiveView) {
+      pool = pool.where((it) => inbox.isArchived(_chatItemInboxKey(it)));
+    } else {
+      pool = pool.where((it) => !inbox.isArchived(_chatItemInboxKey(it)));
+      if (tab != null) {
+        pool = pool.where((it) {
+          final k = _chatItemInboxKey(it);
+          final kind = _chatItemInboxKind(it);
+          return tab.matches(k, kind);
+        });
+      }
+    }
+
+    final list = pool.toList();
+    if (inbox.archiveView) {
+      list.sort((a, b) => b.lastTime.compareTo(a.lastTime));
+      return list;
+    }
+
+    final pinOrder = inbox.pinOrder;
+    final keysIn = {for (final x in list) _chatItemInboxKey(x): x};
+    final out = <_ChatItem>[];
+
+    _ChatItem? saved;
+    for (final it in list) {
+      if (it.isSavedMessages) {
+        saved = it;
+        break;
+      }
+    }
+    if (saved != null) out.add(saved);
+
+    _ChatItem? aiItem;
+    String? aiKey;
+    for (final it in list) {
+      if (it.isAiBot) {
+        aiItem = it;
+        aiKey = _chatItemInboxKey(it);
+        break;
+      }
+    }
+
+    for (final key in pinOrder) {
+      if (saved != null && key == _chatItemInboxKey(saved)) continue;
+      final it = keysIn[key];
+      if (it != null) out.add(it);
+    }
+
+    var used = out.map(_chatItemInboxKey).toSet();
+    if (aiItem != null &&
+        aiKey != null &&
+        !used.contains(aiKey)) {
+      out.add(aiItem);
+      used = out.map(_chatItemInboxKey).toSet();
+    }
+
+    final tail =
+        list.where((it) => !used.contains(_chatItemInboxKey(it))).toList();
+    tail.sort((a, b) => b.lastTime.compareTo(a.lastTime));
+    out.addAll(tail);
+    return out;
+  }
+
+  void _showChatItemActions(BuildContext context, _ChatItem item) {
+    final inbox = ChatInboxService.instance;
+    final key = _chatItemInboxKey(item);
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (inbox.archiveView)
+              ListTile(
+                leading: const Icon(Icons.unarchive_outlined),
+                title: const Text('Вернуть из архива'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await inbox.unarchive(key);
+                },
+              )
+            else ...[
+              if (inbox.isPinned(key))
+                ListTile(
+                  leading: const Icon(Icons.push_pin_outlined),
+                  title: const Text('Открепить'),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await inbox.unpin(key);
+                  },
+                )
+              else
+                ListTile(
+                  leading: const Icon(Icons.push_pin_outlined),
+                  title: const Text('Закрепить'),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await inbox.pin(key);
+                  },
+                ),
+              ListTile(
+                leading: const Icon(Icons.archive_outlined),
+                title: const Text('В архив'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await inbox.archive(key);
+                },
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showPinReorderSheet(BuildContext context) {
+    final inbox = ChatInboxService.instance;
+    final keyToItem = {for (final x in _items) _chatItemInboxKey(x): x};
+    var keys = List<String>.from(inbox.pinOrder);
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSt) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'Порядок закреплённых',
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: MediaQuery.of(ctx).size.height * 0.45,
+                      child: ReorderableListView.builder(
+                        itemCount: keys.length,
+                        onReorder: (oldI, newI) {
+                          setSt(() {
+                            if (newI > oldI) newI--;
+                            final x = keys.removeAt(oldI);
+                            keys.insert(newI, x);
+                          });
+                        },
+                        itemBuilder: (_, i) {
+                          final k = keys[i];
+                          return ListTile(
+                            key: ValueKey(k),
+                            leading: const Icon(Icons.drag_handle),
+                            title: Text(keyToItem[k]?.nickname ?? k),
+                          );
+                        },
+                      ),
+                    ),
+                    FilledButton(
+                      onPressed: () async {
+                        await inbox.setPinOrder(keys);
+                        if (ctx.mounted) Navigator.pop(ctx);
+                      },
+                      child: const Text('Готово'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildFilterBar(BuildContext context) {
+    final inbox = ChatInboxService.instance;
+    final cs = Theme.of(context).colorScheme;
+    if (inbox.archiveView) {
+      return Material(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: Row(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => inbox.setArchiveView(false),
+                tooltip: 'Закрыть архив',
+              ),
+              const Expanded(
+                child: Text(
+                  'Архив',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: 46,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            children: [
+              for (final tab in inbox.tabs)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: FilterChip(
+                    label: Text(inbox.tabLabel(tab)),
+                    selected: inbox.selectedTabId == tab.id,
+                    onSelected: (_) => inbox.setSelectedTab(tab.id),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 0, 8, 2),
+          child: Wrap(
+            spacing: 0,
+            children: [
+              TextButton.icon(
+                onPressed: () => Navigator.push(
+                  context,
+                  rlinkPushRoute(const ChatInboxFiltersManageScreen()),
+                ),
+                icon: const Icon(Icons.tune, size: 18),
+                label: const Text('Фильтры'),
+              ),
+              if (inbox.pinOrder.isNotEmpty)
+                TextButton.icon(
+                  onPressed: () => _showPinReorderSheet(context),
+                  icon: const Icon(Icons.push_pin_outlined, size: 18),
+                  label: const Text('Закреплённые'),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final q = widget.searchQuery.toLowerCase().trim();
+    final inbox = ChatInboxService.instance;
+    final visible = _computeVisibleItems();
 
     if (_items.isEmpty && q.isEmpty) {
       return Column(children: [
-        _StoriesStrip(chatItems: _items),
+        _StoriesStrip(chatItems: _storiesSource()),
         const Expanded(child: _EmptyChatsState()),
       ]);
     }
 
     if (q.isEmpty) {
+      if (visible.isEmpty) {
+        return Column(
+          children: [
+            _StoriesStrip(chatItems: _storiesSource()),
+            _buildFilterBar(context),
+            Expanded(
+              child: Center(
+                child: Text(
+                  inbox.archiveView
+                      ? 'Архив пуст'
+                      : 'Нет чатов в этой вкладке',
+                  style: TextStyle(color: Theme.of(context).hintColor),
+                ),
+              ),
+            ),
+          ],
+        );
+      }
       return Column(children: [
-        _StoriesStrip(chatItems: _items),
+        _StoriesStrip(chatItems: _storiesSource()),
+        _buildFilterBar(context),
         Expanded(
             child: ListView.separated(
-          itemCount: _items.length,
+          itemCount: visible.length,
           padding: const EdgeInsets.only(top: 2, bottom: 8),
           separatorBuilder: (_, __) => Divider(
             height: 1,
@@ -666,12 +1232,19 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
                 .withValues(alpha: 0.22),
           ),
           itemBuilder: (_, i) {
-            final item = _items[i];
+            final item = visible[i];
+            final key = _chatItemInboxKey(item);
+            final pinned =
+                inbox.pinOrder.contains(key) && !item.isSavedMessages;
             return RepaintBoundary(
               child: _TelegramChatRow(
                 item: item,
                 onTap: () => _navigate(context, item),
-                timeLabel: _fmtTime(item.lastTime),
+                onLongPress: () => _showChatItemActions(context, item),
+                showPinned: pinned,
+                timeLabel: item.isSavedMessages && !item.savedHasMessages
+                    ? ''
+                    : _fmtTime(item.lastTime),
               ),
             );
           },
@@ -679,10 +1252,12 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
       ]);
     }
 
-    // Режим поиска — секции «Чаты», «Контакты», «Каналы», «Люди в сети».
+    final forSearch = _items
+        .where((it) => !inbox.isArchived(_chatItemInboxKey(it)))
+        .toList();
     return _UnifiedSearchResults(
       query: q,
-      localItems: _items,
+      localItems: forSearch,
       onOpenItem: (item) => _navigate(context, item),
     );
   }
@@ -701,11 +1276,15 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
 class _TelegramChatRow extends StatelessWidget {
   final _ChatItem item;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+  final bool showPinned;
   final String timeLabel;
 
   const _TelegramChatRow({
     required this.item,
     required this.onTap,
+    this.onLongPress,
+    this.showPinned = false,
     required this.timeLabel,
   });
 
@@ -721,6 +1300,7 @@ class _TelegramChatRow extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(
@@ -738,8 +1318,12 @@ class _TelegramChatRow extends StatelessWidget {
                   size: 52,
                   isOnline: item.isOnline,
                   hasStory: item.type == _ChatItemType.personal &&
+                      !item.isSavedMessages &&
+                      !item.isAiBot &&
                       StoryService.instance.hasActiveStory(item.peerId),
                   hasUnviewedStory: item.type == _ChatItemType.personal &&
+                      !item.isSavedMessages &&
+                      !item.isAiBot &&
                       StoryService.instance.hasUnviewedStory(item.peerId),
                 ),
               ),
@@ -762,6 +1346,42 @@ class _TelegramChatRow extends StatelessWidget {
                             padding: const EdgeInsets.only(right: 4, top: 2),
                             child: Icon(Icons.campaign_outlined,
                                 size: 18, color: cs.primary.withValues(alpha: 0.75)),
+                          ),
+                        if (item.isAiBot)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6, top: 0),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: cs.primary.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(
+                                  color:
+                                      cs.primary.withValues(alpha: 0.35),
+                                ),
+                              ),
+                              child: Text(
+                                'ИИ',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: cs.primary,
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (item.isSavedMessages)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 4, top: 2),
+                            child: Icon(Icons.bookmark_outline_rounded,
+                                size: 18, color: cs.primary.withValues(alpha: 0.85)),
+                          ),
+                        if (showPinned)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 4, top: 2),
+                            child: Icon(Icons.push_pin,
+                                size: 16, color: cs.primary.withValues(alpha: 0.65)),
                           ),
                         Expanded(
                           child: Text(
@@ -893,6 +1513,12 @@ class _ChatItem {
   final DateTime lastTime;
   final bool isOnline;
   final int unreadCount;
+  /// Чат «Избранное» (сохранённые сообщения у себя).
+  final bool isSavedMessages;
+  /// Есть ли уже сообщения в избранном (для подписи времени в списке).
+  final bool savedHasMessages;
+  /// Чат с встроенным ИИ (GigaChat), не настоящий контакт.
+  final bool isAiBot;
   _ChatItem({
     this.type = _ChatItemType.personal,
     required this.id,
@@ -904,10 +1530,28 @@ class _ChatItem {
     required this.lastTime,
     required this.isOnline,
     this.unreadCount = 0,
+    this.isSavedMessages = false,
+    this.savedHasMessages = true,
+    this.isAiBot = false,
   });
   // Backward compat
   String get peerId => id;
 }
+
+ChatInboxItemKind _chatItemInboxKind(_ChatItem item) {
+  if (item.isSavedMessages) return ChatInboxItemKind.saved;
+  switch (item.type) {
+    case _ChatItemType.personal:
+      return ChatInboxItemKind.dm;
+    case _ChatItemType.group:
+      return ChatInboxItemKind.group;
+    case _ChatItemType.channel:
+      return ChatInboxItemKind.channel;
+  }
+}
+
+String _chatItemInboxKey(_ChatItem item) =>
+    chatInboxKey(kind: _chatItemInboxKind(item), id: item.id);
 
 // ── Единый блок результатов поиска (чаты + контакты + каналы + люди) ──
 
@@ -927,12 +1571,22 @@ class _UnifiedSearchResults extends StatefulWidget {
 
 class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
   List<Channel> _channelMatches = [];
+  int _channelSearchGen = 0;
 
   @override
   void initState() {
     super.initState();
     _loadChannels();
+    ChannelService.instance.version.addListener(_onChannelsChanged);
   }
+
+  @override
+  void dispose() {
+    ChannelService.instance.version.removeListener(_onChannelsChanged);
+    super.dispose();
+  }
+
+  void _onChannelsChanged() => _loadChannels();
 
   @override
   void didUpdateWidget(_UnifiedSearchResults old) {
@@ -941,8 +1595,10 @@ class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
   }
 
   Future<void> _loadChannels() async {
-    final matches = await ChannelService.instance.searchChannels(widget.query);
-    if (!mounted) return;
+    final gen = ++_channelSearchGen;
+    final matches = await ChannelService.instance
+        .searchChannels(widget.query, includeHidden: true);
+    if (!mounted || gen != _channelSearchGen) return;
     setState(() => _channelMatches = matches);
   }
 
@@ -1026,7 +1682,9 @@ class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
                     _TelegramChatRow(
                       item: m,
                       onTap: () => widget.onOpenItem(m),
-                      timeLabel: _fmtTimeStatic(m.lastTime),
+                      timeLabel: m.isSavedMessages && !m.savedHasMessages
+                          ? ''
+                          : _fmtTimeStatic(m.lastTime),
                     ),
                 ],
                 if (contactMatches.isNotEmpty) ...[
@@ -1050,7 +1708,7 @@ class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
                       ),
                       onTap: () => Navigator.push(
                         context,
-                        slideRoute(ChatScreen(
+                        rlinkChatRoute(ChatScreen(
                           peerId: c.publicKeyHex,
                           peerNickname: c.nickname,
                           peerAvatarColor: c.avatarColor,
@@ -1091,7 +1749,7 @@ class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
                       ),
                       onTap: () => Navigator.push(
                         context,
-                        slideRoute(ChannelViewScreen(channel: ch)),
+                        rlinkPushRoute(ChannelViewScreen(channel: ch)),
                       ),
                     ),
                 ],
@@ -1142,7 +1800,7 @@ class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
                             p.nick.isNotEmpty ? p.nick : p.shortId;
                         Navigator.push(
                           context,
-                          slideRoute(ChatScreen(
+                          rlinkChatRoute(ChatScreen(
                             peerId: p.publicKey,
                             peerNickname: nick,
                             peerAvatarColor: 0xFF607D8B,
@@ -1235,7 +1893,7 @@ class _StoriesStrip extends StatelessWidget {
                           onTap: () {
                             Navigator.push(
                               context,
-                              slideRoute(
+                              rlinkPushRoute(
                                 StoryCreatorScreen(
                                     authorId: myProfile.publicKeyHex),
                               ),
@@ -1272,7 +1930,7 @@ class _StoriesStrip extends StatelessWidget {
                             if (existing.isNotEmpty) {
                               Navigator.push(
                                 context,
-                                slideRoute(
+                                rlinkPushRoute(
                                   StoryViewerScreen(
                                     authorId: myProfile.publicKeyHex,
                                     authorName: 'Я',
@@ -1309,7 +1967,7 @@ class _StoriesStrip extends StatelessWidget {
                           ),
                           onTap: () => Navigator.push(
                             context,
-                            slideRoute(
+                            rlinkPushRoute(
                               StoryViewerScreen(
                                 authorId: authorId,
                                 authorName: name,
@@ -1399,18 +2057,20 @@ class _StoryAvatar extends StatelessWidget {
 // ── Рядом (радар / список) ───────────────────────────────────────
 
 class _NearbyTab extends StatefulWidget {
+  final ValueNotifier<bool> showRadar;
+
+  const _NearbyTab({required this.showRadar});
+
   @override
   State<_NearbyTab> createState() => _NearbyTabState();
 }
 
 class _NearbyTabState extends State<_NearbyTab> {
-  bool _showRadar = true;
-
   void _navigateToChat(String peerId, String nickname, int color,
       String emoji, String? imagePath) {
     Navigator.push(
       context,
-      slideRoute(ChatScreen(
+      rlinkChatRoute(ChatScreen(
         peerId: peerId,
         peerNickname: nickname,
         peerAvatarColor: color,
@@ -1451,37 +2111,21 @@ class _NearbyTabState extends State<_NearbyTab> {
       );
     }
 
-    return Stack(
-      children: [
-        AnimatedSwitcher(
+    return ValueListenableBuilder<bool>(
+      valueListenable: widget.showRadar,
+      builder: (context, showRadar, _) {
+        return AnimatedSwitcher(
           duration: const Duration(milliseconds: 350),
           switchInCurve: Curves.easeOut,
           switchOutCurve: Curves.easeIn,
-          child: _showRadar
+          child: showRadar
               ? MeshRadarWidget(
                   key: const ValueKey('radar'),
                   onPeerTap: _navigateToChat,
                 )
               : const _NearbyListView(key: ValueKey('list')),
-        ),
-        // Toggle button
-        Positioned(
-          right: 16,
-          bottom: 16,
-          child: FloatingActionButton.small(
-            heroTag: 'nearby_toggle',
-            onPressed: () => setState(() => _showRadar = !_showRadar),
-            tooltip: _showRadar ? 'Список' : 'Радар',
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 200),
-              child: Icon(
-                _showRadar ? Icons.list_rounded : Icons.radar,
-                key: ValueKey(_showRadar),
-              ),
-            ),
-          ),
-        ),
-      ],
+        );
+      },
     );
   }
 }
@@ -1654,6 +2298,7 @@ class _PendingDeviceTile extends StatelessWidget {
         emoji: profile.avatarEmoji,
         x25519Key: CryptoService.instance.x25519PublicKeyBase64,
         tags: profile.tags,
+        statusEmoji: profile.statusEmoji,
       );
     }
 
@@ -1851,6 +2496,9 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
           x25519Key: theirX25519.isNotEmpty ? theirX25519 : existing?.x25519Key,
           addedAt: existing?.addedAt ?? DateTime.now(),
           tags: theirTags.isNotEmpty ? theirTags : (existing?.tags ?? const []),
+          bannerImagePath: existing?.bannerImagePath,
+          profileMusicPath: existing?.profileMusicPath,
+          statusEmoji: existing?.statusEmoji ?? '',
         ));
       } catch (_) {}
     }
@@ -1864,6 +2512,7 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
       emoji: profile.avatarEmoji,
       x25519Key: CryptoService.instance.x25519PublicKeyBase64,
       tags: profile.tags,
+      statusEmoji: profile.statusEmoji,
     );
     // Send full profile (avatar + banner) directly to the paired peer
     final pairedKey = widget.info['publicKey'] as String? ?? '';
@@ -2367,7 +3016,7 @@ class _NearbyDeviceTile extends StatelessWidget {
               style: const TextStyle(fontWeight: FontWeight.w500)),
           onTap: () => Navigator.push(
             context,
-            slideRoute(
+            rlinkChatRoute(
               ChatScreen(
                 peerId: publicKeyOrBleId,
                 peerNickname: nickname,
@@ -2397,7 +3046,7 @@ class _NearbyDeviceTile extends StatelessWidget {
               tooltip: 'Написать',
               onPressed: () => Navigator.push(
                 context,
-                slideRoute(
+                rlinkChatRoute(
                   ChatScreen(
                     peerId: publicKeyOrBleId,
                     peerNickname: nickname,

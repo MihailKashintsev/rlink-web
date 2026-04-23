@@ -1,0 +1,93 @@
+<!--
+  Tilda → Zero Block (T123) → только содержимое между <div id="rlink-ch-embed"> … </div>
+  или вставьте весь блок целиком, если Tilda принимает полный HTML.
+
+  Страница: https://rendergames.online/rlinkchanales
+  Приложение шарит: .../rlinkchanales?channel=<id> (query обязателен).
+  Магазинов нет — одна кнопка на страницу загрузки DOWNLOAD_PAGE.
+-->
+<style>
+  #rlink-ch-embed { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    max-width: 420px; margin: 0 auto; padding: 24px 16px 40px; text-align: center;
+    color: #1a1a1a; box-sizing: border-box; }
+  #rlink-ch-embed * { box-sizing: border-box; }
+  #rlink-ch-embed h1 { font-size: 1.35rem; font-weight: 700; margin: 0 0 12px; line-height: 1.25; }
+  #rlink-ch-embed p { font-size: 0.95rem; line-height: 1.45; color: #444; margin: 0 0 16px; }
+  #rlink-ch-embed .id { font-size: 0.8rem; color: #888; word-break: break-all; margin-bottom: 20px; }
+  #rlink-ch-embed .btn { display: block; width: 100%; padding: 14px 18px; margin: 10px 0;
+    border-radius: 12px; font-size: 1rem; font-weight: 600; text-decoration: none;
+    border: none; cursor: pointer; text-align: center; }
+  #rlink-ch-embed .btn-primary { background: #0d9488; color: #fff; }
+  #rlink-ch-embed .btn-primary:active { opacity: 0.9; }
+  #rlink-ch-embed .btn-secondary { background: #f3f4f6; color: #111; }
+  #rlink-ch-embed .err { color: #b91c1c; font-size: 0.9rem; }
+  #rlink-ch-embed .stores { margin-top: 28px; padding-top: 20px; border-top: 1px solid #e5e7eb; }
+  #rlink-ch-embed .stores p { font-size: 0.85rem; color: #666; }
+</style>
+
+<div id="rlink-ch-embed">
+  <h1>Канал в Rlink</h1>
+  <p>Откройте ссылку в приложении. Если не открылось — нажмите кнопку ниже или установите Rlink.</p>
+  <div class="id" id="rlink-ch-id-line" hidden></div>
+  <p class="err" id="rlink-ch-err" hidden>Откройте полную ссылку из приглашения (в адресе должно быть ?channel=…). Или установите Rlink и попросите ссылку у автора канала.</p>
+  <button type="button" class="btn btn-primary" id="rlink-ch-open">Открыть в приложении</button>
+  <div class="stores">
+    <p>Нет приложения? В Google Play и App Store пока нет — сборки на сайте.</p>
+    <a class="btn btn-secondary" id="rlink-ch-download" href="https://rendergames.online/rlink" target="_blank" rel="noopener">Скачать Rlink с сайта</a>
+  </div>
+</div>
+
+<script>
+(function () {
+  var DOWNLOAD_PAGE = 'https://rendergames.online/rlink';
+
+  function parseChannelId() {
+    var u = window.location;
+    var search = u.search || '';
+    var params = {};
+    search.replace(/^\?/, '').split('&').forEach(function (pair) {
+      var p = pair.split('=');
+      if (p[0]) params[decodeURIComponent(p[0])] = decodeURIComponent((p[1] || '').replace(/\+/g, ' '));
+    });
+    var fromQ = params.channel || params.c;
+    if (fromQ && String(fromQ).trim()) return String(fromQ).trim();
+
+    var segs = u.pathname.split('/').filter(Boolean);
+    var i = segs.indexOf('channel');
+    if (i >= 0 && segs[i + 1]) return segs[i + 1];
+    return '';
+  }
+
+  var id = parseChannelId();
+  var deep = id ? 'rlink://channel/' + encodeURIComponent(id) : '';
+
+  var elErr = document.getElementById('rlink-ch-err');
+  var elId = document.getElementById('rlink-ch-id-line');
+  var elOpen = document.getElementById('rlink-ch-open');
+  var elDl = document.getElementById('rlink-ch-download');
+  if (elDl) elDl.href = DOWNLOAD_PAGE;
+
+  if (!id) {
+    elErr.hidden = false;
+    elOpen.disabled = true;
+    elOpen.style.opacity = '0.5';
+    return;
+  }
+
+  elId.textContent = 'ID: ' + id;
+  elId.hidden = false;
+
+  function openApp() {
+    window.location.href = deep;
+  }
+
+  elOpen.addEventListener('click', openApp);
+
+  /* Авто-попытка открыть приложение (на телефоне часто срабатывает сразу) */
+  setTimeout(function () {
+    if (document.visibilityState === 'visible' && id) {
+      openApp();
+    }
+  }, 400);
+})();
+</script>

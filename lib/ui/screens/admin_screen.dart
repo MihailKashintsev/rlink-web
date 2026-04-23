@@ -7,6 +7,7 @@ import '../../services/app_settings.dart';
 import '../../services/channel_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
+import '../../services/relay_service.dart';
 
 // ─── Pure-Dart SHA-256 (no external package needed) ────────────────
 String sha256Hex(String input) => _sha256Digest(utf8.encode(input));
@@ -422,7 +423,13 @@ class _AdminScreenState extends State<AdminScreen>
               }
               final newHash = sha256Hex(newCtrl.text);
               final rev = DateTime.now().millisecondsSinceEpoch;
-              final inner = jsonEncode({'hash': newHash, 'rev': rev});
+              final myId = CryptoService.instance.publicKeyHex;
+              final chans = myId.isEmpty
+                  ? <String>[]
+                  : await ChannelService.instance
+                      .subscribedChannelIdsForAccountSync(myId);
+              final inner =
+                  jsonEncode({'hash': newHash, 'rev': rev, 'chans': chans});
               final sealed =
                   await CryptoService.instance.sealAdminPanelSync(inner);
               await AppSettings.instance
@@ -430,7 +437,9 @@ class _AdminScreenState extends State<AdminScreen>
               await GossipRouter.instance.sendAdminConfigSecure(
                 adminPasswordHash: newHash,
                 revision: rev,
+                channelIds: chans,
               );
+              await RelayService.instance.putAccountSyncBlob(sealed);
               if (ctx.mounted) Navigator.pop(ctx);
               messenger.showSnackBar(
                 const SnackBar(

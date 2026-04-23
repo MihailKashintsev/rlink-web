@@ -102,13 +102,6 @@
 					<string>RlinkMono</string>
 				</array>
 			</dict>
-			<key>RlinkMirror</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>RlinkMirror</string>
-				</array>
-			</dict>
 			<key>RlinkAi</key>
 			<dict>
 				<key>CFBundleIconFiles</key>
@@ -120,8 +113,32 @@
 	</dict>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>GIDClientID</key>
+	<string>180782636430-8j9dllfj3qksjv7odj5jbkiuojjs0mtf.apps.googleusercontent.com</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.rendergames.rlink.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>rlink</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.180782636430-8j9dllfj3qksjv7odj5jbkiuojjs0mtf</string>
+			</array>
+		</dict>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
+		<string>audio</string>
 		<string>bluetooth-central</string>
 		<string>bluetooth-peripheral</string>
 	</array>

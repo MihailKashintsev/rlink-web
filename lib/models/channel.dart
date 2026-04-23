@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../services/gossip_router.dart';
 import '../services/image_service.dart';
 
 /// Модель канала. Один админ — создатель, который ведёт канал.
@@ -24,6 +25,18 @@ class Channel {
   final String username;       // уникальный юзернейм канала (как у пользователей)
   final String universalCode;  // публичный «универсальный код» канала, пригодный для поиска
   final bool isPublic;         // true = найдётся в поиске; false = скрытый (only admin-invited)
+  /// Резерв истории: шифрованный снимок в сети и опционально в Google Drive (настраивает админ).
+  final bool driveBackupEnabled;
+  /// Номер последнего опубликованного снимка (для подписчиков — из channel_meta).
+  final int driveBackupRev;
+  /// Id файла на Google Drive у админа (локально, в gossip не передаётся).
+  final String? driveFileId;
+  /// Админы «ссылок» — могут публиковать наравне с модераторами (роль для делегирования).
+  final List<String> linkAdminIds;
+  /// Показывать подпись к посту для перечисленных в [staffLabels] авторов.
+  final bool signStaffPosts;
+  /// Подпись по публичному ключу автора поста (если включено).
+  final Map<String, String> staffLabels;
 
   const Channel({
     required this.id,
@@ -31,6 +44,9 @@ class Channel {
     required this.adminId,
     required this.subscriberIds,
     this.moderatorIds = const [],
+    this.linkAdminIds = const [],
+    this.signStaffPosts = false,
+    this.staffLabels = const {},
     this.avatarColor = 0xFF42A5F5,
     this.avatarEmoji = '📢',
     this.avatarImagePath,
@@ -45,12 +61,27 @@ class Channel {
     this.username = '',
     this.universalCode = '',
     this.isPublic = true,
+    this.driveBackupEnabled = false,
+    this.driveBackupRev = 0,
+    this.driveFileId,
   });
 
   bool get isAdmin => false; // checked externally via adminId
 
-  /// Returns true if [userId] is admin or moderator.
-  bool canPost(String userId) => userId == adminId || moderatorIds.contains(userId);
+  /// Админ, модератор или админ ссылок.
+  bool canPost(String userId) =>
+      userId == adminId ||
+      moderatorIds.contains(userId) ||
+      linkAdminIds.contains(userId);
+
+  /// Подпись для нового поста (если включено и для ключа задана непустая строка).
+  String? staffLabelForNewPost(String authorId) {
+    if (!signStaffPosts) return null;
+    if (!canPost(authorId)) return null;
+    final s = staffLabels[authorId];
+    if (s == null || s.trim().isEmpty) return null;
+    return s.trim();
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -58,6 +89,9 @@ class Channel {
         'admin': adminId,
         'subs': subscriberIds,
         if (moderatorIds.isNotEmpty) 'mods': moderatorIds,
+        if (linkAdminIds.isNotEmpty) 'links': linkAdminIds,
+        if (signStaffPosts) 'signStaff': true,
+        if (staffLabels.isNotEmpty) 'slb': staffLabels,
         'color': avatarColor,
         'emoji': avatarEmoji,
         if (avatarImagePath != null) 'img': avatarImagePath,
@@ -72,6 +106,8 @@ class Channel {
         if (username.isNotEmpty) 'u': username,
         if (universalCode.isNotEmpty) 'uc': universalCode,
         'pub': isPublic,
+        if (driveBackupEnabled) 'drv': true,
+        if (driveBackupRev > 0) 'drvRev': driveBackupRev,
       };
 
   factory Channel.fromJson(Map<String, dynamic> j) => Channel(
@@ -82,6 +118,15 @@ class Channel {
         moderatorIds: j['mods'] != null
             ? (j['mods'] as List).cast<String>()
             : const [],
+        linkAdminIds: j['links'] != null
+            ? (j['links'] as List).cast<String>()
+            : const [],
+        signStaffPosts: j['signStaff'] == true,
+        staffLabels: j['slb'] is Map
+            ? (j['slb'] as Map).map(
+                (k, v) => MapEntry(k.toString(), v.toString()),
+              )
+            : const {},
         avatarColor: j['color'] as int? ?? 0xFF42A5F5,
         avatarEmoji: j['emoji'] as String? ?? '📢',
         avatarImagePath: j['img'] as String?,
@@ -96,6 +141,9 @@ class Channel {
         username: j['u'] as String? ?? '',
         universalCode: j['uc'] as String? ?? '',
         isPublic: j['pub'] as bool? ?? true,
+        driveBackupEnabled: j['drv'] == true,
+        driveBackupRev: (j['drvRev'] as num?)?.toInt() ?? 0,
+        driveFileId: j['drvFid'] as String?,
       );
 
   String encode() => jsonEncode(toJson());
@@ -109,9 +157,13 @@ class Channel {
   }
 
   Channel copyWith({
+    String? adminId,
     String? name,
     List<String>? subscriberIds,
     List<String>? moderatorIds,
+    List<String>? linkAdminIds,
+    bool? signStaffPosts,
+    Map<String, String>? staffLabels,
     int? avatarColor,
     String? avatarEmoji,
     String? avatarImagePath,
@@ -125,13 +177,19 @@ class Channel {
     String? username,
     String? universalCode,
     bool? isPublic,
+    bool? driveBackupEnabled,
+    int? driveBackupRev,
+    String? driveFileId,
   }) =>
       Channel(
         id: id,
         name: name ?? this.name,
-        adminId: adminId,
+        adminId: adminId ?? this.adminId,
         subscriberIds: subscriberIds ?? this.subscriberIds,
         moderatorIds: moderatorIds ?? this.moderatorIds,
+        linkAdminIds: linkAdminIds ?? this.linkAdminIds,
+        signStaffPosts: signStaffPosts ?? this.signStaffPosts,
+        staffLabels: staffLabels ?? this.staffLabels,
         avatarColor: avatarColor ?? this.avatarColor,
         avatarEmoji: avatarEmoji ?? this.avatarEmoji,
         avatarImagePath: avatarImagePath ?? this.avatarImagePath,
@@ -146,6 +204,9 @@ class Channel {
         username: username ?? this.username,
         universalCode: universalCode ?? this.universalCode,
         isPublic: isPublic ?? this.isPublic,
+        driveBackupEnabled: driveBackupEnabled ?? this.driveBackupEnabled,
+        driveBackupRev: driveBackupRev ?? this.driveBackupRev,
+        driveFileId: driveFileId ?? this.driveFileId,
       );
 }
 
@@ -165,6 +226,14 @@ class ChannelPost {
   final List<ChannelComment> comments;
   final Map<String, List<String>> reactions;
   final String? pollJson;
+  /// Уникальные просмотры (по публичному ключу зрителя), синхронизируются через gossip.
+  final int viewCount;
+  /// Локальный счётчик пересылок поста из канала.
+  final int forwardCount;
+  /// Подпись автора (при включённой опции канала).
+  final String? staffLabel;
+  /// Стикер (компактное отображение; по сети флаг `stk` + файл `stk_*.jpg`).
+  final bool isSticker;
 
   const ChannelPost({
     required this.id,
@@ -181,6 +250,10 @@ class ChannelPost {
     this.comments = const [],
     this.reactions = const {},
     this.pollJson,
+    this.viewCount = 0,
+    this.forwardCount = 0,
+    this.staffLabel,
+    this.isSticker = false,
   });
 
   int get totalReactions {
@@ -205,6 +278,10 @@ class ChannelPost {
         'timestamp': timestamp,
         'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
         'poll_json': pollJson,
+        'view_count': viewCount,
+        'forward_count': forwardCount,
+        'staff_label': staffLabel,
+        'is_sticker': isSticker ? 1 : 0,
       };
 
   ChannelPost copyWith({
@@ -219,6 +296,10 @@ class ChannelPost {
     List<ChannelComment>? comments,
     Map<String, List<String>>? reactions,
     String? pollJson,
+    int? viewCount,
+    int? forwardCount,
+    String? staffLabel,
+    bool? isSticker,
   }) =>
       ChannelPost(
         id: id,
@@ -235,6 +316,10 @@ class ChannelPost {
         comments: comments ?? this.comments,
         reactions: reactions ?? this.reactions,
         pollJson: pollJson ?? this.pollJson,
+        viewCount: viewCount ?? this.viewCount,
+        forwardCount: forwardCount ?? this.forwardCount,
+        staffLabel: staffLabel ?? this.staffLabel,
+        isSticker: isSticker ?? this.isSticker,
       );
 
   factory ChannelPost.fromMap(Map<String, dynamic> m,
@@ -264,6 +349,10 @@ class ChannelPost {
       comments: comments,
       reactions: reactions,
       pollJson: m['poll_json'] as String?,
+      viewCount: (m['view_count'] as int?) ?? 0,
+      forwardCount: (m['forward_count'] as int?) ?? 0,
+      staffLabel: m['staff_label'] as String?,
+      isSticker: (m['is_sticker'] as int?) == 1,
     );
   }
 }
@@ -347,4 +436,31 @@ class ChannelComment {
       reactions: reactions,
     );
   }
+}
+
+extension ChannelGossipBroadcast on Channel {
+  /// Полный `channel_meta` для текущего состояния канала (публичные — в эфир).
+  Future<void> broadcastGossipMeta() =>
+      GossipRouter.instance.broadcastChannelMeta(
+        channelId: id,
+        name: name,
+        adminId: adminId,
+        avatarColor: avatarColor,
+        avatarEmoji: avatarEmoji,
+        description: description,
+        commentsEnabled: commentsEnabled,
+        createdAt: createdAt,
+        verified: verified,
+        verifiedBy: verifiedBy,
+        subscriberIds: subscriberIds,
+        moderatorIds: moderatorIds,
+        linkAdminIds: linkAdminIds,
+        signStaffPosts: signStaffPosts,
+        staffLabels: staffLabels,
+        username: username,
+        universalCode: universalCode,
+        isPublic: isPublic,
+        driveBackup: driveBackupEnabled,
+        driveBackupRev: driveBackupRev,
+      );
 }

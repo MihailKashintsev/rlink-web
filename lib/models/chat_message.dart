@@ -26,6 +26,12 @@ class ChatMessage {
   final String? forwardFromId;
   /// Отображаемое имя автора оригинала (подпись над пересланным).
   final String? forwardFromNick;
+  /// Переслано из канала — id канала (для перехода в ленту).
+  final String? forwardFromChannelId;
+  /// JSON приглашения в канал/группу в ЛС (`kind` + поля payload), для кнопок в пузыре.
+  final String? invitePayloadJson;
+  /// Id файлов, загруженных в GigaChat (чат с ИИ); хранится как JSON-массив в БД.
+  final List<String> gigachatAttachmentIds;
 
   const ChatMessage({
     required this.id,
@@ -48,6 +54,9 @@ class ChatMessage {
     this.viewOnceOpened = false,
     this.forwardFromId,
     this.forwardFromNick,
+    this.forwardFromChannelId,
+    this.invitePayloadJson,
+    this.gigachatAttachmentIds = const [],
   });
 
   ChatMessage copyWith({
@@ -65,6 +74,9 @@ class ChatMessage {
     bool? viewOnceOpened,
     String? forwardFromId,
     String? forwardFromNick,
+    String? forwardFromChannelId,
+    String? invitePayloadJson,
+    List<String>? gigachatAttachmentIds,
   }) =>
       ChatMessage(
         id: id,
@@ -87,6 +99,11 @@ class ChatMessage {
         viewOnceOpened: viewOnceOpened ?? this.viewOnceOpened,
         forwardFromId: forwardFromId ?? this.forwardFromId,
         forwardFromNick: forwardFromNick ?? this.forwardFromNick,
+        forwardFromChannelId:
+            forwardFromChannelId ?? this.forwardFromChannelId,
+        invitePayloadJson: invitePayloadJson ?? this.invitePayloadJson,
+        gigachatAttachmentIds:
+            gigachatAttachmentIds ?? this.gigachatAttachmentIds,
       );
 
   Map<String, dynamic> toMap() => {
@@ -110,6 +127,11 @@ class ChatMessage {
         'view_once_opened': viewOnceOpened ? 1 : 0,
         'forward_from_id': forwardFromId,
         'forward_from_nick': forwardFromNick,
+        'forward_from_channel_id': forwardFromChannelId,
+        'invite_payload': invitePayloadJson,
+        'gigachat_attachment_ids': gigachatAttachmentIds.isEmpty
+            ? null
+            : jsonEncode(gigachatAttachmentIds),
       };
 
   factory ChatMessage.fromMap(Map<String, dynamic> m) {
@@ -120,6 +142,13 @@ class ChatMessage {
         final decoded = jsonDecode(raw) as Map<String, dynamic>;
         reactions =
             decoded.map((k, v) => MapEntry(k, (v as List).cast<String>()));
+      } catch (_) {}
+    }
+    var gigaAtt = const <String>[];
+    final gigaRaw = m['gigachat_attachment_ids'] as String?;
+    if (gigaRaw != null && gigaRaw.isNotEmpty) {
+      try {
+        gigaAtt = (jsonDecode(gigaRaw) as List).cast<String>();
       } catch (_) {}
     }
     // Resolve potentially stale iOS sandbox paths for media files
@@ -139,12 +168,17 @@ class ChatMessage {
       longitude: (m['longitude'] as num?)?.toDouble(),
       isOutgoing: (m['is_outgoing'] as int) == 1,
       timestamp: DateTime.fromMillisecondsSinceEpoch(m['timestamp'] as int),
-      status: MessageStatus.values[m['status'] as int],
+      status: MessageStatus
+          .values[(m['status'] as int?)?.clamp(0, MessageStatus.values.length - 1) ??
+              0],
       reactions: reactions,
       viewOnce: (m['view_once'] as int?) == 1,
       viewOnceOpened: (m['view_once_opened'] as int?) == 1,
       forwardFromId: m['forward_from_id'] as String?,
       forwardFromNick: m['forward_from_nick'] as String?,
+      forwardFromChannelId: m['forward_from_channel_id'] as String?,
+      invitePayloadJson: m['invite_payload'] as String?,
+      gigachatAttachmentIds: gigaAtt,
     );
   }
 }

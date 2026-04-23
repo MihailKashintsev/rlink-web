@@ -10,7 +10,7 @@ const _kGithubPat = String.fromEnvironment('GITHUB_PAT', defaultValue: '');
 const _kGithubOwner = String.fromEnvironment('GITHUB_OWNER', defaultValue: '');
 const _kGithubRepo = String.fromEnvironment('GITHUB_REPO', defaultValue: '');
 
-/// Публичные релизы (теги вида v0.0.5): https://github.com/MihailKashintsev/Rlink-releases/releases
+/// Публичные релизы (теги вида v0.0.6): https://github.com/MihailKashintsev/Rlink-releases/releases
 const _kDefaultReleaseOwner = 'MihailKashintsev';
 const _kDefaultReleaseRepo = 'Rlink-releases';
 

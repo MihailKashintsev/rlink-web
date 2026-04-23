@@ -37,7 +37,7 @@ class AppSettings extends ChangeNotifier {
   static const _keyNotifyPersonal  = 'notify_personal';
   static const _keyNotifyGroups    = 'notify_groups';
   static const _keyNotifyChannels  = 'notify_channels';
-  static const _keyAppIconVariant  = 'app_icon_variant';   // 0=classic,1=mono,2=mirror,3=ai
+  static const _keyAppIconVariant  = 'app_icon_variant';   // 0=classic,1=mono,2=ai
   static const _keyUseIosStyleEmoji = 'use_ios_style_emoji'; // Android: Noto Color Emoji fallback
 
   late SharedPreferences _prefs;
@@ -224,7 +224,14 @@ class AppSettings extends ChangeNotifier {
     _notifyPersonal = _prefs.getBool(_keyNotifyPersonal) ?? true;
     _notifyGroups = _prefs.getBool(_keyNotifyGroups) ?? true;
     _notifyChannels = _prefs.getBool(_keyNotifyChannels) ?? true;
-    _appIconVariant = (_prefs.getInt(_keyAppIconVariant) ?? 0).clamp(0, 3);
+    var iconV = (_prefs.getInt(_keyAppIconVariant) ?? 0).clamp(0, 3);
+    // Раньше: 2=mirror (теперь совпадает с классикой), 3=ai → 2.
+    if (iconV == 2) iconV = 0;
+    if (iconV == 3) iconV = 2;
+    _appIconVariant = iconV.clamp(0, 2);
+    if ((_prefs.getInt(_keyAppIconVariant) ?? -1) != _appIconVariant) {
+      await _prefs.setInt(_keyAppIconVariant, _appIconVariant);
+    }
     _useIosStyleEmoji = Platform.isAndroid
         ? (_prefs.getBool(_keyUseIosStyleEmoji) ?? true)
         : false;
@@ -249,7 +256,7 @@ class AppSettings extends ChangeNotifier {
   }
 
   Future<void> setAppIconVariant(int v) async {
-    _appIconVariant = v.clamp(0, 3);
+    _appIconVariant = v.clamp(0, 2);
     await _prefs.setInt(_keyAppIconVariant, _appIconVariant);
     notifyListeners();
   }
@@ -447,6 +454,15 @@ class AppSettings extends ChangeNotifier {
     final cur = _prefs.getInt(_keyAdminCfgRev) ?? 0;
     if (revision <= cur) return;
     await _prefs.setString(_keyAdminPasswordHash, hash);
+    await _prefs.setInt(_keyAdminCfgRev, revision);
+    await _prefs.setString(_keyAdminCfgSealed, sealedBoxJson);
+    notifyListeners();
+  }
+
+  /// Обновить ревизию синхронизации и sealed-бокс без смены пароля админки (список каналов).
+  Future<void> bumpAccountSyncRevisionOnly(int revision, String sealedBoxJson) async {
+    final cur = _prefs.getInt(_keyAdminCfgRev) ?? 0;
+    if (revision <= cur) return;
     await _prefs.setInt(_keyAdminCfgRev, revision);
     await _prefs.setString(_keyAdminCfgSealed, sealedBoxJson);
     notifyListeners();

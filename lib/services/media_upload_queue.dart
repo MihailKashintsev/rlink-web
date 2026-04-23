@@ -23,6 +23,7 @@ class UploadTask {
   final bool isVideo;
   final bool isSquare;
   final bool isFile;
+  final bool isSticker;
   final String? fileName;
   UploadStatus status;
   int retryCount;
@@ -37,6 +38,7 @@ class UploadTask {
     this.isVideo = false,
     this.isSquare = false,
     this.isFile = false,
+    this.isSticker = false,
     this.fileName,
     this.status = UploadStatus.pending,
     this.retryCount = 0,
@@ -63,6 +65,12 @@ class MediaUploadQueue {
   /// Called when a task completes successfully. Use to update message status in UI.
   void Function(String msgId)? onTaskCompleted;
 
+  /// iOS Dynamic Island: прогресс при отправке «крупного» медиа (см. порог ниже).
+  void Function(String label, double progress)? onLiveActivityMediaProgress;
+
+  /// Порог размера **сжатых** данных для показа Live Activity (~250 KB).
+  static const kLiveActivityMinCompressedBytes = 250 * 1024;
+
   /// Max blob size for single relay message (~800 KB compressed).
   static const _kMaxBlobBytes = 800 * 1024;
 
@@ -80,7 +88,7 @@ class MediaUploadQueue {
     final dbPath = p.join(dbDir, 'rlink_upload_queue.db');
     _db = await openDatabase(
       dbPath,
-      version: 1,
+      version: 2,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE upload_queue (
@@ -93,12 +101,24 @@ class MediaUploadQueue {
             isVideo    INTEGER NOT NULL DEFAULT 0,
             isSquare   INTEGER NOT NULL DEFAULT 0,
             isFile     INTEGER NOT NULL DEFAULT 0,
+            isSticker  INTEGER NOT NULL DEFAULT 0,
             fileName   TEXT,
             status     INTEGER NOT NULL DEFAULT 0,
             retryCount INTEGER NOT NULL DEFAULT 0,
             createdAt  INTEGER NOT NULL
           )
         ''');
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          try {
+            await db.execute(
+              'ALTER TABLE upload_queue ADD COLUMN isSticker INTEGER NOT NULL DEFAULT 0',
+            );
+          } catch (e) {
+            debugPrint('[UploadQueue] migrate isSticker: $e');
+          }
+        }
       },
     );
     // Сброс залипших задач от прошлой версии: всё, что висит uploading или
@@ -135,6 +155,7 @@ class MediaUploadQueue {
     bool isVideo = false,
     bool isSquare = false,
     bool isFile = false,
+    bool isSticker = false,
     String? fileName,
   }) async {
     final db = _db;
@@ -151,6 +172,7 @@ class MediaUploadQueue {
         'isVideo': isVideo ? 1 : 0,
         'isSquare': isSquare ? 1 : 0,
         'isFile': isFile ? 1 : 0,
+        'isSticker': isSticker ? 1 : 0,
         'fileName': fileName,
         'status': UploadStatus.pending.index,
         'retryCount': 0,
@@ -202,6 +224,9 @@ class MediaUploadQueue {
     final db = _db;
     if (db == null) return;
 
+    final label = _liveActivityLabel(task);
+    var showIsland = false;
+
     // Skip if file no longer exists
     if (!File(task.filePath).existsSync()) {
       debugPrint('[UploadQueue] File missing for ${task.msgId}, marking failed');
@@ -235,9 +260,16 @@ class MediaUploadQueue {
     try {
       final bytes = await File(task.filePath).readAsBytes();
       final compressed = ImageService.instance.compress(bytes);
+      showIsland = compressed.length >= kLiveActivityMinCompressedBytes;
+      if (showIsland) {
+        onLiveActivityMediaProgress?.call(label, 0.06);
+      }
 
       if (compressed.length <= _kMaxBlobBytes) {
         // ── Single blob send ──────────────────────────────────────
+        if (showIsland) {
+          onLiveActivityMediaProgress?.call(label, 0.12);
+        }
         await RelayService.instance.sendBlob(
           recipientKey: task.recipientKey,
           fromId: task.fromId,
@@ -247,6 +279,7 @@ class MediaUploadQueue {
           isVideo: task.isVideo,
           isSquare: task.isSquare,
           isFile: task.isFile,
+          isSticker: task.isSticker,
           fileName: task.fileName,
         );
         // Только теперь начинаем слушать offline-события для этого получателя.
@@ -256,6 +289,9 @@ class MediaUploadQueue {
         // выкинет блоб, но retry на нашей стороне ничего не даст: блоб не
         // буферизуется на сервере. Лучше пометить done и положиться на
         // прикладной ack от получателя (если он подцепится позже).
+        if (showIsland) {
+          onLiveActivityMediaProgress?.call(label, 0.9);
+        }
         _setProgress(task.msgId, 1.0);
       } else {
         // ── Chunked send for large files ──────────────────────────
@@ -287,9 +323,14 @@ class MediaUploadQueue {
             isVideo: task.isVideo,
             isSquare: task.isSquare,
             isFile: task.isFile,
+            isSticker: task.isSticker,
             fileName: task.fileName,
           );
-          _setProgress(task.msgId, (i + 1) / total);
+          final frac = (i + 1) / total;
+          _setProgress(task.msgId, frac);
+          if (showIsland) {
+            onLiveActivityMediaProgress?.call(label, frac);
+          }
           await Future.delayed(const Duration(milliseconds: 20));
         }
         // Подключаем listener только после всех чанков.
@@ -326,11 +367,27 @@ class MediaUploadQueue {
       );
       _setProgress(task.msgId, 0);
     } finally {
+      if (showIsland) {
+        onLiveActivityMediaProgress?.call(label, 1.0);
+      }
       // Clear per-task delivery-fail listener
       if (RelayService.instance.onDeliveryFailed == onDeliveryFailed) {
         RelayService.instance.onDeliveryFailed = null;
       }
     }
+  }
+
+  String _liveActivityLabel(UploadTask t) {
+    if (t.isVideo) return t.isSquare ? 'Видео' : 'Видео';
+    if (t.isVoice) return 'Голосовое';
+    if (t.isFile) {
+      final n = t.fileName;
+      if (n != null && n.isNotEmpty) {
+        return n.length > 28 ? '${n.substring(0, 28)}…' : n;
+      }
+      return 'Файл';
+    }
+    return 'Фото';
   }
 
   void _setProgress(String msgId, double progress) {
@@ -353,6 +410,7 @@ class MediaUploadQueue {
         isVideo: (row['isVideo'] as int) == 1,
         isSquare: (row['isSquare'] as int) == 1,
         isFile: (row['isFile'] as int) == 1,
+        isSticker: (row['isSticker'] as int?) == 1,
         fileName: row['fileName'] as String?,
         status: UploadStatus.values[row['status'] as int],
         retryCount: row['retryCount'] as int,

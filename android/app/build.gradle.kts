@@ -44,6 +44,8 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Кэшированный FlutterEngine в [RlinkApplication] — не подменять на дефолтный FlutterApplication.
+        manifestPlaceholders["applicationName"] = "com.rendergames.rlink.RlinkApplication"
     }
 
     buildTypes {

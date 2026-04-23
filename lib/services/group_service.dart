@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/group.dart';
 import '../models/message_poll.dart';
+import '../utils/reaction_limit.dart';
 import 'image_service.dart';
 
 Future<void> _backfillGroupReadCursors(Database db) async {
@@ -391,6 +392,7 @@ class GroupService {
     if (list.contains(reactorId)) {
       list.remove(reactorId);
     } else {
+      if (!reactionAddAllowed(updated, emoji, reactorId)) return null;
       list.add(reactorId);
     }
     if (list.isEmpty) {
@@ -438,6 +440,30 @@ class GroupService {
     await _db!.update(
       'group_messages',
       {'text': newText},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _bump();
+  }
+
+  /// После сборки img_chunk для входящего группового сообщения с видео.
+  Future<void> applyAssembledVideo(String messageId, String videoPath) async {
+    if (_db == null) return;
+    await _db!.update(
+      'group_messages',
+      {'video_path': videoPath},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+    _bump();
+  }
+
+  /// После сборки img_chunk для входящего группового сообщения с фото.
+  Future<void> applyAssembledImage(String messageId, String imagePath) async {
+    if (_db == null) return;
+    await _db!.update(
+      'group_messages',
+      {'image_path': imagePath},
       where: 'id = ?',
       whereArgs: [messageId],
     );

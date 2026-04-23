@@ -302,6 +302,8 @@ class RichMessageText extends StatelessWidget {
   final bool isOut;
   /// Упоминания `&` + 64 hex ключа: показ как @лейбл, в [text] остаётся сырое значение.
   final String Function(String publicKeyHex)? mentionLabelFor;
+  /// Тап по @упоминанию (например переход в личный чат).
+  final void Function(String publicKeyHex)? onMentionTap;
 
   const RichMessageText({
     super.key,
@@ -309,6 +311,7 @@ class RichMessageText extends StatelessWidget {
     required this.textColor,
     required this.isOut,
     this.mentionLabelFor,
+    this.onMentionTap,
   });
 
   static final _urlRegex = RegExp(r'https?://\S+');
@@ -378,13 +381,23 @@ class RichMessageText extends StatelessWidget {
         }
         final hex = m.group(1)!;
         final label = resolver(hex);
-        spans.add(TextSpan(
-          text: '@$label',
-          style: baseStyle.copyWith(
-            color: isOut ? Colors.white.withValues(alpha: 0.95) : cs.primary,
-            fontWeight: FontWeight.w600,
-          ),
-        ));
+        final mentionStyle = baseStyle.copyWith(
+          color: isOut ? Colors.white.withValues(alpha: 0.95) : cs.primary,
+          fontWeight: FontWeight.w600,
+          decoration: onMentionTap != null ? TextDecoration.underline : null,
+        );
+        if (onMentionTap != null) {
+          spans.add(WidgetSpan(
+            alignment: PlaceholderAlignment.baseline,
+            baseline: TextBaseline.alphabetic,
+            child: GestureDetector(
+              onTap: () => onMentionTap!(hex),
+              child: Text('@$label', style: mentionStyle),
+            ),
+          ));
+        } else {
+          spans.add(TextSpan(text: '@$label', style: mentionStyle));
+        }
         pos = m.end;
       }
       if (pos < s.length) {

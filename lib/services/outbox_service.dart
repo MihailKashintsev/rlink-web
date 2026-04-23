@@ -139,6 +139,7 @@ class OutboxService {
           replyToMessageId: msg.replyToMessageId,
           forwardFromId: msg.forwardFromId,
           forwardFromNick: msg.forwardFromNick,
+          forwardFromChannelId: msg.forwardFromChannelId,
         );
       } else {
         await GossipRouter.instance.sendRawMessage(
@@ -151,6 +152,7 @@ class OutboxService {
           longitude: msg.longitude,
           forwardFromId: msg.forwardFromId,
           forwardFromNick: msg.forwardFromNick,
+          forwardFromChannelId: msg.forwardFromChannelId,
         );
       }
 

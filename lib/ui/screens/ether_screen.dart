@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../models/contact.dart';
@@ -14,6 +15,7 @@ import '../../services/name_filter.dart';
 import '../../services/app_settings.dart';
 import '../../services/profile_service.dart';
 import 'chat_screen.dart';
+import '../rlink_nav_routes.dart';
 
 class EtherScreen extends StatefulWidget {
   const EtherScreen({super.key});
@@ -26,7 +28,6 @@ class _EtherScreenState extends State<EtherScreen> {
   final _controller = TextEditingController();
   static const _kMaxLen = 60;
   Timer? _refreshTimer;
-  bool _anonymous = true;
 
   static const List<Color> _palette = [
     Color(0xFFFF6B6B), Color(0xFF4ECDC4), Color(0xFF45B7D1),
@@ -92,8 +93,35 @@ class _EtherScreenState extends State<EtherScreen> {
     _controller.clear();
 
     final profile = ProfileService.instance.profile;
-    final senderId = _anonymous ? null : profile?.publicKeyHex;
-    final senderNick = _anonymous ? null : profile?.nickname;
+    final opts = EtherBroadcastOptions.instance;
+    final senderId = opts.anonymous ? null : profile?.publicKeyHex;
+    final senderNick = opts.anonymous ? null : profile?.nickname;
+
+    double? lat;
+    double? lng;
+    if (opts.attachGeo) {
+      try {
+        var perm = await Geolocator.checkPermission();
+        if (perm == LocationPermission.denied) {
+          perm = await Geolocator.requestPermission();
+        }
+        if (perm == LocationPermission.denied ||
+            perm == LocationPermission.deniedForever) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Нет доступа к геолокации'),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
+        } else {
+          final pos = await Geolocator.getCurrentPosition();
+          lat = pos.latitude;
+          lng = pos.longitude;
+        }
+      } catch (_) {}
+    }
 
     await GossipRouter.instance.sendEtherMessage(
       text: text,
@@ -101,6 +129,8 @@ class _EtherScreenState extends State<EtherScreen> {
       messageId: id,
       senderId: senderId,
       senderNick: senderNick,
+      lat: lat,
+      lng: lng,
     );
 
     EtherService.instance.addMessage(EtherMessage(
@@ -111,6 +141,8 @@ class _EtherScreenState extends State<EtherScreen> {
       isOwn: true,
       senderId: senderId,
       senderNick: senderNick,
+      latitude: lat,
+      longitude: lng,
     ));
   }
 
@@ -130,8 +162,8 @@ class _EtherScreenState extends State<EtherScreen> {
     final c = contact;
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => ChatScreen(
+      rlinkChatRoute(
+        ChatScreen(
           peerId: senderId,
           peerNickname: c?.nickname ?? senderNick,
           peerAvatarColor: c?.avatarColor ?? 0xFF607D8B,
@@ -219,14 +251,30 @@ class _EtherScreenState extends State<EtherScreen> {
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
-                count > 0
-                    ? 'Слышат $count ${_peersWord(count)} · исчезает через 1 ч'
-                    : 'Никого рядом · сообщения исчезнут через 1 час',
-                style: TextStyle(
-                  fontSize: 12,
-                  letterSpacing: 0.1,
-                  color: cs.onSurface.withValues(alpha: 0.55),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 380),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, anim) => FadeTransition(
+                  opacity: anim,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0.04, 0),
+                      end: Offset.zero,
+                    ).animate(anim),
+                    child: child,
+                  ),
+                ),
+                child: Text(
+                  count > 0
+                      ? 'Слышат $count ${_peersWord(count)} · исчезает через 1 ч'
+                      : 'Никого рядом · сообщения исчезнут через 1 час',
+                  key: ValueKey<int>(count),
+                  style: TextStyle(
+                    fontSize: 12,
+                    letterSpacing: 0.1,
+                    color: cs.onSurface.withValues(alpha: 0.55),
+                  ),
                 ),
               ),
             ),
@@ -258,8 +306,6 @@ class _EtherScreenState extends State<EtherScreen> {
       _EtherInput(
         controller: _controller,
         maxLen: _kMaxLen,
-        anonymous: _anonymous,
-        onAnonymousToggle: () => setState(() => _anonymous = !_anonymous),
         onSend: _send,
       ),
     ]);
@@ -561,6 +607,21 @@ class _EtherCard extends StatelessWidget {
                         color: cs.onSurface.withValues(alpha: 0.45),
                       ),
                     ),
+                  if (msg.latitude != null &&
+                      msg.longitude != null &&
+                      !msg.filtered) ...[
+                    const SizedBox(width: 8),
+                    Icon(Icons.location_on_outlined,
+                        size: 12,
+                        color: cs.primary.withValues(alpha: 0.7)),
+                    Text(
+                      '${msg.latitude!.toStringAsFixed(3)}, ${msg.longitude!.toStringAsFixed(3)}',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: cs.primary.withValues(alpha: 0.75),
+                      ),
+                    ),
+                  ],
                   const Spacer(),
                   Icon(Icons.access_time,
                       size: 11,
@@ -596,15 +657,11 @@ class _EtherCard extends StatelessWidget {
 class _EtherInput extends StatefulWidget {
   final TextEditingController controller;
   final int maxLen;
-  final bool anonymous;
-  final VoidCallback onAnonymousToggle;
   final VoidCallback onSend;
 
   const _EtherInput({
     required this.controller,
     required this.maxLen,
-    required this.anonymous,
-    required this.onAnonymousToggle,
     required this.onSend,
   });
 
@@ -661,117 +718,92 @@ class _EtherInputState extends State<_EtherInput>
               top: BorderSide(
                   color: cs.outline.withValues(alpha: 0.2))),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Переключатель анонимности
-            GestureDetector(
-              onTap: widget.onAnonymousToggle,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: widget.anonymous
-                      ? cs.surfaceContainerHigh
-                      : cs.primary.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: widget.anonymous
-                        ? cs.outline.withValues(alpha: 0.3)
-                        : cs.primary.withValues(alpha: 0.4),
+        child: ListenableBuilder(
+          listenable: EtherBroadcastOptions.instance,
+          builder: (context, _) {
+            final o = EtherBroadcastOptions.instance;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  o.anonymous
+                      ? 'Режим: анонимно'
+                      : 'Режим: открыто · ${o.attachGeo ? "с гео" : "без гео"}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: cs.onSurface.withValues(alpha: 0.45),
                   ),
                 ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(
-                    widget.anonymous ? Icons.person_off_outlined : Icons.person_outlined,
-                    size: 14,
-                    color: widget.anonymous
-                        ? cs.onSurface.withValues(alpha: 0.5)
-                        : cs.primary,
+                const SizedBox(height: 6),
+                Row(children: [
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: cs.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                      child: TextField(
+                        controller: widget.controller,
+                        focusNode: _focusNode,
+                        onTapOutside: (_) => _focusNode.unfocus(),
+                        maxLines: 3,
+                        minLines: 1,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: InputDecoration(
+                          hintText: o.anonymous
+                              ? 'Анонимное сообщение...'
+                              : 'Сообщение от ${ProfileService.instance.profile?.nickname ?? "вас"}...',
+                          hintStyle: TextStyle(
+                            color: cs.onSurface.withValues(alpha: 0.4),
+                            fontSize: 14,
+                          ),
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                        ),
+                      ),
+                    ),
                   ),
-                  const SizedBox(width: 5),
-                  Text(
-                    widget.anonymous ? 'Анонимно' : 'Открыто',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: widget.anonymous
-                          ? cs.onSurface.withValues(alpha: 0.5)
-                          : cs.primary,
-                      fontWeight: FontWeight.w500,
+                  const SizedBox(width: 8),
+                  if (_len > 0)
+                    Text(
+                      '${widget.maxLen - _len}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: over
+                            ? Colors.red
+                            : cs.onSurface.withValues(alpha: 0.4),
+                      ),
+                    ),
+                  const SizedBox(width: 4),
+                  GestureDetector(
+                    onTap: over || _len == 0 ? null : _handleSend,
+                    child: AnimatedBuilder(
+                      animation: _sendPulse,
+                      builder: (_, child) {
+                        final scale = 1.0 + (_sendPulse.value * 0.15);
+                        return Transform.scale(scale: scale, child: child);
+                      },
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: over || _len == 0
+                              ? cs.onSurface.withValues(alpha: 0.15)
+                              : cs.primary,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(Icons.send_rounded,
+                            color: cs.onPrimary, size: 20),
+                      ),
                     ),
                   ),
                 ]),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Row(children: [
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: cs.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  child: TextField(
-                    controller: widget.controller,
-                    focusNode: _focusNode,
-                    onTapOutside: (_) => _focusNode.unfocus(),
-                    maxLines: 3,
-                    minLines: 1,
-                    style: const TextStyle(fontSize: 14),
-                    decoration: InputDecoration(
-                      hintText: widget.anonymous
-                          ? 'Анонимное сообщение...'
-                          : 'Сообщение от ${ProfileService.instance.profile?.nickname ?? "вас"}...',
-                      hintStyle: TextStyle(
-                        color: cs.onSurface.withValues(alpha: 0.4),
-                        fontSize: 14,
-                      ),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 10),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (_len > 0)
-                Text(
-                  '${widget.maxLen - _len}',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: over
-                        ? Colors.red
-                        : cs.onSurface.withValues(alpha: 0.4),
-                  ),
-                ),
-              const SizedBox(width: 4),
-              // Send button with pulse animation
-              GestureDetector(
-                onTap: over || _len == 0 ? null : _handleSend,
-                child: AnimatedBuilder(
-                  animation: _sendPulse,
-                  builder: (_, child) {
-                    final scale = 1.0 + (_sendPulse.value * 0.15);
-                    return Transform.scale(scale: scale, child: child);
-                  },
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: over || _len == 0
-                          ? cs.onSurface.withValues(alpha: 0.15)
-                          : cs.primary,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(Icons.send_rounded,
-                        color: cs.onPrimary, size: 20),
-                  ),
-                ),
-              ),
-            ]),
-          ],
+              ],
+            );
+          },
         ),
       ),
     );
