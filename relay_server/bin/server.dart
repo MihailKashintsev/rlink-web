@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_web_socket/shelf_web_socket.dart';
@@ -40,6 +42,16 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 ///   2. No message storage — relay only (packets not saved to disk)
 ///   3. No IP logging — no access logs written
 ///   4. Challenge-response ready — clients can prove key ownership
+///
+/// Публичный каталог каналов (отступление от «полного» zero-knowledge):
+///   • Клиент шлёт `channel_dir_put` с JSON-телом и Ed25519-подписью (ключ = adminId).
+///   • Сервер проверяет подпись, хранит последнюю версию публичных каналов на диске.
+///   • При `register` клиент получает `channel_dir_snapshot` — видны id, название,
+///     username, universalCode и др. поля из подписанного JSON (метаданные публичного канала).
+///   • Лимиты: размер снимка (`_channelDirSnapshotMaxEntries`, сортировка по updatedAt),
+///     макс. длина подписываемого JSON (`_channelDirMaxPayloadChars`), отдельный rate limit put по adminId.
+///   • `tombstones` в JSON растут при снятии канала с публикации — при необходимости можно
+///     чистить старые ключи офлайн-скриптом (клиентам нужны только rev для антистейла).
 /// ═══════════════════════════════════════════════════════════════════
 
 // ── Connected user ──────────────────────────────────────────────
@@ -68,6 +80,252 @@ const _rateMax = 300; // max 300 messages per 10 seconds (media chunks need ~250
 /// Opaque encrypted blobs per Ed25519 identity (список каналов + метаданные синхронизации
 /// аккаунта — клиент шифрует, relay не читает содержимое).
 final Map<String, String> _accountBlobs = {};
+
+// ── Публичный каталог каналов (подпись админа, персистентность) ──
+
+final Map<String, Map<String, dynamic>> _channelDirectory = {};
+/// После удаления канала из каталога — максимальный seen updatedAt (антиретрансляция).
+final Map<String, int> _channelDirTombstones = {};
+final Ed25519 _ed25519 = Ed25519();
+
+const _channelDirFile = 'channel_directory.json';
+const _channelDirMaxPayloadChars = 16384;
+const _channelDirSnapshotMaxEntries = 4000;
+
+/// Rate limit отдельно от общего flood: adminId → метки времени put.
+final Map<String, List<DateTime>> _channelDirPutLimits = {};
+const _channelDirPutWindow = Duration(minutes: 10);
+const _channelDirPutMax = 180; // до 180 put на админа за 10 минут
+
+bool _checkChannelDirPutRate(String adminId) {
+  final now = DateTime.now();
+  final times = _channelDirPutLimits.putIfAbsent(adminId, () => []);
+  times.removeWhere((t) => now.difference(t) > _channelDirPutWindow);
+  if (times.length >= _channelDirPutMax) return false;
+  times.add(now);
+  return true;
+}
+
+Future<bool> _verifyChannelDirSignature(
+  String payloadJson,
+  String signatureHex,
+  String adminId,
+) async {
+  if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(adminId)) return false;
+  if (signatureHex.length != 128) return false;
+  try {
+    final pubBytes = Uint8List(32);
+    for (var i = 0; i < 32; i++) {
+      pubBytes[i] = int.parse(adminId.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    final sigBytes = Uint8List(64);
+    for (var i = 0; i < 64; i++) {
+      sigBytes[i] = int.parse(signatureHex.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    final pubKey = SimplePublicKey(pubBytes, type: KeyPairType.ed25519);
+    return await _ed25519.verify(
+      utf8.encode(payloadJson),
+      signature: Signature(sigBytes, publicKey: pubKey),
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+void _loadChannelDirectory() {
+  try {
+    final f = File(_channelDirFile);
+    if (!f.existsSync()) return;
+    final decoded = jsonDecode(f.readAsStringSync());
+    if (decoded is! Map) return;
+    final chans = decoded['channels'];
+    final tombs = decoded['tombstones'];
+    if (chans is Map) {
+      chans.forEach((k, v) {
+        if (k is String && v is Map) {
+          _channelDirectory[k] = Map<String, dynamic>.from(v);
+        }
+      });
+    }
+    if (tombs is Map) {
+      tombs.forEach((k, v) {
+        if (k is String && v is num) {
+          _channelDirTombstones[k] = v.toInt();
+        }
+      });
+    }
+    stdout.writeln(
+      '[RLINK][Relay] Loaded ${_channelDirectory.length} public channel dir entries',
+    );
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] channel_directory load: $e');
+  }
+}
+
+void _persistChannelDirectory() {
+  try {
+    File(_channelDirFile).writeAsStringSync(jsonEncode({
+      'channels': _channelDirectory,
+      'tombstones': _channelDirTombstones,
+    }));
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] channel_directory save: $e');
+  }
+}
+
+int _dirUpdatedAt(Map<String, dynamic> m) =>
+    (m['updatedAt'] as num?)?.toInt() ?? 0;
+
+void _sendChannelDirSnapshot(WebSocketChannel ws) {
+  if (_channelDirectory.isEmpty) return;
+  final entries = _channelDirectory.values.toList();
+  entries.sort((a, b) => _dirUpdatedAt(b).compareTo(_dirUpdatedAt(a)));
+  final slice = entries.length > _channelDirSnapshotMaxEntries
+      ? entries.sublist(0, _channelDirSnapshotMaxEntries)
+      : entries;
+  try {
+    ws.sink.add(jsonEncode({
+      'type': 'channel_dir_snapshot',
+      'channels': slice,
+    }));
+    stdout.writeln(
+      '[RLINK][Relay] channel_dir_snapshot → ${slice.length} entries',
+    );
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] channel_dir_snapshot send: $e');
+  }
+}
+
+void _handleChannelDirPut(_User user, Map<String, dynamic> msg) {
+  unawaited(_handleChannelDirPutAsync(user, msg));
+}
+
+Future<void> _handleChannelDirPutAsync(
+  _User user,
+  Map<String, dynamic> msg,
+) async {
+  final payloadJson = msg['payload'] as String?;
+  final signatureHex = msg['signature'] as String?;
+  if (payloadJson == null ||
+      payloadJson.isEmpty ||
+      payloadJson.length > _channelDirMaxPayloadChars) {
+    return;
+  }
+  if (signatureHex == null || signatureHex.length != 128) return;
+
+  Map<String, dynamic> obj;
+  try {
+    obj = jsonDecode(payloadJson) as Map<String, dynamic>;
+  } catch (_) {
+    return;
+  }
+
+  final channelId = obj['channelId'] as String?;
+  final adminId = obj['adminId'] as String?;
+  if (channelId == null ||
+      channelId.isEmpty ||
+      adminId == null ||
+      adminId.isEmpty) {
+    return;
+  }
+  if (adminId != user.publicKey) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'channel_dir_ack',
+        'ok': false,
+        'error': 'admin_mismatch',
+      }));
+    } catch (_) {}
+    return;
+  }
+
+  if (!_checkChannelDirPutRate(adminId)) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'channel_dir_ack',
+        'ok': false,
+        'error': 'rate_limited',
+      }));
+    } catch (_) {}
+    return;
+  }
+
+  final ok =
+      await _verifyChannelDirSignature(payloadJson, signatureHex, adminId);
+  if (!ok) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'channel_dir_ack',
+        'ok': false,
+        'error': 'bad_signature',
+      }));
+    } catch (_) {}
+    return;
+  }
+
+  final updatedAt = _dirUpdatedAt(obj);
+  if (updatedAt <= 0) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'channel_dir_ack',
+        'ok': false,
+        'error': 'bad_updatedAt',
+      }));
+    } catch (_) {}
+    return;
+  }
+
+  final tomb = _channelDirTombstones[channelId] ?? 0;
+  if (updatedAt <= tomb) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'channel_dir_ack',
+        'ok': false,
+        'error': 'stale',
+      }));
+    } catch (_) {}
+    return;
+  }
+
+  final isPublic = obj['isPublic'] as bool? ?? true;
+  if (!isPublic) {
+    _channelDirectory.remove(channelId);
+    if (updatedAt > tomb) {
+      _channelDirTombstones[channelId] = updatedAt;
+    }
+    _persistChannelDirectory();
+    stdout.writeln(
+      '[RLINK][Relay] channel_dir remove $channelId (tombstone $updatedAt)',
+    );
+    try {
+      user.ws.sink.add(jsonEncode({'type': 'channel_dir_ack', 'ok': true}));
+    } catch (_) {}
+    return;
+  }
+
+  final existing = _channelDirectory[channelId];
+  if (existing != null) {
+    if (updatedAt < _dirUpdatedAt(existing)) {
+      try {
+        user.ws.sink.add(jsonEncode({
+          'type': 'channel_dir_ack',
+          'ok': false,
+          'error': 'stale',
+        }));
+      } catch (_) {}
+      return;
+    }
+  }
+
+  _channelDirectory[channelId] = obj;
+  _persistChannelDirectory();
+  stdout.writeln(
+    '[RLINK][Relay] channel_dir put $channelId updatedAt=$updatedAt',
+  );
+  try {
+    user.ws.sink.add(jsonEncode({'type': 'channel_dir_ack', 'ok': true}));
+  } catch (_) {}
+}
 
 void _loadAccountBlobs() {
   try {
@@ -121,8 +379,8 @@ void _handleMessage(_User user, dynamic raw) {
   final type = msg['type'] as String?;
   if (type == null) return;
 
-  // Blobs bypass rate limiting (they're large single messages)
-  if (type != 'blob') {
+  // Blobs и каталог каналов не считаем в общий flood лимит (отдельный лимит у put).
+  if (type != 'blob' && type != 'channel_dir_put') {
     if (!_checkRate(user.publicKey)) {
       user.ws.sink.add(jsonEncode({'type': 'error', 'msg': 'rate_limited'}));
       return;
@@ -147,6 +405,9 @@ void _handleMessage(_User user, dynamic raw) {
       break;
     case 'account_sync_put':
       _handleAccountSyncPut(user, msg);
+      break;
+    case 'channel_dir_put':
+      _handleChannelDirPut(user, msg);
       break;
   }
 }
@@ -335,6 +596,8 @@ shelf.Handler _wsHandler() {
               } catch (_) {}
             }
 
+            _sendChannelDirSnapshot(ws);
+
             // Send currently online peers to the new user
             for (final other in _users.values) {
               if (other.publicKey == publicKey) continue;
@@ -422,6 +685,7 @@ shelf.Response _infoHandler(shelf.Request request) {
 Future<void> main() async {
   final port = int.tryParse(Platform.environment['PORT'] ?? '') ?? 8080;
   _loadAccountBlobs();
+  _loadChannelDirectory();
 
   // Cascade: try WebSocket first, then HTTP info
   final handler = shelf.Cascade()

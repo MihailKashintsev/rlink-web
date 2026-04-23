@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
@@ -14,6 +15,7 @@ import '../utils/reaction_limit.dart';
 import 'gossip_router.dart';
 import 'image_service.dart';
 import 'account_sync_publish.dart';
+import 'channel_directory_relay.dart';
 import 'crypto_service.dart';
 
 Map<String, String> _staffLabelsFromDb(String? raw) {
@@ -55,6 +57,9 @@ Future<void> _backfillChannelReadCursors(Database db) async {
 class ChannelService {
   ChannelService._();
   static final ChannelService instance = ChannelService._();
+
+  /// Последний применённый с relay `updatedAt` по channelId (антидубль снимка каталога).
+  static const _relayChDirRevPrefsKey = 'relay_channel_dir_updated_at_v1';
 
   final _uuid = const Uuid();
   Database? _db;
@@ -740,6 +745,57 @@ class ChannelService {
     await saveChannelFromBroadcast(ch);
   }
 
+  /// Слияние снимка каталога с relay (подпись уже проверена на сервере).
+  Future<void> applyRelayChannelDirectoryEntries(List<dynamic> raw) async {
+    if (_db == null || raw.isEmpty) return;
+    final myId = CryptoService.instance.publicKeyHex;
+    if (myId.isEmpty) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final revs = <String, int>{};
+    try {
+      final s = prefs.getString(_relayChDirRevPrefsKey);
+      if (s != null && s.isNotEmpty) {
+        final j = jsonDecode(s) as Map<String, dynamic>;
+        for (final e in j.entries) {
+          revs[e.key] = (e.value as num).toInt();
+        }
+      }
+    } catch (_) {}
+
+    var changed = false;
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final p = Map<String, dynamic>.from(item);
+      final adminId = p['adminId'] as String?;
+      final channelId = p['channelId'] as String?;
+      if (adminId == null ||
+          channelId == null ||
+          adminId.isEmpty ||
+          channelId.isEmpty) {
+        continue;
+      }
+      if (adminId == myId) continue;
+
+      final updatedAt = (p['updatedAt'] as num?)?.toInt() ?? 0;
+      if (updatedAt <= 0) continue;
+      if (updatedAt <= (revs[channelId] ?? 0)) continue;
+
+      if ((p['isPublic'] as bool?) == false) continue;
+
+      final name = p['name'] as String?;
+      if (name == null || name.isEmpty) continue;
+
+      await applyChannelMetaFromPayload(p);
+      revs[channelId] = updatedAt;
+      changed = true;
+    }
+
+    if (changed) {
+      await prefs.setString(_relayChDirRevPrefsKey, jsonEncode(revs));
+    }
+  }
+
   Future<void> saveChannelFromBroadcast(Channel ch) async {
     final existing = await getChannel(ch.id);
     if (existing != null) {
@@ -917,6 +973,12 @@ class ChannelService {
   }
 
   Future<void> deleteChannel(String channelId) async {
+    final existing = await getChannel(channelId);
+    if (existing != null && existing.isPublic) {
+      unawaited(ChannelDirectoryRelay.publishIfAdmin(
+        existing.copyWith(isPublic: false),
+      ));
+    }
     final posts = await _db!.query('channel_posts',
         columns: ['id'], where: 'channel_id = ?', whereArgs: [channelId]);
     for (final post in posts) {
@@ -938,7 +1000,11 @@ class ChannelService {
   Future<void> verifyChannel(String channelId, String verifiedBy) async {
     final ch = await getChannel(channelId);
     if (ch == null) return;
-    await updateChannel(ch.copyWith(verified: true, verifiedBy: verifiedBy));
+    final updated = ch.copyWith(verified: true, verifiedBy: verifiedBy);
+    await updateChannel(updated);
+    if (updated.adminId == CryptoService.instance.publicKeyHex) {
+      unawaited(updated.broadcastGossipMeta());
+    }
   }
 
   /// Авто-верификация: возвращает true, если у канала 10+ подписчиков.

@@ -4831,7 +4831,7 @@ class _InputBarState extends State<_InputBar> {
                             }
                           }
                         : null,
-                    style: const TextStyle(fontSize: 15),
+                    style: TextStyle(fontSize: 15, color: cs.onSurface),
                     decoration: InputDecoration(
                       hintText: widget.isRecording
                           ? 'Запись... ${s}s.$t'

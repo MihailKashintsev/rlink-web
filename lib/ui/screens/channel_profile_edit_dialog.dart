@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../../models/channel.dart';
 import '../../services/channel_backup_service.dart';
 import '../../services/channel_service.dart';
+import '../../services/google_drive_channel_backup.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../widgets/desktop_image_picker.dart';
@@ -80,6 +81,26 @@ Future<void> syncChannelVisualsAfterEdit({
       );
     }
   }
+}
+
+Future<void> _promptGoogleSignInForDriveBackup({
+  required BuildContext context,
+  required VoidCallback onSuccess,
+}) async {
+  final account =
+      await GoogleDriveChannelBackup.ensureUserSignedIn(interactive: true);
+  if (!context.mounted) return;
+  if (account == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Вход в Google отменён или не удался. Резерв на Диск можно подключить позже в настройках канала.',
+        ),
+      ),
+    );
+    return;
+  }
+  onSuccess();
 }
 
 /// [showPolicyToggles]: полные настройки (комментарии, публичность, Drive) — только владелец.
@@ -327,8 +348,21 @@ Future<void> showChannelProfileEditDialog(
                     ),
                     SwitchListTile(
                       value: driveBackupEnabled,
-                      onChanged: (v) =>
-                          setDialogState(() => driveBackupEnabled = v),
+                      onChanged: (v) {
+                        if (!v) {
+                          setDialogState(() => driveBackupEnabled = false);
+                          return;
+                        }
+                        if (myId != channel.adminId) {
+                          setDialogState(() => driveBackupEnabled = true);
+                          return;
+                        }
+                        unawaited(_promptGoogleSignInForDriveBackup(
+                          context: ctx,
+                          onSuccess: () =>
+                              setDialogState(() => driveBackupEnabled = true),
+                        ));
+                      },
                       title: const Text('Резерв (Google Drive + сеть)'),
                       subtitle: const Text(
                         'Отдельный ключ канала; на Диск уходит только шифротекст. Подписчики подтягивают историю в фоне без уведомлений.',

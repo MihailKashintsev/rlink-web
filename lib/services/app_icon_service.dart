@@ -1,6 +1,6 @@
 import 'package:flutter/services.dart';
 
-/// Смена иконки приложения: классическая (как бывшая «зеркальная»), моно, ИИ.
+/// Смена иконки приложения: классическая, моно, ИИ.
 /// На iOS — alternate icons; на Android — activity-alias.
 class AppIconService {
   AppIconService._();

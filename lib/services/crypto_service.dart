@@ -293,6 +293,15 @@ class CryptoService {
 
   static String _bytesToHex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  /// Ed25519-подпись UTF-8 строки (каталог публичных каналов на relay).
+  Future<String> signUtf8Message(String message) async {
+    final sig = await _ed25519.sign(
+      utf8.encode(message),
+      keyPair: _identityKeyPair,
+    );
+    return _bytesToHex(sig.bytes);
+  }
 }
 
 class EncryptedMessage {

@@ -74,6 +74,7 @@ dependencies:
   # Optional: encrypted backup file on Google Drive (OAuth in console)
   google_sign_in: ^6.2.2
   googleapis: ^13.2.0
+  googleapis_auth: ^2.3.0
   extension_google_sign_in_as_googleapis_auth: ^2.0.12
 
   # Camera (square video recording)
@@ -134,12 +135,12 @@ flutter_launcher_icons:
   ios: true
   macos:
     generate: true
-    image_path: "/Users/mihailkasincev/.cursor/projects/Users-mihailkasincev-Rlink/assets/Rlink_Icon-483ac354-6d25-45f8-b163-3f1273216d75.png"
+    image_path: "assets/branding/rlink_launcher_source.png"
   windows:
     generate: true
-    image_path: "/Users/mihailkasincev/.cursor/projects/Users-mihailkasincev-Rlink/assets/Rlink_Icon-483ac354-6d25-45f8-b163-3f1273216d75.png"
+    image_path: "assets/branding/rlink_launcher_source.png"
   linux:
     generate: true
-    image_path: "/Users/mihailkasincev/.cursor/projects/Users-mihailkasincev-Rlink/assets/Rlink_Icon-483ac354-6d25-45f8-b163-3f1273216d75.png"
-  image_path: "/Users/mihailkasincev/.cursor/projects/Users-mihailkasincev-Rlink/assets/Rlink_Icon-483ac354-6d25-45f8-b163-3f1273216d75.png"
+    image_path: "assets/branding/rlink_launcher_source.png"
+  image_path: "assets/branding/rlink_launcher_source.png"
   min_sdk_android: 21

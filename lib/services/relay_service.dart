@@ -89,6 +89,9 @@ class RelayService {
   /// Зашифрованный снимок аккаунта (список каналов + ревизия), пришёл с relay.
   void Function(String sealedBlob)? onAccountSyncBlob;
 
+  /// Подписанные записи публичного каталога каналов (`channel_dir_snapshot` после register).
+  void Function(List<dynamic> entries)? onChannelDirectorySnapshot;
+
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
 
@@ -568,12 +571,41 @@ class RelayService {
         }
         break;
 
+      case 'channel_dir_snapshot':
+        final list = msg['channels'] as List<dynamic>?;
+        if (list != null && list.isNotEmpty) {
+          onChannelDirectorySnapshot?.call(list);
+        }
+        break;
+
+      case 'channel_dir_ack':
+        break;
+
       case 'account_sync_ack':
         break;
 
       case 'error':
         debugPrint('[RLINK][Relay] Server error: ${msg['msg']}');
         break;
+    }
+  }
+
+  /// Публикация записи в каталог публичных каналов (подписанный JSON — см. [ChannelDirectoryRelay]).
+  Future<void> putChannelDirectory({
+    required String payload,
+    required String signatureHex,
+  }) async {
+    if (!isConnected) return;
+    if (payload.isEmpty || payload.length > 16384) return;
+    if (signatureHex.length != 128) return;
+    try {
+      _channel?.sink.add(jsonEncode({
+        'type': 'channel_dir_put',
+        'payload': payload,
+        'signature': signatureHex,
+      }));
+    } catch (e) {
+      debugPrint('[RLINK][Relay] channel_dir_put failed: $e');
     }
   }
 

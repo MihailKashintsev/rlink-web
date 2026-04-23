@@ -116,7 +116,7 @@
             android:name=".LauncherIconMono"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_launcher_mono"
+            android:icon="@mipmap/ic_launcher"
             android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -127,7 +127,7 @@
             android:name=".LauncherIconAi"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_launcher_ai"
+            android:icon="@mipmap/ic_launcher"
             android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -153,6 +153,8 @@
 
     <!-- Required to query activities that can process URIs -->
     <queries>
+        <!-- Google Sign-In / Play services (package visibility Android 11+) -->
+        <package android:name="com.google.android.gms" />
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="content" />

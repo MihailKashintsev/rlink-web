@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../services/channel_directory_relay.dart';
 import '../services/gossip_router.dart';
 import '../services/image_service.dart';
 
@@ -439,28 +440,31 @@ class ChannelComment {
 }
 
 extension ChannelGossipBroadcast on Channel {
-  /// Полный `channel_meta` для текущего состояния канала (публичные — в эфир).
-  Future<void> broadcastGossipMeta() =>
-      GossipRouter.instance.broadcastChannelMeta(
-        channelId: id,
-        name: name,
-        adminId: adminId,
-        avatarColor: avatarColor,
-        avatarEmoji: avatarEmoji,
-        description: description,
-        commentsEnabled: commentsEnabled,
-        createdAt: createdAt,
-        verified: verified,
-        verifiedBy: verifiedBy,
-        subscriberIds: subscriberIds,
-        moderatorIds: moderatorIds,
-        linkAdminIds: linkAdminIds,
-        signStaffPosts: signStaffPosts,
-        staffLabels: staffLabels,
-        username: username,
-        universalCode: universalCode,
-        isPublic: isPublic,
-        driveBackup: driveBackupEnabled,
-        driveBackupRev: driveBackupRev,
-      );
+  /// Полный `channel_meta` для текущего состояния канала (публичные — в эфир)
+  /// и снимок на relay для обнаружения без онлайн-админа.
+  Future<void> broadcastGossipMeta() async {
+    await GossipRouter.instance.broadcastChannelMeta(
+      channelId: id,
+      name: name,
+      adminId: adminId,
+      avatarColor: avatarColor,
+      avatarEmoji: avatarEmoji,
+      description: description,
+      commentsEnabled: commentsEnabled,
+      createdAt: createdAt,
+      verified: verified,
+      verifiedBy: verifiedBy,
+      subscriberIds: subscriberIds,
+      moderatorIds: moderatorIds,
+      linkAdminIds: linkAdminIds,
+      signStaffPosts: signStaffPosts,
+      staffLabels: staffLabels,
+      username: username,
+      universalCode: universalCode,
+      isPublic: isPublic,
+      driveBackup: driveBackupEnabled,
+      driveBackupRev: driveBackupRev,
+    );
+    await ChannelDirectoryRelay.publishIfAdmin(this);
+  }
 }

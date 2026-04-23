@@ -528,7 +528,12 @@ class _GalleryTab extends StatefulWidget {
 }
 
 class _GalleryTabState extends State<_GalleryTab> {
+  static const int _kPageSize = 200;
+
   List<AssetEntity>? _assets;
+  List<AssetPathEntity>? _albums;
+  String? _selectedAlbumId;
+  bool _permissionLimited = false;
   String? _error;
   bool _loading = true;
 
@@ -536,10 +541,60 @@ class _GalleryTabState extends State<_GalleryTab> {
   void initState() {
     super.initState();
     if (_useNativePhotoGrid) {
-      _loadNative();
+      unawaited(_loadNative());
     } else {
       _loading = false;
     }
+  }
+
+  RequestType get _requestType => widget.mode == _GalleryMode.video
+      ? RequestType.video
+      : RequestType.image;
+
+  Future<List<AssetEntity>> _filterRawByMode(List<AssetEntity> raw) async {
+    if (widget.mode == _GalleryMode.gif) {
+      final withMime = await Future.wait(
+        raw.map((e) async {
+          final m = await e.mimeTypeAsync;
+          return _isGifMime(m);
+        }),
+      );
+      return [
+        for (var i = 0; i < raw.length; i++)
+          if (withMime[i]) raw[i],
+      ];
+    }
+    if (widget.mode == _GalleryMode.photo) {
+      final withMime = await Future.wait(
+        raw.map((e) async {
+          final m = await e.mimeTypeAsync;
+          return !_isGifMime(m);
+        }),
+      );
+      return [
+        for (var i = 0; i < raw.length; i++)
+          if (withMime[i]) raw[i],
+      ];
+    }
+    return raw;
+  }
+
+  Future<void> _loadAssetsForAlbum(
+    List<AssetPathEntity> albums,
+    String albumId,
+    bool permissionLimited,
+  ) async {
+    final album = albums.firstWhere((p) => p.id == albumId);
+    final raw = await album.getAssetListPaged(page: 0, size: _kPageSize);
+    final filtered = await _filterRawByMode(raw);
+    if (!mounted) return;
+    setState(() {
+      _albums = albums;
+      _selectedAlbumId = albumId;
+      _permissionLimited = permissionLimited;
+      _assets = filtered;
+      _loading = false;
+    });
   }
 
   Future<void> _loadNative() async {
@@ -555,73 +610,80 @@ class _GalleryTabState extends State<_GalleryTab> {
             _loading = false;
             _error = 'Нет доступа к галерее';
             _assets = [];
+            _albums = null;
+            _selectedAlbumId = null;
           });
         }
         return;
       }
 
-      final type = widget.mode == _GalleryMode.video
-          ? RequestType.video
-          : RequestType.image;
-
+      final permissionLimited = state.isLimited;
       final paths = await PhotoManager.getAssetPathList(
-        type: type,
+        type: _requestType,
         hasAll: true,
-        onlyAll: true,
+        onlyAll: false,
       );
       if (paths.isEmpty) {
         if (mounted) {
           setState(() {
             _loading = false;
             _assets = [];
+            _albums = [];
+            _selectedAlbumId = null;
+            _permissionLimited = permissionLimited;
           });
         }
         return;
       }
 
-      final album = paths.first;
-      final raw = await album.getAssetListPaged(page: 0, size: 120);
-
-      List<AssetEntity> filtered = raw;
-      if (widget.mode == _GalleryMode.gif) {
-        final withMime = await Future.wait(
-          raw.map((e) async {
-            final m = await e.mimeTypeAsync;
-            return _isGifMime(m);
-          }),
-        );
-        filtered = [
-          for (var i = 0; i < raw.length; i++)
-            if (withMime[i]) raw[i],
-        ];
-      } else if (widget.mode == _GalleryMode.photo) {
-        final withMime = await Future.wait(
-          raw.map((e) async {
-            final m = await e.mimeTypeAsync;
-            return !_isGifMime(m);
-          }),
-        );
-        filtered = [
-          for (var i = 0; i < raw.length; i++)
-            if (withMime[i]) raw[i],
-        ];
-      }
-
-      if (mounted) {
-        setState(() {
-          _assets = filtered;
-          _loading = false;
+      final sorted = List<AssetPathEntity>.from(paths)
+        ..sort((a, b) {
+          if (a.isAll != b.isAll) return a.isAll ? -1 : 1;
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
         });
-      }
+
+      final withAll = sorted.where((p) => p.isAll);
+      final defaultAlbum =
+          withAll.isNotEmpty ? withAll.first : sorted.first;
+
+      await _loadAssetsForAlbum(sorted, defaultAlbum.id, permissionLimited);
     } catch (e) {
       if (mounted) {
         setState(() {
           _loading = false;
           _error = '$e';
           _assets = [];
+          _albums = null;
+          _selectedAlbumId = null;
         });
       }
     }
+  }
+
+  Future<void> _onAlbumChanged(String? albumId) async {
+    if (albumId == null || _albums == null) return;
+    setState(() => _loading = true);
+    try {
+      await _loadAssetsForAlbum(_albums!, albumId, _permissionLimited);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '$e';
+        });
+      }
+    }
+  }
+
+  Future<void> _openPhotoAccessSettings() async {
+    final rt =
+        widget.mode == _GalleryMode.video ? RequestType.video : RequestType.image;
+    if (Platform.isIOS) {
+      await PhotoManager.presentLimited(type: rt);
+    } else {
+      await PhotoManager.openSetting();
+    }
+    await _loadNative();
   }
 
   Future<void> _onTapAsset(AssetEntity asset) async {
@@ -717,57 +779,128 @@ class _GalleryTabState extends State<_GalleryTab> {
     }
 
     final assets = _assets ?? [];
-    if (assets.isEmpty) {
-      return Center(
-        child: Text(
-          widget.mode == _GalleryMode.gif
-              ? 'Нет GIF в галерее'
-              : 'Нет элементов',
-          style: Theme.of(context).textTheme.bodyLarge,
+    final albums = _albums;
+
+    Widget gridOrEmpty() {
+      if (assets.isEmpty) {
+        return Center(
+          child: Text(
+            widget.mode == _GalleryMode.gif
+                ? 'Нет GIF в этом альбоме'
+                : 'Нет элементов в этом альбоме',
+            style: Theme.of(context).textTheme.bodyLarge,
+            textAlign: TextAlign.center,
+          ),
+        );
+      }
+      return GridView.builder(
+        padding: const EdgeInsets.all(6),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          crossAxisSpacing: 4,
+          mainAxisSpacing: 4,
         ),
+        itemCount: assets.length,
+        itemBuilder: (context, index) {
+          final asset = assets[index];
+          return GestureDetector(
+            onTap: () => _onTapAsset(asset),
+            child: FutureBuilder<Uint8List?>(
+              future: asset.thumbnailDataWithSize(
+                const ThumbnailSize.square(220),
+              ),
+              builder: (context, snap) {
+                final d = snap.data;
+                if (d == null) {
+                  return Container(color: Colors.grey.shade800);
+                }
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Image.memory(d, fit: BoxFit.cover),
+                    if (asset.type == AssetType.video)
+                      const Align(
+                        alignment: Alignment.bottomRight,
+                        child: Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Icon(Icons.play_circle_fill,
+                              color: Colors.white, size: 22),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          );
+        },
       );
     }
 
-    return GridView.builder(
-      padding: const EdgeInsets.all(6),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        crossAxisSpacing: 4,
-        mainAxisSpacing: 4,
-      ),
-      itemCount: assets.length,
-      itemBuilder: (context, index) {
-        final asset = assets[index];
-        return GestureDetector(
-          onTap: () => _onTapAsset(asset),
-          child: FutureBuilder<Uint8List?>(
-            future: asset.thumbnailDataWithSize(
-              const ThumbnailSize.square(220),
-            ),
-            builder: (context, snap) {
-              final d = snap.data;
-              if (d == null) {
-                return Container(color: Colors.grey.shade800);
-              }
-              return Stack(
-                fit: StackFit.expand,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_permissionLimited)
+          Material(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Image.memory(d, fit: BoxFit.cover),
-                  if (asset.type == AssetType.video)
-                    const Align(
-                      alignment: Alignment.bottomRight,
-                      child: Padding(
-                        padding: EdgeInsets.all(4),
-                        child: Icon(Icons.play_circle_fill,
-                            color: Colors.white, size: 22),
+                  Icon(
+                    Icons.info_outline_rounded,
+                    size: 20,
+                    color: Theme.of(context).colorScheme.onSecondaryContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Ограниченный доступ к фото: видны не все снимки. '
+                      'Откройте полный доступ или выберите альбом (например «Камера»).',
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.25,
+                        color: Theme.of(context).colorScheme.onSecondaryContainer,
                       ),
                     ),
+                  ),
+                  TextButton(
+                    onPressed: () => unawaited(_openPhotoAccessSettings()),
+                    child: const Text('Доступ'),
+                  ),
                 ],
-              );
-            },
+              ),
+            ),
           ),
-        );
-      },
+        if (albums != null && albums.length > 1)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: DropdownButtonFormField<String>(
+              value: _selectedAlbumId,
+              decoration: const InputDecoration(
+                labelText: 'Альбом',
+                isDense: true,
+                border: OutlineInputBorder(),
+                contentPadding:
+                    EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+              isExpanded: true,
+              items: [
+                for (final p in albums)
+                  DropdownMenuItem<String>(
+                    value: p.id,
+                    child: Text(
+                      p.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: (id) => unawaited(_onAlbumChanged(id)),
+            ),
+          ),
+        Expanded(child: gridOrEmpty()),
+      ],
     );
   }
 }

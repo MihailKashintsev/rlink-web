@@ -2035,6 +2035,9 @@ Future<void> initServices() async {
     RelayService.instance.onPeerOnline = _onRelayPeerOnline;
     RelayService.instance.onAccountSyncBlob =
         (sealed) => unawaited(AccountSyncService.applySealedFromRelay(sealed));
+    RelayService.instance.onChannelDirectorySnapshot = (entries) => unawaited(
+          ChannelService.instance.applyRelayChannelDirectoryEntries(entries),
+        );
     RelayService.instance.state.addListener(() {
       if (RelayService.instance.isConnected) {
         Future.delayed(const Duration(seconds: 2), _sendProfileToOnlinePeers);

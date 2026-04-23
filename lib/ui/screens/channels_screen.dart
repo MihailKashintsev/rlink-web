@@ -2144,15 +2144,17 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
               sendProgress: _sendProgress,
               isRecording: _isRecording,
               recordingSecondsNotifier: _recordingSecondsNotifier,
-              onSend: _createPost,
-              onOpenMediaGallery: _openChannelMediaGallery,
-              onPickVideoFromGallery: _pickAndSendVideoFromGallery,
-              onRecordSquareVideo: _recordAndSendSquarePost,
-              onPickFile: _pickAndSendFile,
-              onCreatePoll: _createPollPost,
-              onMicDown: _startVoiceRecording,
-              onMicUp: _stopAndSendVoice,
-              onMentionPicker: _openMentionPickerForPost,
+              onSend: () => unawaited(_createPost()),
+              onOpenMediaGallery: () => unawaited(_openChannelMediaGallery()),
+              onPickVideoFromGallery: () =>
+                  unawaited(_pickAndSendVideoFromGallery()),
+              onRecordSquareVideo: () =>
+                  unawaited(_recordAndSendSquarePost()),
+              onPickFile: () => unawaited(_pickAndSendFile()),
+              onCreatePoll: () => unawaited(_createPollPost()),
+              onMicDown: () => unawaited(_startVoiceRecording()),
+              onMicUp: () => unawaited(_stopAndSendVoice()),
+              onMentionPicker: () => unawaited(_openMentionPickerForPost()),
             ),
         ],
       ),
@@ -2613,7 +2615,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                                 }
                               }
                             : null,
-                        style: const TextStyle(fontSize: 15),
+                        style: TextStyle(fontSize: 15, color: cs.onSurface),
                         decoration: InputDecoration(
                           hintText: widget.isRecording
                               ? 'Запись... ${s}s.$t'
@@ -4025,7 +4027,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                               maxLines: 3,
                               minLines: 1,
                               textInputAction: TextInputAction.newline,
-                              style: const TextStyle(fontSize: 15),
+                              style: TextStyle(fontSize: 15, color: cs.onSurface),
                               decoration: InputDecoration(
                                 hintText: _isRecordingComment
                                     ? 'Запись... ${s}s.$t'

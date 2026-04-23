@@ -458,6 +458,7 @@ class RichMessageText extends StatelessWidget {
                   fontFamily: 'monospace',
                   fontSize: 14,
                   fontWeight: FontWeight.w400,
+                  color: textColor,
                 ),
               ),
             ),

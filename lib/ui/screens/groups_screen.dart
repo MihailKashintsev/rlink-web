@@ -2150,7 +2150,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                                   )
                                 : null,
                           ),
-                          style: const TextStyle(fontSize: 15),
+                          style: TextStyle(fontSize: 15, color: cs.onSurface),
                           textInputAction: AppSettings.instance.sendOnEnter
                               ? TextInputAction.send
                               : TextInputAction.newline,

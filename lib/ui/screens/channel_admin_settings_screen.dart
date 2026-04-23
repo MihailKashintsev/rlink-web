@@ -63,7 +63,30 @@ class _ChannelAdminSettingsScreenState extends State<ChannelAdminSettingsScreen>
     try {
       final st =
           await GoogleDriveChannelBackup.getSyncStatus(interactive: true);
-      if (mounted) setState(() => _driveStatus = st);
+      if (!mounted) return;
+      setState(() => _driveStatus = st);
+      if (st == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Не удалось связаться с Google Drive. Проверьте интернет и '
+              'что в аккаунте Google включён доступ к Диску для Rlink.',
+            ),
+          ),
+        );
+      } else if (st.email != null &&
+          st.email!.isNotEmpty &&
+          st.limitBytes == null &&
+          st.usageBytes == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Вход выполнен, но нет доступа к Диску. Нажмите снова и '
+              'разрешите доступ к Google Drive в запросе прав.',
+            ),
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _driveRefreshing = false);
     }

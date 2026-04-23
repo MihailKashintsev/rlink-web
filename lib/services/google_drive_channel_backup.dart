@@ -3,7 +3,9 @@ import 'dart:typed_data';
 import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb, debugPrint;
+import 'package:flutter/widgets.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:googleapis_auth/googleapis_auth.dart' as gapis;
 import 'package:googleapis/drive/v3.dart' as drive;
 
 /// Состояние аккаунта Google Drive для экрана настроек (квота из [about.get]).
@@ -39,16 +41,61 @@ class GoogleDriveChannelBackup {
   static const String _webClientId =
       '180782636430-cr0ogo622n3ng26aeu00j0pkn4286dvs.apps.googleusercontent.com';
 
+  static final List<String> _driveScopes = [drive.DriveApi.driveFileScope];
+
+  /// Web client ID нужен на Android/iOS/macOS, чтобы выдавался access token для Google APIs.
   static final GoogleSignIn _signIn = GoogleSignIn(
-    scopes: [drive.DriveApi.driveFileScope],
-    serverClientId: (!kIsWeb &&
-            defaultTargetPlatform == TargetPlatform.android)
-        ? _webClientId
-        : null,
+    scopes: _driveScopes,
+    serverClientId: kIsWeb ? null : _webClientId,
+    forceCodeForRefreshToken:
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android,
   );
+
+  /// После выбора аккаунта без этого часто нет access token для Drive (особенно на новых GMS).
+  static Future<bool> _ensureDriveScopes({required bool interactive}) async {
+    if (_signIn.currentUser == null) return false;
+    if (await _signIn.canAccessScopes(_driveScopes)) return true;
+    if (!interactive) return false;
+    if (!kIsWeb) await _waitForForegroundForInteractiveSignIn();
+    return _signIn.requestScopes(_driveScopes);
+  }
+
+  static Future<gapis.AuthClient?> _driveAuthClient({
+    required bool interactive,
+  }) async {
+    if (!await _ensureDriveScopes(interactive: interactive)) {
+      return null;
+    }
+    var client = await _signIn.authenticatedClient();
+    if (client != null) return client;
+    if (interactive && _signIn.currentUser != null) {
+      if (!kIsWeb) await _waitForForegroundForInteractiveSignIn();
+      final granted = await _signIn.requestScopes(_driveScopes);
+      if (granted) {
+        client = await _signIn.authenticatedClient();
+      }
+    }
+    return client;
+  }
 
   /// Текущий аккаунт без диалога (если уже входили).
   static GoogleSignInAccount? get cachedCurrentUser => _signIn.currentUser;
+
+  /// На Android интерактивный [GoogleSignIn.signIn] требует foreground Activity;
+  /// при предварительном запуске Dart из [RlinkApplication] плагин может ещё не
+  /// получить activity — ждём resumed и даём кадр на attach.
+  static Future<void> _waitForForegroundForInteractiveSignIn() async {
+    if (kIsWeb) return;
+    final binding = WidgetsBinding.instance;
+    if (binding.lifecycleState != AppLifecycleState.resumed) {
+      for (var i = 0; i < 80; i++) {
+        if (binding.lifecycleState == AppLifecycleState.resumed) break;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
+    // Кадр на attach Activity к плагину после resumed.
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+  }
 
   /// Пытается восстановить сессию; при [interactive] открывает выбор аккаунта.
   static Future<GoogleSignInAccount?> ensureUserSignedIn({
@@ -57,7 +104,13 @@ class GoogleDriveChannelBackup {
     var a = await _signIn.signInSilently();
     if (a != null) return a;
     if (!interactive) return null;
-    return _signIn.signIn();
+    await _waitForForegroundForInteractiveSignIn();
+    try {
+      return await _signIn.signIn();
+    } catch (e, st) {
+      debugPrint('[RLINK][Drive] signIn failed: $e\n$st');
+      return null;
+    }
   }
 
   /// Аккаунт и квота для UI настроек. При [interactive]==false только тихий вход.
@@ -69,7 +122,7 @@ class GoogleDriveChannelBackup {
       if (account == null) {
         return const GoogleDriveSyncStatus();
       }
-      final authClient = await _signIn.authenticatedClient();
+      final authClient = await _driveAuthClient(interactive: interactive);
       if (authClient == null) {
         return GoogleDriveSyncStatus(
           email: account.email,
@@ -111,7 +164,7 @@ class GoogleDriveChannelBackup {
     try {
       final account = await ensureUserSignedIn(interactive: true);
       if (account == null) return null;
-      final authClient = await _signIn.authenticatedClient();
+      final authClient = await _driveAuthClient(interactive: true);
       if (authClient == null) return null;
       try {
         final api = drive.DriveApi(authClient);
