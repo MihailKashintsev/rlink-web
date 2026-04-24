@@ -1634,7 +1634,7 @@ class GossipRouter {
         final publicKey = packet.payload['id'] as String?;
         final nick = packet.payload['nick'] as String?;
         final username = packet.payload['u'] as String? ?? '';
-        final color = packet.payload['color'] as int?;
+        final color = _jsonIntLoose(packet.payload['color']);
         final emoji = packet.payload['emoji'] as String? ?? '';
         final x25519Key = packet.payload['x'] as String? ?? '';
         final rid8 = packet.payload['r'] as String?;
@@ -1662,7 +1662,7 @@ class GossipRouter {
         final publicKey = packet.payload['id'] as String?;
         final nick = packet.payload['nick'] as String?;
         final username = packet.payload['u'] as String? ?? '';
-        final color = packet.payload['color'] as int?;
+        final color = _jsonIntLoose(packet.payload['color']);
         final emoji = packet.payload['emoji'] as String? ?? '';
         final x25519Key = packet.payload['x'] as String? ?? '';
         final rid8 = packet.payload['r'] as String?;
@@ -1777,7 +1777,7 @@ class GossipRouter {
 
       if (packet.type == 'typing') {
         final from = packet.payload['from'] as String?;
-        final activity = packet.payload['a'] as int?;
+        final activity = _jsonIntLoose(packet.payload['a']);
         final rid8 = packet.payload['r'] as String?;
         if (from == null || activity == null) return;
         // Filter by recipient prefix
@@ -1792,7 +1792,7 @@ class GossipRouter {
 
       if (packet.type == 'img_chunk') {
         final msgId = packet.payload['msgId'] as String?;
-        final index = packet.payload['idx'] as int?;
+        final index = _jsonIntLoose(packet.payload['idx']);
         final data = packet.payload['data'] as String?;
         if (msgId == null ||
             msgId.isEmpty ||

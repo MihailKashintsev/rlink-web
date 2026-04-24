@@ -1443,33 +1443,77 @@ class _SettingsScreenState extends State<SettingsScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (ctx) => _PeerSearchSheet(
-        onOpenChat: (publicKey, nickname, color, emoji) async {
+        onOpenChat:
+            (publicKey, nickname, color, emoji,
+                {String? relayX25519Key, String? relayUsername}) async {
           Navigator.pop(ctx);
-          final contact =
+          if (relayX25519Key != null && relayX25519Key.isNotEmpty) {
+            BleService.instance
+                .registerPeerX25519Key(publicKey, relayX25519Key);
+            unawaited(ChatStorageService.instance
+                .updateContactX25519Key(publicKey, relayX25519Key));
+          }
+          final myProfile = ProfileService.instance.profile;
+          if (myProfile != null) {
+            unawaited(GossipRouter.instance.sendPairRequest(
+              publicKey: myProfile.publicKeyHex,
+              nick: myProfile.nickname,
+              username: myProfile.username,
+              color: myProfile.avatarColor,
+              emoji: myProfile.avatarEmoji,
+              recipientId: publicKey,
+              x25519Key: CryptoService.instance.x25519PublicKeyBase64,
+              tags: myProfile.tags,
+            ));
+          }
+          var contact =
               await ChatStorageService.instance.getContact(publicKey);
           final finalNick = contact?.nickname ?? nickname;
           final finalColor = contact?.avatarColor ?? color;
           final finalEmoji = contact?.avatarEmoji ?? emoji;
           final imagePath = contact?.avatarImagePath;
+          final mergedUsername = (relayUsername != null &&
+                  relayUsername.isNotEmpty)
+              ? relayUsername
+              : (contact?.username ?? '');
+          final mergedX25519 = (relayX25519Key != null &&
+                  relayX25519Key.isNotEmpty)
+              ? relayX25519Key
+              : contact?.x25519Key;
           if (contact == null) {
             await ChatStorageService.instance.saveContact(Contact(
               publicKeyHex: publicKey,
               nickname: finalNick,
+              username: mergedUsername,
               avatarColor: finalColor,
               avatarEmoji: finalEmoji,
+              x25519Key: mergedX25519,
               addedAt: DateTime.now(),
             ));
+          } else if (mergedUsername != contact.username ||
+              mergedX25519 != contact.x25519Key ||
+              finalNick != contact.nickname) {
+            await ChatStorageService.instance.saveContact(contact.copyWith(
+              nickname: finalNick,
+              username: mergedUsername,
+              x25519Key: mergedX25519,
+            ));
           }
+          contact = await ChatStorageService.instance.getContact(publicKey);
+          final openNick = contact?.nickname ?? finalNick;
+          final openColor = contact?.avatarColor ?? finalColor;
+          final openEmoji = contact?.avatarEmoji ?? finalEmoji;
+          final openImage = contact?.avatarImagePath ?? imagePath;
           if (context.mounted) {
             Navigator.push(
               context,
               MaterialPageRoute(
                 builder: (_) => ChatScreen(
                   peerId: publicKey,
-                  peerNickname: finalNick,
-                  peerAvatarColor: finalColor,
-                  peerAvatarEmoji: finalEmoji,
-                  peerAvatarImagePath: imagePath,
+                  peerNickname: openNick,
+                  peerAvatarColor: openColor,
+                  peerAvatarEmoji: openEmoji,
+                  peerAvatarImagePath: openImage,
                 ),
               ),
             );
@@ -1880,7 +1924,13 @@ class _OnlineStatusSelector extends StatelessWidget {
 
 class _PeerSearchSheet extends StatefulWidget {
   final void Function(
-      String publicKey, String nickname, int color, String emoji) onOpenChat;
+    String publicKey,
+    String nickname,
+    int color,
+    String emoji, {
+    String? relayX25519Key,
+    String? relayUsername,
+  }) onOpenChat;
 
   const _PeerSearchSheet({required this.onOpenChat});
 
@@ -2102,6 +2152,11 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                           peer.nick.isNotEmpty ? peer.nick : peer.shortId,
                           0xFF607D8B,
                           '',
+                          relayX25519Key:
+                              peer.x25519Key.isNotEmpty ? peer.x25519Key : null,
+                          relayUsername: peer.username.isNotEmpty
+                              ? peer.username
+                              : null,
                         ),
                       );
                     },
