@@ -34,10 +34,10 @@ class RelayService {
   /// Default public relay server.
   /// Захардкожен — пользователь не может переопределить через настройки
   /// (см. serverUrl getter и connect() ниже).
-  static const defaultServerUrl = 'wss://rlink.ru.tuna.am';
+  static const defaultServerUrl = 'wss://ru.tuna.am';
   static const List<String> fallbackServerUrls = <String>[
     defaultServerUrl,
-    'wss://ru.tuna.am',
+    'wss://rlink.ru.tuna.am',
   ];
 
   WebSocketChannel? _channel;
@@ -257,6 +257,7 @@ class RelayService {
     try { _channel?.sink.close(); } catch (_) {}
     _channel = null;
     state.value = RelayState.disconnected;
+    lastError.value = null;
     debugPrint('[RLINK][Relay] Disconnected');
   }
 
@@ -267,6 +268,8 @@ class RelayService {
     _chunkQueue.clear();
     _draining = false;
     state.value = RelayState.disconnected;
+    lastError.value ??=
+        'Соединение закрыто сервером (возможен блок по Origin/прокси)';
     if (!_intentionalClose && !_disposed) {
       _scheduleReconnect();
     }
