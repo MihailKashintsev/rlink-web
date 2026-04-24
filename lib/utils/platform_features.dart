@@ -1,10 +1,7 @@
-import 'dart:io' show Platform;
+import '../services/runtime_platform.dart';
 
 /// «Жидкое стекло» и нативные крутилки — только для iOS 26+ (по версии ОС).
 bool get iosLiquidGlassAndNativePickers {
-  if (!Platform.isIOS) return false;
-  final raw = Platform.operatingSystemVersion;
-  final m = RegExp(r'Version (\d+)', caseSensitive: false).firstMatch(raw);
-  final major = int.tryParse(m?.group(1) ?? '') ?? 0;
-  return major >= 26;
+  // Web/desktop-safe fallback: disable iOS-only visual mode outside iOS.
+  return RuntimePlatform.isIos;
 }

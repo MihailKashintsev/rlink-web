@@ -27,6 +27,7 @@ import '../../services/group_service.dart';
 import '../../services/media_upload_queue.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
+import '../../services/runtime_platform.dart';
 import '../../services/story_service.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/stickers_hub_screen.dart';
@@ -166,7 +167,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   }),
                 ),
 
-                if (Platform.isIOS || Platform.isAndroid) ...[
+                if (RuntimePlatform.isIos || RuntimePlatform.isAndroid) ...[
                   const SizedBox(height: 20),
                   Text(AppL10n.t('settings_app_icon'),
                       style: TextStyle(
@@ -246,7 +247,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ]),
           ),
 
-          if (Platform.isAndroid)
+          if (RuntimePlatform.isAndroid)
             SwitchListTile(
               secondary: Icon(Icons.emoji_emotions_outlined, color: cs.primary),
               title: Text(AppL10n.t('settings_ios_emoji')),
@@ -784,7 +785,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
               ),
             ),
-          if (Platform.isAndroid && settings.connectionMode == 2)
+          if (RuntimePlatform.isAndroid && settings.connectionMode == 2)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               child: Text(

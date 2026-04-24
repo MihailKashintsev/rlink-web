@@ -2,11 +2,13 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as epf;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../services/app_settings.dart';
 import '../../services/image_service.dart';
+import '../../services/runtime_platform.dart';
 
 class AvatarWidget extends StatelessWidget {
   final String initials;
@@ -34,7 +36,7 @@ class AvatarWidget extends StatelessWidget {
   Widget build(BuildContext context) {
     // Resolve potentially stale iOS sandbox path
     final resolvedPath = ImageService.instance.resolveStoredPath(imagePath);
-    final file = resolvedPath != null ? File(resolvedPath) : null;
+    final file = !kIsWeb && resolvedPath != null ? File(resolvedPath) : null;
     final hasImage = file != null && file.existsSync();
 
     // If story ring is shown, shrink the avatar by 6px so the ring fits within size
@@ -52,8 +54,25 @@ class AvatarWidget extends StatelessWidget {
       ),
       child: ClipOval(
         child: hasImage
-            ? Image.file(file,
-                width: innerSize, height: innerSize, fit: BoxFit.cover)
+            ? Image.file(
+                file,
+                width: innerSize,
+                height: innerSize,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => Center(
+                  child: emoji.isNotEmpty
+                      ? Text(emoji, style: TextStyle(fontSize: innerSize * 0.46))
+                      : Text(
+                          initials.isNotEmpty ? initials : '?',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: innerSize * 0.38,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                ),
+              )
             : Center(
                 child: emoji.isNotEmpty
                     ? Text(emoji, style: TextStyle(fontSize: innerSize * 0.46))
@@ -144,7 +163,8 @@ class AvatarEmojiPicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final useNoto = Platform.isAndroid && AppSettings.instance.useIosStyleEmoji;
+    final useNoto =
+        RuntimePlatform.isAndroid && AppSettings.instance.useIosStyleEmoji;
     return SizedBox(
       height: 280,
       child: epf.EmojiPicker(

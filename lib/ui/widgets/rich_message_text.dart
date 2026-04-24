@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
@@ -10,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../l10n/app_l10n.dart';
 import '../../services/app_settings.dart';
+import '../../services/runtime_platform.dart';
 import '../../utils/card_luhn.dart';
 import '../../utils/channel_mentions.dart';
 import '../../utils/code_language_guess.dart';
@@ -522,7 +521,7 @@ class RichMessageText extends StatelessWidget {
 
     TextStyle baseEmojiStyle() {
       var st = TextStyle(color: textColor, fontSize: 15);
-      if (Platform.isAndroid && AppSettings.instance.useIosStyleEmoji) {
+      if (RuntimePlatform.isAndroid && AppSettings.instance.useIosStyleEmoji) {
         final fam = GoogleFonts.notoColorEmoji().fontFamily;
         if (fam != null) {
           st = st.copyWith(

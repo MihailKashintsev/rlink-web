@@ -4,13 +4,15 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../models/sticker_pack.dart';
+import '../../services/runtime_platform.dart';
 import '../../services/sticker_collection_service.dart';
 import 'desktop_image_picker.dart';
 import 'sticker_crop_screen.dart';
@@ -20,7 +22,9 @@ const _kMaxRecentFiles = 24;
 
 bool get _useNativePhotoGrid {
   if (kIsWeb) return false;
-  return Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
+  return RuntimePlatform.isAndroid ||
+      RuntimePlatform.isIos ||
+      defaultTargetPlatform == TargetPlatform.macOS;
 }
 
 bool _isGifMime(String? m) =>
@@ -45,6 +49,7 @@ Future<void> _rememberFilePath(String path) async {
 }
 
 Future<List<String>> _loadRecentFilePaths() async {
+  if (kIsWeb) return [];
   try {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_kRecentFilesPrefKey);
@@ -483,7 +488,8 @@ class _FilesGalleryTabState extends State<_FilesGalleryTab> {
               itemCount: _recent.length,
               itemBuilder: (context, i) {
                 final p = _recent[i];
-                final name = p.split(Platform.pathSeparator).last;
+                final norm = p.replaceAll('\\', '/');
+                final name = norm.split('/').last;
                 return ListTile(
                   leading: const Icon(Icons.insert_drive_file_outlined),
                   title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -678,7 +684,7 @@ class _GalleryTabState extends State<_GalleryTab> {
   Future<void> _openPhotoAccessSettings() async {
     final rt =
         widget.mode == _GalleryMode.video ? RequestType.video : RequestType.image;
-    if (Platform.isIOS) {
+    if (RuntimePlatform.isIos) {
       await PhotoManager.presentLimited(type: rt);
     } else {
       await PhotoManager.openSetting();
