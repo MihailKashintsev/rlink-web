@@ -152,7 +152,10 @@ class RelayService {
     }
 
     final myKey = CryptoService.instance.publicKeyHex;
-    if (myKey.isEmpty) return;
+    if (myKey.isEmpty) {
+      lastError.value = 'Локальный публичный ключ не инициализирован';
+      return;
+    }
 
     state.value = RelayState.connecting;
     _intentionalClose = false;

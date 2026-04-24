@@ -76,18 +76,27 @@ class CryptoService {
   /// Инициализация: загружаем или генерируем Ed25519 + X25519 keypairs
   Future<void> init() async {
     // ── Ed25519 identity keypair ──────────────────────────────────
-    final storedPrivate = await _read(_keyPrivate);
-    final storedPublic = await _read(_keyPublic);
-
-    if (storedPrivate != null && storedPublic != null) {
-      final privateBytes = base64.decode(storedPrivate);
-      final publicBytes = base64.decode(storedPublic);
-      _identityKeyPair = SimpleKeyPairData(
-        privateBytes,
-        publicKey: SimplePublicKey(publicBytes, type: KeyPairType.ed25519),
-        type: KeyPairType.ed25519,
-      );
-    } else {
+    var restoredEd = false;
+    try {
+      final storedPrivate = await _read(_keyPrivate);
+      final storedPublic = await _read(_keyPublic);
+      if (storedPrivate != null &&
+          storedPublic != null &&
+          storedPrivate.isNotEmpty &&
+          storedPublic.isNotEmpty) {
+        final privateBytes = base64.decode(storedPrivate);
+        final publicBytes = base64.decode(storedPublic);
+        _identityKeyPair = SimpleKeyPairData(
+          privateBytes,
+          publicKey: SimplePublicKey(publicBytes, type: KeyPairType.ed25519),
+          type: KeyPairType.ed25519,
+        );
+        restoredEd = true;
+      }
+    } catch (e) {
+      debugPrint('[Crypto] Failed to restore Ed25519 keys, regenerating: $e');
+    }
+    if (!restoredEd) {
       _identityKeyPair = await _ed25519.newKeyPair();
       final privateBytes = await _identityKeyPair.extractPrivateKeyBytes();
       final publicKey = await _identityKeyPair.extractPublicKey();
@@ -99,21 +108,29 @@ class CryptoService {
     publicKeyHex = _bytesToHex(pubKey.bytes);
 
     // ── X25519 ECDH keypair ───────────────────────────────────────
-    final storedX25519Priv = await _read(_keyX25519Private);
-    final storedX25519Pub = await _read(_keyX25519Public);
-
-    if (storedX25519Priv != null && storedX25519Pub != null) {
-      final privBytes = base64.decode(storedX25519Priv);
-      final pubBytes = base64.decode(storedX25519Pub);
-      _x25519IdentityKeyPair = SimpleKeyPairData(
-        privBytes,
-        publicKey: SimplePublicKey(pubBytes, type: KeyPairType.x25519),
-        type: KeyPairType.x25519,
-      );
-    } else {
+    var restoredX = false;
+    try {
+      final storedX25519Priv = await _read(_keyX25519Private);
+      final storedX25519Pub = await _read(_keyX25519Public);
+      if (storedX25519Priv != null &&
+          storedX25519Pub != null &&
+          storedX25519Priv.isNotEmpty &&
+          storedX25519Pub.isNotEmpty) {
+        final privBytes = base64.decode(storedX25519Priv);
+        final pubBytes = base64.decode(storedX25519Pub);
+        _x25519IdentityKeyPair = SimpleKeyPairData(
+          privBytes,
+          publicKey: SimplePublicKey(pubBytes, type: KeyPairType.x25519),
+          type: KeyPairType.x25519,
+        );
+        restoredX = true;
+      }
+    } catch (e) {
+      debugPrint('[Crypto] Failed to restore X25519 keys, regenerating: $e');
+    }
+    if (!restoredX) {
       _x25519IdentityKeyPair = await _x25519.newKeyPair();
-      final privBytes =
-          await _x25519IdentityKeyPair.extractPrivateKeyBytes();
+      final privBytes = await _x25519IdentityKeyPair.extractPrivateKeyBytes();
       final pubKeyX = await _x25519IdentityKeyPair.extractPublicKey();
       await _write(_keyX25519Private, base64.encode(privBytes));
       await _write(_keyX25519Public, base64.encode(pubKeyX.bytes));
