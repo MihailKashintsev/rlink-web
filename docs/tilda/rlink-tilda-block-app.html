@@ -1,11 +1,11 @@
-<div id="rlink-tilda-app-wrap" style="width:100%;max-width:1280px;margin:0 auto;"></div>
+<div id="rlink-tilda-app-wrap" style="width:100%;max-width:none;margin:0;"></div>
 <script>
   (function () {
     var appUrl = (window.RLINK_WEB_APP_URL || "").replace(/\/$/, "");
     var manualHeight = Number(window.RLINK_WEB_HEIGHT || 0);
-    var minHeight = Number(window.RLINK_WEB_MIN_HEIGHT || 560);
-    var maxHeight = Number(window.RLINK_WEB_MAX_HEIGHT || 980);
-    var viewportOffset = Number(window.RLINK_WEB_VIEWPORT_OFFSET || 120);
+    var minHeight = Number(window.RLINK_WEB_MIN_HEIGHT || 680);
+    var maxHeight = Number(window.RLINK_WEB_MAX_HEIGHT || 10000);
+    var viewportOffset = Number(window.RLINK_WEB_VIEWPORT_OFFSET || 0);
     var wrap = document.getElementById("rlink-tilda-app-wrap");
 
     if (!appUrl) {
@@ -26,7 +26,7 @@
     iframe.style.width = "100%";
     iframe.style.display = "block";
     iframe.style.border = "0";
-    iframe.style.borderRadius = "14px";
+    iframe.style.borderRadius = "0";
     iframe.style.background = "#0B0F1A";
     iframe.loading = "lazy";
     iframe.allow = "camera; microphone; geolocation; clipboard-read; clipboard-write";

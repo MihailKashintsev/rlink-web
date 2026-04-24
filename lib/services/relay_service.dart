@@ -34,10 +34,10 @@ class RelayService {
   /// Default public relay server.
   /// Захардкожен — пользователь не может переопределить через настройки
   /// (см. serverUrl getter и connect() ниже).
-  static const defaultServerUrl = 'wss://ru.tuna.am';
+  static const defaultServerUrl = 'wss://rlink.ru.tuna.am';
   static const List<String> fallbackServerUrls = <String>[
     defaultServerUrl,
-    'wss://rlink.ru.tuna.am',
+    'wss://ru.tuna.am',
   ];
 
   WebSocketChannel? _channel;
