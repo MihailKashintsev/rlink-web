@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'runtime_platform.dart';
 
 /// Глобальные настройки приложения — тема, уведомления, акцентный цвет.
 /// Является ChangeNotifier: виджеты перестраиваются при изменениях.
@@ -9,36 +10,45 @@ class AppSettings extends ChangeNotifier {
   AppSettings._();
   static final AppSettings instance = AppSettings._();
 
-  static const _keyThemeMode       = 'theme_mode';
-  static const _keyAccentColor     = 'accent_color';
-  static const _keyNotifications   = 'notifications';
-  static const _keyNotifSound      = 'notif_sound';
-  static const _keyNotifVibration  = 'notif_vibration';
-  static const _keyChatBgPrefix    = 'chat_bg_';
-  static const _keyLocale          = 'locale';           // 'system','ru','en','es','de','fr'
-  static const _keyFontSize        = 'font_size';        // 0=small,1=medium,2=large
-  static const _keySendOnEnter     = 'send_on_enter';
+  static const _keyThemeMode = 'theme_mode';
+  static const _keyAccentColor = 'accent_color';
+  static const _keyNotifications = 'notifications';
+  static const _keyNotifSound = 'notif_sound';
+  static const _keyNotifVibration = 'notif_vibration';
+  static const _keyChatBgPrefix = 'chat_bg_';
+  static const _keyLocale = 'locale'; // 'system','ru','en','es','de','fr'
+  static const _keyFontSize = 'font_size'; // 0=small,1=medium,2=large
+  static const _keySendOnEnter = 'send_on_enter';
   static const _keyShowReadReceipts = 'show_read_receipts';
   static const _keyShowOnlineStatus = 'show_online_status';
   static const _keyAutoDownloadMedia = 'auto_download_media';
-  static const _keyCompactMode     = 'compact_mode';
+  static const _keyCompactMode = 'compact_mode';
   static const _keyEtherRulesAccepted = 'ether_rules_accepted';
-  static const _keyOnlineStatusMode  = 'online_status_mode'; // 0=online,1=dnd,2=busy
-  static const _keyRelayEnabled      = 'relay_enabled';
-  static const _keyRelayServerUrl    = 'relay_server_url';
-  static const _keyConnectionMode    = 'connection_mode';   // 0=BLE only, 1=Internet, 2=BLE+Wi‑Fi Direct+Internet
-  static const _keyMediaPriority     = 'media_priority';    // 0=BLE, 1=Internet
+  static const _keyOnlineStatusMode =
+      'online_status_mode'; // 0=online,1=dnd,2=busy
+  static const _keyRelayEnabled = 'relay_enabled';
+  static const _keyRelayServerUrl = 'relay_server_url';
+  static const _keyConnectionMode =
+      'connection_mode'; // 0=BLE only, 1=Internet, 2=BLE+Wi‑Fi Direct+Internet
+  static const _keyMediaPriority = 'media_priority'; // 0=BLE, 1=Internet
   static const _keyAdminPasswordHash = 'admin_password_hash';
-  static const _keyBubbleStyle       = 'bubble_style';       // 0=rounded,1=square,2=minimal
-  static const _keyClockFormat       = 'clock_format';       // 0=24h,1=12h
-  static const _keyMessageDensity    = 'message_density';    // 0=comfortable,1=cozy,2=compact
+  static const _keyBubbleStyle = 'bubble_style'; // 0=rounded,1=square,2=minimal
+  static const _keyClockFormat = 'clock_format'; // 0=24h,1=12h
+  static const _keyMessageDensity =
+      'message_density'; // 0=comfortable,1=cozy,2=compact
   static const _keyShowReactionsQuickBar = 'show_reactions_quickbar';
   static const _keyQuickReactionEmoji = 'quick_reaction_emoji';
-  static const _keyNotifyPersonal  = 'notify_personal';
-  static const _keyNotifyGroups    = 'notify_groups';
-  static const _keyNotifyChannels  = 'notify_channels';
-  static const _keyAppIconVariant  = 'app_icon_variant';   // 0=classic,1=mono,2=ai
-  static const _keyUseIosStyleEmoji = 'use_ios_style_emoji'; // Android: Noto Color Emoji fallback
+  static const _keyNotifyPersonal = 'notify_personal';
+  static const _keyNotifyGroups = 'notify_groups';
+  static const _keyNotifyChannels = 'notify_channels';
+  static const _keyAppIconVariant = 'app_icon_variant'; // 0=classic,1=mono,2=ai
+  static const _keyUseIosStyleEmoji =
+      'use_ios_style_emoji'; // Android: Noto Color Emoji fallback
+  static const _keyDeviceLinkRole =
+      'device_link_role'; // 0=none,1=primary,2=child
+  static const _keyLinkedDevicePublicKey = 'linked_device_public_key';
+  static const _keyLinkedDeviceNickname = 'linked_device_nickname';
+  static const _keyPreLinkConnectionMode = 'pre_link_connection_mode';
 
   late SharedPreferences _prefs;
 
@@ -49,8 +59,8 @@ class AppSettings extends ChangeNotifier {
   bool _notifVibration = true;
   final Map<String, String> _chatBgMap = {};
   String _locale = 'system';
-  int _fontSize = 1;            // 0=small, 1=medium, 2=large
-  bool _sendOnEnter = false;    // false = send button, true = Enter sends
+  int _fontSize = 1; // 0=small, 1=medium, 2=large
+  bool _sendOnEnter = false; // false = send button, true = Enter sends
   bool _showReadReceipts = true;
   bool _showOnlineStatus = true;
   bool _autoDownloadMedia = true;
@@ -59,11 +69,11 @@ class AppSettings extends ChangeNotifier {
   int _onlineStatusMode = 0; // 0=online(green), 1=dnd(yellow), 2=busy(red)
   bool _relayEnabled = true;
   String _relayServerUrl = '';
-  int _connectionMode = 2;   // 0=BLE only, 1=Internet only, 2=Both
-  int _mediaPriority = 1;    // 0=BLE first, 1=Internet first
-  int _bubbleStyle = 0;      // 0=rounded, 1=square, 2=minimal
-  int _clockFormat = 0;      // 0=24h, 1=12h
-  int _messageDensity = 1;   // 0=comfortable, 1=cozy, 2=compact
+  int _connectionMode = 2; // 0=BLE only, 1=Internet only, 2=Both
+  int _mediaPriority = 1; // 0=BLE first, 1=Internet first
+  int _bubbleStyle = 0; // 0=rounded, 1=square, 2=minimal
+  int _clockFormat = 0; // 0=24h, 1=12h
+  int _messageDensity = 1; // 0=comfortable, 1=cozy, 2=compact
   bool _showReactionsQuickBar = true;
   String _quickReactionEmoji = '👍';
   bool _notifyPersonal = true;
@@ -71,6 +81,10 @@ class AppSettings extends ChangeNotifier {
   bool _notifyChannels = true;
   int _appIconVariant = 0;
   bool _useIosStyleEmoji = false;
+  int _deviceLinkRole = 0;
+  String _linkedDevicePublicKey = '';
+  String _linkedDeviceNickname = '';
+  int? _preLinkConnectionMode;
 
   ThemeMode get themeMode => _themeMode;
   int get accentColorIndex => _accentColorIndex;
@@ -89,7 +103,9 @@ class AppSettings extends ChangeNotifier {
   int get onlineStatusMode => _onlineStatusMode;
   bool get relayEnabled => _relayEnabled;
   String get relayServerUrl => _relayServerUrl;
-  int get connectionMode => _connectionMode;
+  int get connectionMode =>
+      RuntimePlatform.isWeb ? 1 : (isDeviceLinked ? 1 : _connectionMode);
+  int get configuredConnectionMode => _connectionMode;
   int get mediaPriority => _mediaPriority;
   int get bubbleStyle => _bubbleStyle;
   int get clockFormat => _clockFormat;
@@ -100,6 +116,16 @@ class AppSettings extends ChangeNotifier {
   bool get notifyGroups => _notifyGroups;
   bool get notifyChannels => _notifyChannels;
   int get appIconVariant => _appIconVariant;
+  int get deviceLinkRole => _deviceLinkRole.clamp(0, 2);
+  bool get isPrimaryDevice => deviceLinkRole == 1;
+  bool get isLinkedChildDevice => deviceLinkRole == 2;
+  bool get isDeviceLinked =>
+      deviceLinkRole != 0 && _linkedDevicePublicKey.isNotEmpty;
+  String get linkedDevicePublicKey => _linkedDevicePublicKey;
+  String get linkedDeviceNickname => _linkedDeviceNickname;
+  bool get canEditOwnProfileAndSettings => !isLinkedChildDevice;
+  bool get channelsEnabled => connectionMode != 0;
+
   /// На Android включает шрифт Noto Color Emoji (ближе к единому виду с iOS).
   bool get useIosStyleEmoji => _useIosStyleEmoji;
 
@@ -134,31 +160,39 @@ class AppSettings extends ChangeNotifier {
 
   /// Вертикальный padding для сообщения с учётом плотности.
   double get messageVerticalPadding {
+    double base;
     switch (_messageDensity) {
       case 0:
-        return 10;
+        base = 10;
+        break;
       case 2:
-        return 4;
+        base = 4;
+        break;
       case 1:
       default:
-        return 7;
+        base = 7;
+        break;
     }
+    if (_compactMode) {
+      base -= 1.5;
+    }
+    return base < 2 ? 2 : base;
   }
 
   /// Цвет статуса: 0=зелёный(онлайн), 1=жёлтый(DND), 2=красный(занят), 3=серый(офлайн — авто)
   Color get onlineStatusColor => const [
-    Color(0xFF4CAF50), // green
-    Color(0xFFFFC107), // yellow/amber
-    Color(0xFFF44336), // red
-    Color(0xFF9E9E9E), // gray
-  ][_onlineStatusMode.clamp(0, 3)];
+        Color(0xFF4CAF50), // green
+        Color(0xFFFFC107), // yellow/amber
+        Color(0xFFF44336), // red
+        Color(0xFF9E9E9E), // gray
+      ][_onlineStatusMode.clamp(0, 3)];
 
   String get onlineStatusLabel => const [
-    'В сети',
-    'Не беспокоить',
-    'Занят — не писать',
-    'Не в сети',
-  ][_onlineStatusMode.clamp(0, 3)];
+        'В сети',
+        'Не беспокоить',
+        'Занят — не писать',
+        'Не в сети',
+      ][_onlineStatusMode.clamp(0, 3)];
 
   /// Расширенная палитра акцентных цветов (16 оттенков).
   static const List<Color> accentColors = [
@@ -192,7 +226,8 @@ class AppSettings extends ChangeNotifier {
     _prefs = await SharedPreferences.getInstance();
     final modeIdx = _prefs.getInt(_keyThemeMode) ?? 0;
     _themeMode = ThemeMode.values[modeIdx.clamp(0, 2)];
-    _accentColorIndex = (_prefs.getInt(_keyAccentColor) ?? 0).clamp(0, accentColors.length - 1);
+    _accentColorIndex =
+        (_prefs.getInt(_keyAccentColor) ?? 0).clamp(0, accentColors.length - 1);
     _notificationsEnabled = _prefs.getBool(_keyNotifications) ?? true;
     _notifSound = _prefs.getBool(_keyNotifSound) ?? true;
     _notifVibration = _prefs.getBool(_keyNotifVibration) ?? true;
@@ -215,6 +250,25 @@ class AppSettings extends ChangeNotifier {
     _relayEnabled = _prefs.getBool(_keyRelayEnabled) ?? true;
     _relayServerUrl = _prefs.getString(_keyRelayServerUrl) ?? '';
     _connectionMode = (_prefs.getInt(_keyConnectionMode) ?? 2).clamp(0, 2);
+    _deviceLinkRole = (_prefs.getInt(_keyDeviceLinkRole) ?? 0).clamp(0, 2);
+    _linkedDevicePublicKey = _normalizeLinkedKey(
+      _prefs.getString(_keyLinkedDevicePublicKey) ?? '',
+    );
+    _linkedDeviceNickname =
+        (_prefs.getString(_keyLinkedDeviceNickname) ?? '').trim();
+    final pre = _prefs.getInt(_keyPreLinkConnectionMode);
+    _preLinkConnectionMode = pre?.clamp(0, 2).toInt();
+    if (_deviceLinkRole != 0 && _linkedDevicePublicKey.isEmpty) {
+      _deviceLinkRole = 0;
+      _linkedDeviceNickname = '';
+      await _prefs.remove(_keyDeviceLinkRole);
+      await _prefs.remove(_keyLinkedDevicePublicKey);
+      await _prefs.remove(_keyLinkedDeviceNickname);
+    }
+    if (isDeviceLinked) {
+      // Linked devices work only through relay.
+      _relayEnabled = true;
+    }
     _mediaPriority = (_prefs.getInt(_keyMediaPriority) ?? 1).clamp(0, 1);
     _bubbleStyle = (_prefs.getInt(_keyBubbleStyle) ?? 0).clamp(0, 2);
     _clockFormat = (_prefs.getInt(_keyClockFormat) ?? 0).clamp(0, 1);
@@ -396,8 +450,8 @@ class AppSettings extends ChangeNotifier {
   }
 
   Future<void> setRelayEnabled(bool value) async {
-    _relayEnabled = value;
-    await _prefs.setBool(_keyRelayEnabled, value);
+    _relayEnabled = isDeviceLinked ? true : value;
+    await _prefs.setBool(_keyRelayEnabled, _relayEnabled);
     notifyListeners();
   }
 
@@ -408,9 +462,9 @@ class AppSettings extends ChangeNotifier {
   }
 
   Future<void> setConnectionMode(int mode) async {
-    _connectionMode = mode.clamp(0, 2);
+    _connectionMode = isDeviceLinked ? 1 : mode.clamp(0, 2);
     // Sync relayEnabled based on connection mode
-    _relayEnabled = mode >= 1; // Internet or Both
+    _relayEnabled = _connectionMode >= 1; // Internet or Both
     await _prefs.setInt(_keyConnectionMode, _connectionMode);
     await _prefs.setBool(_keyRelayEnabled, _relayEnabled);
     notifyListeners();
@@ -422,9 +476,83 @@ class AppSettings extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> linkAsPrimaryDevice({
+    required String devicePublicKey,
+    required String deviceNickname,
+  }) {
+    return _setDeviceLink(
+      role: 1,
+      devicePublicKey: devicePublicKey,
+      deviceNickname: deviceNickname,
+    );
+  }
+
+  Future<void> linkAsChildDevice({
+    required String devicePublicKey,
+    required String deviceNickname,
+  }) {
+    return _setDeviceLink(
+      role: 2,
+      devicePublicKey: devicePublicKey,
+      deviceNickname: deviceNickname,
+    );
+  }
+
+  Future<void> unlinkDevice() async {
+    _deviceLinkRole = 0;
+    _linkedDevicePublicKey = '';
+    _linkedDeviceNickname = '';
+    if (_preLinkConnectionMode != null) {
+      _connectionMode = _preLinkConnectionMode!.clamp(0, 2);
+    }
+    _preLinkConnectionMode = null;
+    _relayEnabled = _connectionMode >= 1;
+    await _prefs.remove(_keyDeviceLinkRole);
+    await _prefs.remove(_keyLinkedDevicePublicKey);
+    await _prefs.remove(_keyLinkedDeviceNickname);
+    await _prefs.remove(_keyPreLinkConnectionMode);
+    await _prefs.setInt(_keyConnectionMode, _connectionMode);
+    await _prefs.setBool(_keyRelayEnabled, _relayEnabled);
+    notifyListeners();
+  }
+
+  Future<void> _setDeviceLink({
+    required int role,
+    required String devicePublicKey,
+    required String deviceNickname,
+  }) async {
+    final normalized = _normalizeLinkedKey(devicePublicKey);
+    if (normalized.isEmpty) return;
+    final safeRole = role.clamp(1, 2);
+    if (_preLinkConnectionMode == null && _connectionMode != 1) {
+      _preLinkConnectionMode = _connectionMode;
+      await _prefs.setInt(_keyPreLinkConnectionMode, _connectionMode);
+    }
+    _deviceLinkRole = safeRole;
+    _linkedDevicePublicKey = normalized;
+    final nick = deviceNickname.trim();
+    _linkedDeviceNickname =
+        nick.isEmpty ? '${normalized.substring(0, 8)}...' : nick;
+    _connectionMode = 1;
+    _relayEnabled = true;
+    await _prefs.setInt(_keyDeviceLinkRole, _deviceLinkRole);
+    await _prefs.setString(_keyLinkedDevicePublicKey, _linkedDevicePublicKey);
+    await _prefs.setString(_keyLinkedDeviceNickname, _linkedDeviceNickname);
+    await _prefs.setInt(_keyConnectionMode, _connectionMode);
+    await _prefs.setBool(_keyRelayEnabled, _relayEnabled);
+    notifyListeners();
+  }
+
+  String _normalizeLinkedKey(String value) {
+    final key = value.trim().toLowerCase();
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(key)) return '';
+    return key;
+  }
+
   // ── Admin password (SHA-256 hash) ─────────────────────────────
   // Default password: "1234"
-  static const _defaultAdminHash = '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4';
+  static const _defaultAdminHash =
+      '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4';
   static const _keyAdminCfgRev = 'admin_cfg_rev';
   static const _keyAdminCfgSealed = 'admin_cfg_sealed_box';
 
@@ -460,7 +588,8 @@ class AppSettings extends ChangeNotifier {
   }
 
   /// Обновить ревизию синхронизации и sealed-бокс без смены пароля админки (список каналов).
-  Future<void> bumpAccountSyncRevisionOnly(int revision, String sealedBoxJson) async {
+  Future<void> bumpAccountSyncRevisionOnly(
+      int revision, String sealedBoxJson) async {
     final cur = _prefs.getInt(_keyAdminCfgRev) ?? 0;
     if (revision <= cur) return;
     await _prefs.setInt(_keyAdminCfgRev, revision);

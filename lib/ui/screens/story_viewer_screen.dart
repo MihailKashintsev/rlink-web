@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../services/chat_storage_service.dart';
+import '../../services/app_settings.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/story_service.dart';
@@ -76,8 +77,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
   void _resumeStory() {
     if (!mounted) return;
     _progressCtrl.forward();
-    final remaining = _storyDuration *
-        (1.0 - _progressCtrl.value).clamp(0.0, 1.0).toDouble();
+    final remaining =
+        _storyDuration * (1.0 - _progressCtrl.value).clamp(0.0, 1.0).toDouble();
     _timer = Timer(remaining, _nextStory);
   }
 
@@ -186,7 +187,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
           children: [
             const SizedBox(height: 12),
             Container(
-              width: 36, height: 4,
+              width: 36,
+              height: 4,
               decoration: BoxDecoration(
                 color: Colors.white24,
                 borderRadius: BorderRadius.circular(2),
@@ -197,7 +199,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Row(
                 children: [
-                  const Icon(Icons.visibility_outlined, color: Colors.white70, size: 20),
+                  const Icon(Icons.visibility_outlined,
+                      color: Colors.white70, size: 20),
                   const SizedBox(width: 8),
                   Text(
                     'Просмотры: ${viewers.length}',
@@ -235,12 +238,14 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                         backgroundColor: Colors.white12,
                         child: Text(
                           name.isNotEmpty ? name[0].toUpperCase() : '?',
-                          style: const TextStyle(color: Colors.white, fontSize: 14),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 14),
                         ),
                       ),
                       title: Text(
                         name,
-                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 14),
                       ),
                     );
                   },
@@ -301,11 +306,11 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
     if (_stories.isEmpty) return const SizedBox.shrink();
     // Prefer live story from service so incoming reactions update UI.
     final baseStory = _stories[_index];
-    final story =
-        StoryService.instance.findStory(baseStory.id) ?? baseStory;
+    final story = StoryService.instance.findStory(baseStory.id) ?? baseStory;
     final bgColor = Color(story.bgColor);
     final myId = CryptoService.instance.publicKeyHex;
     final isAuthor = story.authorId == myId;
+    final showQuickBar = AppSettings.instance.showReactionsQuickBar;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -366,8 +371,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                   padding: const EdgeInsets.all(16),
                   child: Container(
                     constraints: const BoxConstraints(maxWidth: 320),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: story.imagePath != null
                         ? BoxDecoration(
                             color: Colors.black.withValues(alpha: 0.35),
@@ -400,7 +405,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                 children: [
                   // Progress bars
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     child: Row(
                       children: List.generate(_stories.length, (i) {
                         return Expanded(
@@ -550,7 +556,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                                 ],
                               ),
                             ),
-                          if (story.totalReactions > 0) const SizedBox(width: 10),
+                          if (story.totalReactions > 0)
+                            const SizedBox(width: 10),
                           if (story.reactions.isNotEmpty)
                             Flexible(
                               child: SingleChildScrollView(
@@ -570,44 +577,47 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                               scrollDirection: Axis.horizontal,
                               child: Row(
                                 children: [
-                                  for (final e in kQuickReactionEmojis)
-                                    GestureDetector(
-                                      onTap: () async {
-                                        _pauseStory();
-                                        final story2 = widget.stories[_index];
-                                        StoryService.instance.toggleReaction(
-                                            story2.id, e, myId);
-                                        await GossipRouter.instance
-                                            .sendReactionExt(
-                                          kind: 'story',
-                                          targetId: story2.id,
-                                          emoji: e,
-                                          fromId: myId,
-                                        );
-                                        if (mounted) _resumeStory();
-                                      },
-                                      child: Container(
-                                        margin: const EdgeInsets.only(right: 6),
-                                        padding: const EdgeInsets.all(6),
-                                        decoration: BoxDecoration(
-                                          color: story.reactions[e]
-                                                      ?.contains(myId) ==
-                                                  true
-                                              ? Colors.white
-                                                  .withValues(alpha: 0.28)
-                                              : Colors.white
-                                                  .withValues(alpha: 0.12),
-                                          shape: BoxShape.circle,
+                                  if (showQuickBar)
+                                    for (final e in kQuickReactionEmojis)
+                                      GestureDetector(
+                                        onTap: () async {
+                                          _pauseStory();
+                                          final story2 = widget.stories[_index];
+                                          StoryService.instance.toggleReaction(
+                                              story2.id, e, myId);
+                                          await GossipRouter.instance
+                                              .sendReactionExt(
+                                            kind: 'story',
+                                            targetId: story2.id,
+                                            emoji: e,
+                                            fromId: myId,
+                                          );
+                                          if (mounted) _resumeStory();
+                                        },
+                                        child: Container(
+                                          margin:
+                                              const EdgeInsets.only(right: 6),
+                                          padding: const EdgeInsets.all(6),
+                                          decoration: BoxDecoration(
+                                            color: story.reactions[e]
+                                                        ?.contains(myId) ==
+                                                    true
+                                                ? Colors.white
+                                                    .withValues(alpha: 0.28)
+                                                : Colors.white
+                                                    .withValues(alpha: 0.12),
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: Text(e,
+                                              style: const TextStyle(
+                                                  fontSize: 22)),
                                         ),
-                                        child: Text(e,
-                                            style:
-                                                const TextStyle(fontSize: 22)),
                                       ),
-                                    ),
                                   GestureDetector(
                                     onTap: _openReactionPicker,
                                     child: Container(
-                                      margin: const EdgeInsets.only(left: 2),
+                                      margin: EdgeInsets.only(
+                                          left: showQuickBar ? 2 : 0),
                                       padding: const EdgeInsets.all(6),
                                       decoration: BoxDecoration(
                                         color: Colors.white

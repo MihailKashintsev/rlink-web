@@ -2,19 +2,19 @@ import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/chat_message.dart';
-import 'ble_service.dart';
 import 'chat_storage_service.dart';
 import 'crypto_service.dart';
 import 'gossip_router.dart';
-import 'relay_service.dart';
+import 'peer_key_directory.dart';
 
 /// Текстовая отправка в личный чат (как [ChatScreen._send], без UI).
 class OutboundDmText {
   OutboundDmText._();
 
-  static final _pk = RegExp(r'^[0-9a-fA-F]{64}$');
+  static const _pk = r'^[0-9a-fA-F]{64}$';
+  static final _pkRe = RegExp(_pk);
   static const _chunkLen = 600;
-  static final _uuid = const Uuid();
+  static const _uuid = Uuid();
 
   static List<String> splitChunks(String text) {
     final t = text.trim();
@@ -29,9 +29,9 @@ class OutboundDmText {
 
   static String _resolveTargetPeerId(String peerIdOrBle) {
     var t = peerIdOrBle.trim();
-    if (_pk.hasMatch(t)) return t;
-    final resolved = BleService.instance.resolvePublicKey(peerIdOrBle);
-    if (_pk.hasMatch(resolved)) return resolved;
+    if (_pkRe.hasMatch(t)) return t;
+    final resolved = PeerKeyDirectory.instance.resolvePeerPublicKey(peerIdOrBle);
+    if (_pkRe.hasMatch(resolved)) return resolved;
     throw StateError('Нет публичного ключа собеседника для отправки');
   }
 
@@ -72,10 +72,7 @@ class OutboundDmText {
       return;
     }
 
-    var x25519Key = BleService.instance.getPeerX25519Key(targetPeerId);
-    if (x25519Key == null || x25519Key.isEmpty) {
-      x25519Key = RelayService.instance.getPeerX25519Key(targetPeerId);
-    }
+    final x25519Key = PeerKeyDirectory.instance.getX25519(targetPeerId);
 
     for (var i = 0; i < parts.length; i++) {
       final partText = parts[i];

@@ -1,0 +1,30 @@
+name: web-smoke
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  web-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Shared import guardrails
+        run: bash tool/check_shared_imports.sh
+
+      - name: Web build smoke
+        run: flutter build web --release

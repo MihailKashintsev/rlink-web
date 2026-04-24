@@ -18,6 +18,7 @@ import '../../models/chat_message.dart';
 import '../../models/contact.dart';
 import '../../models/message_poll.dart';
 import '../../utils/channel_mentions.dart';
+import '../../utils/external_message_share.dart';
 import '../../utils/rlink_deep_link.dart';
 import '../../services/app_settings.dart';
 import '../../services/broadcast_outbox_service.dart';
@@ -87,7 +88,8 @@ ChatMessage _channelPostToForwardMessage(ChannelPost post, String channelId) {
   );
 }
 
-ChatMessage _channelCommentToForwardMessage(ChannelComment c, String channelId) {
+ChatMessage _channelCommentToForwardMessage(
+    ChannelComment c, String channelId) {
   var t = c.text.trim();
   if (t.isEmpty) {
     if (c.imagePath != null) {
@@ -127,8 +129,8 @@ Future<void> _pickForwardChannelContent(
 }) async {
   final picked = await showForwardDmTargetSheet(context);
   if (picked == null || !context.mounted) return;
-  unawaited(ChannelService.instance
-      .incrementPostForwardCount(forwardMessage.id));
+  unawaited(
+      ChannelService.instance.incrementPostForwardCount(forwardMessage.id));
   final contact = await ChatStorageService.instance.getContact(picked.peerId);
   if (!context.mounted) return;
   Navigator.push(
@@ -174,7 +176,8 @@ Future<void> _showContactMentionPicker(
   final contacts = ChatStorageService.instance.contactsNotifier.value;
   if (contacts.isEmpty) {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Нет контактов — добавьте людей в разделе «Контакты»')),
+      const SnackBar(
+          content: Text('Нет контактов — добавьте людей в разделе «Контакты»')),
     );
     return;
   }
@@ -233,12 +236,45 @@ bool _channelCommentMediaOnlyVoiceOrSquare(ChannelComment comment,
     {required bool missing}) {
   if (missing) return false;
   final t = comment.text.trim();
-  final hasRealText =
-      t.isNotEmpty && !isSyntheticMediaCaption(comment.text);
+  final hasRealText = t.isNotEmpty && !isSyntheticMediaCaption(comment.text);
   if (hasRealText) return false;
   if (comment.imagePath != null) return false;
   if (comment.filePath != null) return false;
   return comment.voicePath != null || comment.videoPath != null;
+}
+
+bool _channelsFeatureEnabled() => AppSettings.instance.channelsEnabled;
+
+Widget _channelsDisabledView(BuildContext context) {
+  final cs = Theme.of(context).colorScheme;
+  return Center(
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.bluetooth_disabled_rounded,
+              size: 58, color: cs.onSurfaceVariant),
+          const SizedBox(height: 12),
+          Text(
+            'Каналы временно недоступны',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              color: cs.onSurface,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'В режиме «только Bluetooth» доступны личные чаты, группы и эфир.',
+            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -280,6 +316,10 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_channelsFeatureEnabled()) {
+      return Scaffold(body: _channelsDisabledView(context));
+    }
+    final childLinked = AppSettings.instance.isLinkedChildDevice;
     final cs = Theme.of(context).colorScheme;
     final q = widget.searchQuery.toLowerCase().trim();
     final filtered = q.isEmpty
@@ -347,14 +387,22 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
           );
         },
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _createChannel,
-        child: const Icon(Icons.add_comment_outlined),
-      ),
+      floatingActionButton: childLinked
+          ? null
+          : FloatingActionButton(
+              onPressed: _createChannel,
+              child: const Icon(Icons.add_comment_outlined),
+            ),
     );
   }
 
   void _openChannel(Channel ch) {
+    if (!_channelsFeatureEnabled()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Каналы недоступны в текущем режиме')),
+      );
+      return;
+    }
     Navigator.push(
       context,
       SmoothPageRoute(page: ChannelViewScreen(channel: ch)),
@@ -362,6 +410,20 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
   }
 
   void _createChannel() {
+    if (AppSettings.instance.isLinkedChildDevice) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Создание канала доступно только на главном устройстве'),
+        ),
+      );
+      return;
+    }
+    if (!_channelsFeatureEnabled()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Каналы недоступны в текущем режиме')),
+      );
+      return;
+    }
     final nameCtrl = TextEditingController();
     final descCtrl = TextEditingController();
     showDialog(
@@ -430,8 +492,7 @@ class _ChannelTile extends StatelessWidget {
     final isAdmin = channel.adminId == myId;
     return ListTile(
       leading: AvatarWidget(
-        key: ValueKey(
-            'ch_tile_${channel.id}_${channel.avatarImagePath ?? ''}'),
+        key: ValueKey('ch_tile_${channel.id}_${channel.avatarImagePath ?? ''}'),
         initials: channel.name.isNotEmpty ? channel.name[0].toUpperCase() : '?',
         color: channel.avatarColor,
         emoji: channel.avatarEmoji,
@@ -530,8 +591,8 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
     // Подтягиваем новые посты из P2P-сети подписчиков. Отвечают все, у кого
     // есть история; дедуп по postId на приёме.
     _requestHistoryDelta();
-    _historyPollTimer =
-        Timer.periodic(const Duration(minutes: 2), (_) => _requestHistoryDelta());
+    _historyPollTimer = Timer.periodic(
+        const Duration(minutes: 2), (_) => _requestHistoryDelta());
     NotificationService.instance.currentRoute.value = 'channel:${_channel.id}';
   }
 
@@ -593,8 +654,9 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
   }
 
   void _onFeedScroll() {
-    final pos =
-        _feedScrollController.hasClients ? _feedScrollController.position : null;
+    final pos = _feedScrollController.hasClients
+        ? _feedScrollController.position
+        : null;
     if (pos == null) return;
     final away = pos.maxScrollExtent - pos.pixels;
     final show = away > 120;
@@ -948,8 +1010,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Квадратик: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Квадратик: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -1101,8 +1162,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
       _sendProgress = 0.0;
     });
     try {
-      final path =
-          await ImageService.instance.saveChatImageFromPicker(rawPath);
+      final path = await ImageService.instance.saveChatImageFromPicker(rawPath);
       final bytes = await File(path).readAsBytes();
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final postId = _uuid.v4();
@@ -1167,8 +1227,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
     }
     final editedBytes = await Navigator.push<Uint8List>(
       context,
-      MaterialPageRoute(
-          builder: (_) => ImageEditorScreen(imagePath: rawPath)),
+      MaterialPageRoute(builder: (_) => ImageEditorScreen(imagePath: rawPath)),
     );
     if (editedBytes == null || !mounted) return;
 
@@ -1380,8 +1439,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Стикер: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Стикер: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -1406,8 +1464,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Стикер: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Стикер: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -1933,6 +1990,12 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (!_channelsFeatureEnabled()) {
+      return Scaffold(
+        appBar: AppBar(title: Text(_channel.name)),
+        body: _channelsDisabledView(context),
+      );
+    }
     final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -2148,8 +2211,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
               onOpenMediaGallery: () => unawaited(_openChannelMediaGallery()),
               onPickVideoFromGallery: () =>
                   unawaited(_pickAndSendVideoFromGallery()),
-              onRecordSquareVideo: () =>
-                  unawaited(_recordAndSendSquarePost()),
+              onRecordSquareVideo: () => unawaited(_recordAndSendSquarePost()),
               onPickFile: () => unawaited(_pickAndSendFile()),
               onCreatePoll: () => unawaited(_createPollPost()),
               onMicDown: () => unawaited(_startVoiceRecording()),
@@ -2419,8 +2481,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final sel = widget.controller.selection;
-    final hasSelection =
-        sel.isValid && sel.baseOffset != sel.extentOffset;
+    final hasSelection = sel.isValid && sel.baseOffset != sel.extentOffset;
     final near = _length > _kMaxPostLen * 0.8;
     final over = _length > _kMaxPostLen;
 
@@ -2471,8 +2532,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                         underline: true,
                         onTap: () => _wrapSelection('__', '__')),
                     _ChannelFmtBtn(
-                        label: '||',
-                        onTap: () => _wrapSelection('||', '||')),
+                        label: '||', onTap: () => _wrapSelection('||', '||')),
                   ],
                 ),
               ),
@@ -2514,8 +2574,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                 icon: Icon(Icons.add_rounded,
                     color: cs.onSurfaceVariant, size: 26),
                 padding: EdgeInsets.zero,
-                constraints:
-                    const BoxConstraints(minWidth: 36, minHeight: 36),
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                 tooltip: 'Прикрепить',
                 position: PopupMenuPosition.over,
                 shape: RoundedRectangleBorder(
@@ -2577,8 +2636,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                   size: 24,
                 ),
                 padding: EdgeInsets.zero,
-                constraints:
-                    const BoxConstraints(minWidth: 36, minHeight: 36),
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                 tooltip: 'Галерея медиа',
               ),
               const SizedBox(width: 2),
@@ -2631,7 +2689,8 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                                   '${_kMaxPostLen - _length}',
                                   style: TextStyle(
                                     fontSize: 11,
-                                    color: over ? Colors.red : cs.onSurfaceVariant,
+                                    color:
+                                        over ? Colors.red : cs.onSurfaceVariant,
                                   ),
                                 )
                               : null,
@@ -2656,8 +2715,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                 ),
               const SizedBox(width: 4),
               GestureDetector(
-                onTap:
-                    widget.isRecording ? widget.onMicUp : widget.onMicDown,
+                onTap: widget.isRecording ? widget.onMicUp : widget.onMicDown,
                 onLongPressStart: (_) {
                   if (!widget.isRecording) widget.onMicDown();
                 },
@@ -2669,15 +2727,11 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                    color: widget.isRecording
-                        ? Colors.redAccent
-                        : cs.primary,
+                    color: widget.isRecording ? Colors.redAccent : cs.primary,
                     shape: BoxShape.circle,
                   ),
                   child: Icon(
-                    widget.isRecording
-                        ? Icons.stop_rounded
-                        : Icons.mic_rounded,
+                    widget.isRecording ? Icons.stop_rounded : Icons.mic_rounded,
                     color: cs.onPrimary,
                     size: 20,
                   ),
@@ -2724,8 +2778,8 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                           : cs.primary,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Icon(Icons.crop_square,
-                        color: cs.onPrimary, size: 22),
+                    child:
+                        Icon(Icons.crop_square, color: cs.onPrimary, size: 22),
                   ),
                 ),
             ]),
@@ -2778,7 +2832,8 @@ class _PostCardState extends State<_PostCard> {
 
   Future<void> _togglePostReaction(BuildContext context, String emoji) async {
     final myId = CryptoService.instance.publicKeyHex;
-    await ChannelService.instance.togglePostReaction(widget.post.id, emoji, myId);
+    await ChannelService.instance
+        .togglePostReaction(widget.post.id, emoji, myId);
     await BroadcastOutboxService.instance.enqueueReactionExt(
       kind: 'channel_post',
       targetId: widget.post.id,
@@ -2825,6 +2880,11 @@ class _PostCardState extends State<_PostCard> {
                   title: const Text('Переслать…'),
                   onTap: () => Navigator.pop(ctx, 'fwd'),
                 ),
+                ListTile(
+                  leading: const Icon(Icons.share_outlined),
+                  title: const Text('Экспортировать…'),
+                  onTap: () => Navigator.pop(ctx, 'share'),
+                ),
                 if (post.text.trim().isNotEmpty)
                   ListTile(
                     leading: const Icon(Icons.copy),
@@ -2833,10 +2893,9 @@ class _PostCardState extends State<_PostCard> {
                   ),
                 if (widget.onDelete != null)
                   ListTile(
-                    leading:
-                        Icon(Icons.delete_outline, color: cs.error),
-                    title: Text('Удалить пост',
-                        style: TextStyle(color: cs.error)),
+                    leading: Icon(Icons.delete_outline, color: cs.error),
+                    title:
+                        Text('Удалить пост', style: TextStyle(color: cs.error)),
                     onTap: () => Navigator.pop(ctx, 'del_post'),
                   ),
               ],
@@ -2859,6 +2918,8 @@ class _PostCardState extends State<_PostCard> {
             originalAuthorNick: label,
             channelId: widget.channelId,
           );
+        } else if (action == 'share') {
+          await shareChannelPostExternally(context, post);
         } else if (action == 'copy') {
           await Clipboard.setData(ClipboardData(text: post.text));
           if (context.mounted) {
@@ -3037,14 +3098,12 @@ class _PostCardState extends State<_PostCard> {
                 ),
                 const SizedBox(width: 12),
                 Icon(Icons.visibility_outlined,
-                    size: 14,
-                    color: cs.onSurface.withValues(alpha: 0.4)),
+                    size: 14, color: cs.onSurface.withValues(alpha: 0.4)),
                 const SizedBox(width: 4),
                 Text(
                   '${post.viewCount}',
                   style: TextStyle(
-                      fontSize: 12,
-                      color: cs.onSurface.withValues(alpha: 0.5)),
+                      fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5)),
                 ),
                 const SizedBox(width: 12),
                 // Comments button — navigates to PostCommentsScreen
@@ -3241,13 +3300,12 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
 
   Future<void> _sendCommentImage() async {
     if (_isSendingComment) return;
-    final rawPath = await pickImagePathDesktopAware(
-        imagePicker: _commentImagePicker);
+    final rawPath =
+        await pickImagePathDesktopAware(imagePicker: _commentImagePicker);
     if (rawPath == null || !mounted) return;
     final editedBytes = await Navigator.push<Uint8List>(
       context,
-      MaterialPageRoute(
-          builder: (_) => ImageEditorScreen(imagePath: rawPath)),
+      MaterialPageRoute(builder: (_) => ImageEditorScreen(imagePath: rawPath)),
     );
     if (editedBytes == null || !mounted) return;
     final quality = await _commentPickImageQuality();
@@ -3323,8 +3381,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
       _commentSendProgress = 0;
     });
     try {
-      final path =
-          await ImageService.instance.saveVideo(raw, isSquare: true);
+      final path = await ImageService.instance.saveVideo(raw, isSquare: true);
       final bytes = await File(path).readAsBytes();
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final commentId = const Uuid().v4();
@@ -3361,8 +3418,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Квадратик: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Квадратик: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -3715,8 +3771,8 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
     final cs = Theme.of(context).colorScheme;
     final postDt = DateTime.fromMillisecondsSinceEpoch(widget.post.timestamp);
     final postMissing = channelPostMissingLocalMedia(widget.post);
-    final headerBare = _channelPostMediaOnlyVoiceOrSquare(widget.post,
-        missing: postMissing);
+    final headerBare =
+        _channelPostMediaOnlyVoiceOrSquare(widget.post, missing: postMissing);
 
     return Scaffold(
       appBar: AppBar(
@@ -3734,11 +3790,10 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
             decoration: headerBare
                 ? null
                 : BoxDecoration(
-                    color:
-                        cs.surfaceContainerHighest.withValues(alpha: 0.4),
+                    color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                        color: cs.outline.withValues(alpha: 0.2)),
+                    border:
+                        Border.all(color: cs.outline.withValues(alpha: 0.2)),
                   ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -3802,8 +3857,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                 if (!postMissing && widget.post.voicePath != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 4),
-                    child:
-                        _ChannelVoiceRow(storedPath: widget.post.voicePath!),
+                    child: _ChannelVoiceRow(storedPath: widget.post.voicePath!),
                   ),
                 if (!postMissing && widget.post.filePath != null)
                   Padding(
@@ -3815,8 +3869,7 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                     ),
                   ),
                 if (widget.post.text.trim().isNotEmpty &&
-                    !(postMissing &&
-                        isSyntheticMediaCaption(widget.post.text)))
+                    !(postMissing && isSyntheticMediaCaption(widget.post.text)))
                   ValueListenableBuilder<List<Contact>>(
                     valueListenable:
                         ChatStorageService.instance.contactsNotifier,
@@ -3956,8 +4009,8 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                       icon: Icon(Icons.add_rounded,
                           color: cs.onSurfaceVariant, size: 26),
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                          minWidth: 36, minHeight: 36),
+                      constraints:
+                          const BoxConstraints(minWidth: 36, minHeight: 36),
                       tooltip: 'Прикрепить',
                       position: PopupMenuPosition.over,
                       shape: RoundedRectangleBorder(
@@ -4027,7 +4080,8 @@ class _PostCommentsScreenState extends State<PostCommentsScreen> {
                               maxLines: 3,
                               minLines: 1,
                               textInputAction: TextInputAction.newline,
-                              style: TextStyle(fontSize: 15, color: cs.onSurface),
+                              style:
+                                  TextStyle(fontSize: 15, color: cs.onSurface),
                               decoration: InputDecoration(
                                 hintText: _isRecordingComment
                                     ? 'Запись... ${s}s.$t'
@@ -4514,8 +4568,8 @@ class _ChannelInlineVideoState extends State<_ChannelInlineVideo> {
                 ),
               Container(color: Colors.black.withValues(alpha: 0.28)),
               const Center(
-                child: Icon(Icons.play_circle_fill,
-                    color: Colors.white, size: 54),
+                child:
+                    Icon(Icons.play_circle_fill, color: Colors.white, size: 54),
               ),
             ],
           ),
@@ -4644,10 +4698,12 @@ class _CommentBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final settings = AppSettings.instance;
+    final compact = settings.compactMode;
     final myId = CryptoService.instance.publicKeyHex;
     final missing = channelCommentMissingLocalMedia(comment);
-    final bareMedia = _channelCommentMediaOnlyVoiceOrSquare(comment,
-        missing: missing);
+    final bareMedia =
+        _channelCommentMediaOnlyVoiceOrSquare(comment, missing: missing);
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
@@ -4667,6 +4723,11 @@ class _CommentBubble extends StatelessWidget {
                     leading: const Icon(Icons.forward),
                     title: const Text('Переслать…'),
                     onTap: () => Navigator.pop(ctx, 'fwd'),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.share_outlined),
+                    title: const Text('Экспортировать…'),
+                    onTap: () => Navigator.pop(ctx, 'share'),
                   ),
                   if (text.trim().isNotEmpty)
                     ListTile(
@@ -4700,6 +4761,8 @@ class _CommentBubble extends StatelessWidget {
               originalAuthorNick: label,
               channelId: channelId,
             );
+          } else if (action == 'share') {
+            await shareChannelCommentExternally(context, comment);
           } else if (action == 'copy') {
             await Clipboard.setData(ClipboardData(text: text));
             if (context.mounted) {
@@ -4715,10 +4778,15 @@ class _CommentBubble extends StatelessWidget {
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width * 0.75,
           ),
-          margin: EdgeInsets.symmetric(vertical: bareMedia ? 1 : 3),
+          margin: EdgeInsets.symmetric(
+            vertical: bareMedia ? 1 : (compact ? 2 : 3),
+          ),
           padding: bareMedia
               ? EdgeInsets.zero
-              : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              : EdgeInsets.symmetric(
+                  horizontal: compact ? 10 : 12,
+                  vertical: settings.messageVerticalPadding,
+                ),
           decoration: bareMedia
               ? null
               : BoxDecoration(

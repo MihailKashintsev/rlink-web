@@ -15,6 +15,7 @@ import '../../services/name_filter.dart';
 import '../../services/app_settings.dart';
 import '../../services/profile_service.dart';
 import 'chat_screen.dart';
+import 'location_map_screen.dart';
 import '../rlink_nav_routes.dart';
 
 class EtherScreen extends StatefulWidget {
@@ -30,10 +31,18 @@ class _EtherScreenState extends State<EtherScreen> {
   Timer? _refreshTimer;
 
   static const List<Color> _palette = [
-    Color(0xFFFF6B6B), Color(0xFF4ECDC4), Color(0xFF45B7D1),
-    Color(0xFFFF9F43), Color(0xFF6C5CE7), Color(0xFFA29BFE),
-    Color(0xFFFF7675), Color(0xFF74B9FF), Color(0xFFFD79A8),
-    Color(0xFF00B894), Color(0xFFE17055), Color(0xFF00CEC9),
+    Color(0xFFFF6B6B),
+    Color(0xFF4ECDC4),
+    Color(0xFF45B7D1),
+    Color(0xFFFF9F43),
+    Color(0xFF6C5CE7),
+    Color(0xFFA29BFE),
+    Color(0xFFFF7675),
+    Color(0xFF74B9FF),
+    Color(0xFFFD79A8),
+    Color(0xFF00B894),
+    Color(0xFFE17055),
+    Color(0xFF00CEC9),
   ];
 
   Color _randomColor() => _palette[math.Random().nextInt(_palette.length)];
@@ -43,8 +52,7 @@ class _EtherScreenState extends State<EtherScreen> {
     super.initState();
     EtherService.instance.markRead();
     EtherService.instance.cleanExpired();
-    _refreshTimer =
-        Timer.periodic(const Duration(seconds: 30), (_) {
+    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -100,27 +108,31 @@ class _EtherScreenState extends State<EtherScreen> {
     double? lat;
     double? lng;
     if (opts.attachGeo) {
-      try {
-        var perm = await Geolocator.checkPermission();
-        if (perm == LocationPermission.denied) {
-          perm = await Geolocator.requestPermission();
-        }
-        if (perm == LocationPermission.denied ||
-            perm == LocationPermission.deniedForever) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Нет доступа к геолокации'),
-                behavior: SnackBarBehavior.floating,
-              ),
-            );
+      lat = opts.customLatitude;
+      lng = opts.customLongitude;
+      if (lat == null || lng == null) {
+        try {
+          var perm = await Geolocator.checkPermission();
+          if (perm == LocationPermission.denied) {
+            perm = await Geolocator.requestPermission();
           }
-        } else {
-          final pos = await Geolocator.getCurrentPosition();
-          lat = pos.latitude;
-          lng = pos.longitude;
-        }
-      } catch (_) {}
+          if (perm == LocationPermission.denied ||
+              perm == LocationPermission.deniedForever) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Нет доступа к геолокации'),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            }
+          } else {
+            final pos = await Geolocator.getCurrentPosition();
+            lat = pos.latitude;
+            lng = pos.longitude;
+          }
+        } catch (_) {}
+      }
     }
 
     await GossipRouter.instance.sendEtherMessage(
@@ -191,19 +203,26 @@ class _EtherScreenState extends State<EtherScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Эфир — это общее пространство для всех рядом. Чтобы оно было безопасным, соблюдайте правила:\n'),
-              Text('1. Запрещены оскорбления, мат и буллинг', style: TextStyle(fontWeight: FontWeight.w600)),
+              Text(
+                  'Эфир — это общее пространство для всех рядом. Чтобы оно было безопасным, соблюдайте правила:\n'),
+              Text('1. Запрещены оскорбления, мат и буллинг',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
               SizedBox(height: 4),
-              Text('2. Запрещены упоминания имён (защита от травли)', style: TextStyle(fontWeight: FontWeight.w600)),
+              Text('2. Запрещены упоминания имён (защита от травли)',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
               SizedBox(height: 4),
-              Text('3. Запрещены угрозы и призывы к насилию', style: TextStyle(fontWeight: FontWeight.w600)),
+              Text('3. Запрещены угрозы и призывы к насилию',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
               SizedBox(height: 4),
-              Text('4. Запрещена реклама и спам', style: TextStyle(fontWeight: FontWeight.w600)),
+              Text('4. Запрещена реклама и спам',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
               SizedBox(height: 4),
-              Text('5. Запрещён контент 18+', style: TextStyle(fontWeight: FontWeight.w600)),
+              Text('5. Запрещён контент 18+',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
               SizedBox(height: 12),
-              Text('Нарушения автоматически фильтруются. Сообщения исчезают через 1 час.',
-                style: TextStyle(fontSize: 13, color: Colors.grey)),
+              Text(
+                  'Нарушения автоматически фильтруются. Сообщения исчезают через 1 час.',
+                  style: TextStyle(fontSize: 13, color: Colors.grey)),
             ],
           ),
         ),
@@ -365,8 +384,7 @@ class _EmptyEtherState extends State<_EmptyEther>
           child: AnimatedBuilder(
             animation: _anim,
             builder: (_, child) => CustomPaint(
-              painter: _RadarPainter(
-                  progress: _anim.value, color: cs.primary),
+              painter: _RadarPainter(progress: _anim.value, color: cs.primary),
               child: child,
             ),
             child: Center(
@@ -542,7 +560,8 @@ class _EtherCard extends StatelessWidget {
                     fontSize: msg.filtered ? 13 : 15,
                     height: 1.4,
                     letterSpacing: 0.1,
-                    fontStyle: msg.filtered ? FontStyle.italic : FontStyle.normal,
+                    fontStyle:
+                        msg.filtered ? FontStyle.italic : FontStyle.normal,
                     color: msg.filtered
                         ? cs.onSurface.withValues(alpha: 0.4)
                         : cs.onSurface,
@@ -611,21 +630,38 @@ class _EtherCard extends StatelessWidget {
                       msg.longitude != null &&
                       !msg.filtered) ...[
                     const SizedBox(width: 8),
-                    Icon(Icons.location_on_outlined,
-                        size: 12,
-                        color: cs.primary.withValues(alpha: 0.7)),
-                    Text(
-                      '${msg.latitude!.toStringAsFixed(3)}, ${msg.longitude!.toStringAsFixed(3)}',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: cs.primary.withValues(alpha: 0.75),
+                    GestureDetector(
+                      onTap: () {
+                        unawaited(
+                          showLocationActionsSheet(
+                            context,
+                            latitude: msg.latitude!,
+                            longitude: msg.longitude!,
+                          ),
+                        );
+                      },
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.location_on_outlined,
+                            size: 12,
+                            color: cs.primary.withValues(alpha: 0.7),
+                          ),
+                          Text(
+                            '${msg.latitude!.toStringAsFixed(3)}, ${msg.longitude!.toStringAsFixed(3)}',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: cs.primary.withValues(alpha: 0.75),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                   const Spacer(),
                   Icon(Icons.access_time,
-                      size: 11,
-                      color: cs.onSurface.withValues(alpha: 0.35)),
+                      size: 11, color: cs.onSurface.withValues(alpha: 0.35)),
                   const SizedBox(width: 3),
                   Text(
                     _relativeTime(msg.receivedAt),
@@ -684,8 +720,8 @@ class _EtherInputState extends State<_EtherInput>
       lowerBound: 0.0,
       upperBound: 1.0,
     );
-    widget.controller.addListener(
-        () => mounted ? setState(() => _len = widget.controller.text.length) : null);
+    widget.controller.addListener(() =>
+        mounted ? setState(() => _len = widget.controller.text.length) : null);
   }
 
   @override
@@ -714,9 +750,8 @@ class _EtherInputState extends State<_EtherInput>
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: cs.surface,
-          border: Border(
-              top: BorderSide(
-                  color: cs.outline.withValues(alpha: 0.2))),
+          border:
+              Border(top: BorderSide(color: cs.outline.withValues(alpha: 0.2))),
         ),
         child: ListenableBuilder(
           listenable: EtherBroadcastOptions.instance,
@@ -729,7 +764,7 @@ class _EtherInputState extends State<_EtherInput>
                 Text(
                   o.anonymous
                       ? 'Режим: анонимно'
-                      : 'Режим: открыто · ${o.attachGeo ? "с гео" : "без гео"}',
+                      : 'Режим: открыто · ${o.attachGeo ? (o.hasCustomLocation ? "с гео (точка на карте)" : "с гео (текущее положение)") : "без гео"}',
                   style: TextStyle(
                     fontSize: 11,
                     color: cs.onSurface.withValues(alpha: 0.45),

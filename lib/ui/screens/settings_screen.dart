@@ -22,6 +22,7 @@ import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gigachat_service.dart';
+import '../../services/gossip_router.dart';
 import '../../services/group_service.dart';
 import '../../services/media_upload_queue.dart';
 import '../../services/profile_service.dart';
@@ -71,6 +72,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final cs = Theme.of(context).colorScheme;
 
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    if (settings.isLinkedChildDevice) {
+      return _buildChildLinkedSettings(context, settings, isDark);
+    }
     return Scaffold(
       backgroundColor:
           isDark ? const Color(0xFF0F0F0F) : const Color(0xFFE8E8E8),
@@ -84,7 +88,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 28),
         children: [
-
           // ── Внешний вид ────────────────────────────────────────
           _SectionHeader(AppL10n.t('settings_appearance')),
 
@@ -95,7 +98,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(AppL10n.t('settings_theme'),
-                    style: TextStyle(fontSize: 13, color: Theme.of(context).hintColor)),
+                    style: TextStyle(
+                        fontSize: 13, color: Theme.of(context).hintColor)),
                 const SizedBox(height: 8),
                 Row(children: [
                   _ThemeChip(
@@ -124,7 +128,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                 // Accent color
                 Text(AppL10n.t('settings_accent_color'),
-                    style: TextStyle(fontSize: 13, color: Theme.of(context).hintColor)),
+                    style: TextStyle(
+                        fontSize: 13, color: Theme.of(context).hintColor)),
                 const SizedBox(height: 10),
                 Wrap(
                   spacing: 10,
@@ -145,11 +150,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               ? Border.all(color: cs.onSurface, width: 3)
                               : null,
                           boxShadow: selected
-                              ? [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 8)]
+                              ? [
+                                  BoxShadow(
+                                      color: color.withValues(alpha: 0.5),
+                                      blurRadius: 8)
+                                ]
                               : null,
                         ),
                         child: selected
-                            ? const Icon(Icons.check, color: Colors.white, size: 18)
+                            ? const Icon(Icons.check,
+                                color: Colors.white, size: 18)
                             : null,
                       ),
                     );
@@ -202,29 +212,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
             leading: Icon(Icons.format_size, color: cs.primary),
             title: Text(AppL10n.t('settings_font_size')),
             subtitle: Text(
-              [AppL10n.t('settings_font_small'),
-               AppL10n.t('settings_font_medium'),
-               AppL10n.t('settings_font_large')][settings.fontSize],
+              [
+                AppL10n.t('settings_font_small'),
+                AppL10n.t('settings_font_medium'),
+                AppL10n.t('settings_font_large')
+              ][settings.fontSize],
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             ),
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
               _SizeChip(
                 label: 'A',
-                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                style:
+                    const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
                 selected: settings.fontSize == 0,
                 onTap: () => settings.setFontSize(0),
               ),
               const SizedBox(width: 6),
               _SizeChip(
                 label: 'A',
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                 selected: settings.fontSize == 1,
                 onTap: () => settings.setFontSize(1),
               ),
               const SizedBox(width: 6),
               _SizeChip(
                 label: 'A',
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                style:
+                    const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
                 selected: settings.fontSize == 2,
                 onTap: () => settings.setFontSize(2),
               ),
@@ -233,8 +248,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           if (Platform.isAndroid)
             SwitchListTile(
-              secondary:
-                  Icon(Icons.emoji_emotions_outlined, color: cs.primary),
+              secondary: Icon(Icons.emoji_emotions_outlined, color: cs.primary),
               title: Text(AppL10n.t('settings_ios_emoji')),
               subtitle: Text(
                 AppL10n.t('settings_ios_emoji_sub'),
@@ -328,16 +342,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
               _SizeChip(
                 label: '24',
-                style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w700),
+                style:
+                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
                 selected: settings.clockFormat == 0,
                 onTap: () => settings.setClockFormat(0),
               ),
               const SizedBox(width: 6),
               _SizeChip(
                 label: '12',
-                style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w700),
+                style:
+                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
                 selected: settings.clockFormat == 1,
                 onTap: () => settings.setClockFormat(1),
               ),
@@ -348,8 +362,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SwitchListTile(
             secondary: Icon(Icons.emoji_emotions_outlined, color: cs.primary),
             title: Text(AppL10n.t('settings_reaction_quick_bar')),
-            subtitle: Text(
-                AppL10n.t('settings_reaction_quick_bar_sub'),
+            subtitle: Text(AppL10n.t('settings_reaction_quick_bar_sub'),
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
             value: settings.showReactionsQuickBar,
             onChanged: (v) => settings.setShowReactionsQuickBar(v),
@@ -389,13 +402,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               border: Border.all(
                                 color: e == settings.quickReactionEmoji
                                     ? Theme.of(ctx).colorScheme.primary
-                                    : Theme.of(ctx)
-                                        .colorScheme
-                                        .outlineVariant,
+                                    : Theme.of(ctx).colorScheme.outlineVariant,
                                 width: e == settings.quickReactionEmoji ? 2 : 1,
                               ),
                             ),
-                            child: Text(e, style: const TextStyle(fontSize: 26)),
+                            child:
+                                Text(e, style: const TextStyle(fontSize: 26)),
                           ),
                         );
                       }).toList(),
@@ -541,7 +553,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _SectionHeader(AppL10n.t('settings_privacy')),
           SwitchListTile(
             secondary: Icon(Icons.done_all_rounded,
-                color: settings.showReadReceipts ? cs.primary : Theme.of(context).hintColor),
+                color: settings.showReadReceipts
+                    ? cs.primary
+                    : Theme.of(context).hintColor),
             title: Text(AppL10n.t('settings_read_receipts')),
             subtitle: Text(AppL10n.t('settings_read_receipts_sub'),
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
@@ -584,7 +598,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _SectionHeader(AppL10n.t('settings_messaging')),
           SwitchListTile(
             secondary: Icon(Icons.keyboard_return_rounded,
-                color: settings.sendOnEnter ? cs.primary : Theme.of(context).hintColor),
+                color: settings.sendOnEnter
+                    ? cs.primary
+                    : Theme.of(context).hintColor),
             title: Text(AppL10n.t('settings_send_on_enter')),
             subtitle: Text(AppL10n.t('settings_send_on_enter_sub'),
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
@@ -593,7 +609,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           SwitchListTile(
             secondary: Icon(Icons.download_for_offline_outlined,
-                color: settings.autoDownloadMedia ? cs.primary : Theme.of(context).hintColor),
+                color: settings.autoDownloadMedia
+                    ? cs.primary
+                    : Theme.of(context).hintColor),
             title: Text(AppL10n.t('settings_auto_download')),
             subtitle: Text(AppL10n.t('settings_auto_download_sub'),
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
@@ -628,18 +646,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onTap: () => _pickEmojiStatus(context),
             ),
           ListTile(
-            leading: Icon(Icons.auto_awesome_motion_outlined, color: cs.primary),
+            leading:
+                Icon(Icons.auto_awesome_motion_outlined, color: cs.primary),
             title: const Text('Стикеры и наборы'),
             subtitle: const Text(
               'Свои наборы и добавление стикеров из переписки',
               style: TextStyle(fontSize: 12),
             ),
             onTap: () => Navigator.push<void>(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => const StickersHubScreen(),
-                  ),
-                ),
+              context,
+              MaterialPageRoute(
+                builder: (_) => const StickersHubScreen(),
+              ),
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.key_outlined),
@@ -675,6 +694,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // ── Сеть ──────────────────────────────────────────────
           _SectionHeader(AppL10n.t('settings_section_network')),
 
+          if (settings.isDeviceLinked) ...[
+            ListTile(
+              leading: Icon(
+                settings.isPrimaryDevice
+                    ? Icons.admin_panel_settings_outlined
+                    : Icons.phone_iphone_rounded,
+                color: cs.primary,
+              ),
+              title: Text(
+                settings.isPrimaryDevice
+                    ? 'Главное устройство'
+                    : 'Дочернее устройство',
+              ),
+              subtitle: Text(
+                settings.linkedDeviceNickname.isNotEmpty
+                    ? 'Связано: ${settings.linkedDeviceNickname}'
+                    : settings.linkedDevicePublicKey,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.link_off_rounded, color: Colors.red),
+              title: const Text(
+                'Отвязать устройство',
+                style: TextStyle(color: Colors.red),
+              ),
+              subtitle: const Text(
+                'Связка будет снята на обоих устройствах',
+                style: TextStyle(fontSize: 12),
+              ),
+              onTap: () => _unlinkLinkedDevice(notifyPeer: true),
+            ),
+          ] else ...[
+            ListTile(
+              leading: Icon(Icons.link_rounded, color: cs.primary),
+              title: const Text('Привязать дочернее устройство'),
+              subtitle: const Text(
+                'Выберите контакт и отправьте запрос на связку',
+                style: TextStyle(fontSize: 12),
+              ),
+              onTap: _requestDeviceLinkAsPrimary,
+            ),
+          ],
+
           // Тип связи
           ListTile(
             leading: Icon(Icons.swap_horiz_rounded, color: cs.primary),
@@ -695,33 +758,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: Icons.bluetooth,
                 label: 'BLE',
                 selected: settings.connectionMode == 0,
-                onTap: () async {
-                  await settings.setConnectionMode(0);
-                  await applyConnectionTransport();
-                },
+                onTap: () => _setConnectionModeGuarded(0),
               ),
               const SizedBox(width: 8),
               _NetChip(
                 icon: Icons.wifi,
                 label: AppL10n.t('net_label_internet'),
                 selected: settings.connectionMode == 1,
-                onTap: () async {
-                  await settings.setConnectionMode(1);
-                  await applyConnectionTransport();
-                },
+                onTap: () => _setConnectionModeGuarded(1),
               ),
               const SizedBox(width: 8),
               _NetChip(
                 icon: Icons.sync_alt_rounded,
                 label: AppL10n.t('net_label_both'),
                 selected: settings.connectionMode == 2,
-                onTap: () async {
-                  await settings.setConnectionMode(2);
-                  await applyConnectionTransport();
-                },
+                onTap: () => _setConnectionModeGuarded(2),
               ),
             ]),
           ),
+          if (settings.isDeviceLinked)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              child: Text(
+                'В режиме связки Bluetooth автоматически выключен, используется только интернет.',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ),
           if (Platform.isAndroid && settings.connectionMode == 2)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -776,7 +838,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   valueListenable: RelayService.instance.onlineCount,
                   builder: (_, count, __) => ListTile(
                     leading: Icon(
-                      connected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+                      connected
+                          ? Icons.cloud_done_outlined
+                          : Icons.cloud_off_outlined,
                       color: connected
                           ? const Color(0xFF4CAF50)
                           : connecting
@@ -790,13 +854,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             : AppL10n.t('relay_server_unavailable')),
                     subtitle: Text(
                       connected
-                          ? AppL10n.t('relay_online').replaceAll('{n}', '$count')
+                          ? AppL10n.t('relay_online')
+                              .replaceAll('{n}', '$count')
                           : AppL10n.t('relay_no_connection'),
-                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                     ),
                     trailing: connecting
                         ? const SizedBox(
-                            width: 20, height: 20,
+                            width: 20,
+                            height: 20,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : IconButton(
@@ -814,7 +881,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // ── Данные ─────────────────────────────────────────────
           _SectionHeader(AppL10n.t('settings_data')),
           ListTile(
-            leading: const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
+            leading:
+                const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
             title: Text(AppL10n.t('settings_clear_history')),
             subtitle: Text(AppL10n.t('settings_clear_history_sub'),
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
@@ -850,7 +918,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (context.mounted) {
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(AppL10n.t('snack_contacts_deleted'))),
+                    SnackBar(
+                        content: Text(AppL10n.t('snack_contacts_deleted'))),
                   );
                 }
               },
@@ -903,7 +972,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               behavior: HitTestBehavior.opaque,
               onTap: _handleVersionTap,
               child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 24),
+                padding:
+                    const EdgeInsets.symmetric(vertical: 8, horizontal: 24),
                 child: Text(
                   'Rlink v${AppVersion.label} • ${AppL10n.t('footer_ble_mesh')}',
                   style: TextStyle(
@@ -914,6 +984,180 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 16),
         ],
+      ),
+    );
+  }
+
+  Widget _buildChildLinkedSettings(
+    BuildContext context,
+    AppSettings settings,
+    bool isDark,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      backgroundColor:
+          isDark ? const Color(0xFF0F0F0F) : const Color(0xFFE8E8E8),
+      appBar: AppBar(
+        title: Text(AppL10n.t('settings')),
+        elevation: 0,
+        scrolledUnderElevation: 0.5,
+        backgroundColor:
+            isDark ? const Color(0xFF121212) : const Color(0xFFF2F2F2),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 28),
+        children: [
+          const _SectionHeader('Режим дочернего устройства'),
+          ListTile(
+            leading: Icon(Icons.lock_person_outlined, color: cs.primary),
+            title: const Text('Доступ ограничен'),
+            subtitle: const Text(
+              'В этом режиме доступны только переписка и отвязка устройства.',
+              style: TextStyle(fontSize: 12),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.link_rounded),
+            title: const Text('Связано с'),
+            subtitle: Text(
+              settings.linkedDeviceNickname.isNotEmpty
+                  ? settings.linkedDeviceNickname
+                  : settings.linkedDevicePublicKey,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.link_off_rounded, color: Colors.red),
+            title: const Text(
+              'Отвязаться от главного устройства',
+              style: TextStyle(color: Colors.red),
+            ),
+            onTap: () => _unlinkLinkedDevice(notifyPeer: true),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _setConnectionModeGuarded(int mode) async {
+    final settings = AppSettings.instance;
+    if (settings.isDeviceLinked) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('В режиме связки устройств доступен только интернет-режим'),
+        ),
+      );
+      return;
+    }
+    await settings.setConnectionMode(mode);
+    await applyConnectionTransport();
+  }
+
+  Future<void> _unlinkLinkedDevice({required bool notifyPeer}) async {
+    final settings = AppSettings.instance;
+    final linkedKey = settings.linkedDevicePublicKey;
+    final myProfile = ProfileService.instance.profile;
+    if (notifyPeer &&
+        linkedKey.isNotEmpty &&
+        myProfile != null &&
+        RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(linkedKey)) {
+      await RelayService.instance.connect();
+      await GossipRouter.instance.sendDeviceUnlink(
+        publicKey: myProfile.publicKeyHex,
+        recipientId: linkedKey,
+      );
+    }
+    await settings.unlinkDevice();
+    await applyConnectionTransport();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Связка устройств снята')),
+    );
+  }
+
+  Future<void> _requestDeviceLinkAsPrimary() async {
+    final settings = AppSettings.instance;
+    final myProfile = ProfileService.instance.profile;
+    if (myProfile == null) return;
+    final contact = await _pickContactForDeviceLink(context);
+    if (contact == null) return;
+
+    await settings.setConnectionMode(1);
+    await applyConnectionTransport();
+    await RelayService.instance.connect();
+    if (!RelayService.instance.isConnected) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Не удалось подключиться к интернет-ретранслятору',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    await GossipRouter.instance.sendDeviceLinkRequest(
+      publicKey: myProfile.publicKeyHex,
+      nick: myProfile.nickname,
+      username: myProfile.username,
+      recipientId: contact.publicKeyHex,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Запрос на связку отправлен: ${contact.nickname}',
+        ),
+      ),
+    );
+  }
+
+  Future<Contact?> _pickContactForDeviceLink(BuildContext context) async {
+    final contacts = await ChatStorageService.instance.getContacts();
+    if (!context.mounted) return null;
+    if (contacts.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Нет контактов для связки устройств'),
+        ),
+      );
+      return null;
+    }
+    return showModalBottomSheet<Contact>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('Выберите устройство'),
+              subtitle: Text(
+                'Выбранный контакт получит запрос на привязку как дочернего устройства.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+            for (final c in contacts)
+              ListTile(
+                leading: AvatarWidget(
+                  initials: c.initials,
+                  color: c.avatarColor,
+                  emoji: c.avatarEmoji,
+                  imagePath: c.avatarImagePath,
+                  size: 40,
+                ),
+                title: Text(c.nickname),
+                subtitle: Text(
+                  c.username.isNotEmpty ? '#${c.username}' : c.shortId,
+                  style: const TextStyle(fontSize: 11),
+                ),
+                onTap: () => Navigator.pop(ctx, c),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1126,7 +1370,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (ctx) => _PeerSearchSheet(
         onOpenChat: (publicKey, nickname, color, emoji) async {
           Navigator.pop(ctx);
-          final contact = await ChatStorageService.instance.getContact(publicKey);
+          final contact =
+              await ChatStorageService.instance.getContact(publicKey);
           final finalNick = contact?.nickname ?? nickname;
           final finalColor = contact?.avatarColor ?? color;
           final finalEmoji = contact?.avatarEmoji ?? emoji;
@@ -1167,7 +1412,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _fullReset(BuildContext context) async {
     // 1. Stop transports — BLE is stopped here; relay is reconnected AFTER
     //    key regeneration so the new identity is used from the start.
-    try { await BleService.instance.stop(); } catch (_) {}
+    try {
+      await BleService.instance.stop();
+    } catch (_) {}
     BleService.instance.clearMappings();
 
     // 2. Clear all persisted data
@@ -1194,7 +1441,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await CryptoService.instance.regenerateKeys();
 
     // 5. Reconnect relay NOW — after key regen, so the new key is used.
-    try { RelayService.instance.reconnect(); } catch (_) {}
+    try {
+      RelayService.instance.reconnect();
+    } catch (_) {}
 
     // 6. Clear profile from memory so hasProfile == false in onboarding
     ProfileService.instance.clearProfile();
@@ -1231,7 +1480,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               Navigator.pop(context);
               await action();
             },
-            child: Text(destructive ? AppL10n.t('reset') : AppL10n.t('confirm')),
+            child:
+                Text(destructive ? AppL10n.t('reset') : AppL10n.t('confirm')),
           ),
         ],
       ),
@@ -1307,8 +1557,7 @@ class _ThemeChip extends StatelessWidget {
         ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           Icon(icon,
-              size: 16,
-              color: selected ? cs.onPrimary : cs.onSurfaceVariant),
+              size: 16, color: selected ? cs.onPrimary : cs.onSurfaceVariant),
           const SizedBox(width: 6),
           Text(
             label,
@@ -1389,10 +1638,11 @@ class _NetChip extends StatelessWidget {
             border: selected ? null : Border.all(color: cs.outlineVariant),
           ),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Icon(icon, size: 20,
-                color: selected ? cs.onPrimary : cs.onSurfaceVariant),
+            Icon(icon,
+                size: 20, color: selected ? cs.onPrimary : cs.onSurfaceVariant),
             const SizedBox(height: 4),
-            Text(label,
+            Text(
+              label,
               style: TextStyle(
                 fontSize: 11,
                 color: selected ? cs.onPrimary : cs.onSurfaceVariant,
@@ -1416,8 +1666,8 @@ class _ChatBgTile extends StatelessWidget {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
     if (picked == null) return;
     final appDir = await getApplicationDocumentsDirectory();
-    final dest = File(p.join(appDir.path,
-        'chat_bg_${DateTime.now().millisecondsSinceEpoch}.jpg'));
+    final dest = File(p.join(
+        appDir.path, 'chat_bg_${DateTime.now().millisecondsSinceEpoch}.jpg'));
     await File(picked.path).copy(dest.path);
     await settings.setChatBgForPeer('__global__', dest.path);
   }
@@ -1436,7 +1686,8 @@ class _ChatBgTile extends StatelessWidget {
                 width: 44,
                 height: 44,
                 color: cs.surfaceContainerHigh,
-                child: Icon(Icons.wallpaper_outlined, color: cs.onSurfaceVariant),
+                child:
+                    Icon(Icons.wallpaper_outlined, color: cs.onSurfaceVariant),
               ),
       ),
       title: Text(AppL10n.t('settings_chat_bg')),
@@ -1522,11 +1773,16 @@ class _OnlineStatusSelector extends StatelessWidget {
           RadioListTile<int>(
             value: i,
             groupValue: current,
-            onChanged: (v) { if (v != null) onChanged(v); },
-            secondary: Icon(statuses[i].icon, color: statuses[i].color, size: 14),
+            onChanged: (v) {
+              if (v != null) onChanged(v);
+            },
+            secondary:
+                Icon(statuses[i].icon, color: statuses[i].color, size: 14),
             title: Text(statuses[i].label),
             subtitle: Text(statuses[i].sub,
-                style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
             dense: true,
           ),
         Padding(
@@ -1535,7 +1791,8 @@ class _OnlineStatusSelector extends StatelessWidget {
             Icon(Icons.circle, color: Colors.grey.shade500, size: 10),
             const SizedBox(width: 8),
             Text(AppL10n.t('online_status_gray_hint'),
-                style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor)),
+                style: TextStyle(
+                    fontSize: 12, color: Theme.of(context).hintColor)),
           ]),
         ),
         const SizedBox(height: 8),
@@ -1547,7 +1804,8 @@ class _OnlineStatusSelector extends StatelessWidget {
 // ── Поиск собеседника (relay + прямой ключ) ─────────────────────
 
 class _PeerSearchSheet extends StatefulWidget {
-  final void Function(String publicKey, String nickname, int color, String emoji) onOpenChat;
+  final void Function(
+      String publicKey, String nickname, int color, String emoji) onOpenChat;
 
   const _PeerSearchSheet({required this.onOpenChat});
 
@@ -1614,7 +1872,8 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
           children: [
             const SizedBox(height: 12),
             Container(
-              width: 40, height: 4,
+              width: 40,
+              height: 4,
               decoration: BoxDecoration(
                 color: Theme.of(context).dividerColor,
                 borderRadius: BorderRadius.circular(2),
@@ -1622,14 +1881,17 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
             ),
             const SizedBox(height: 12),
             Text(AppL10n.t('peer_search_title'),
-                style: Theme.of(context).textTheme.titleMedium
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
                     ?.copyWith(fontWeight: FontWeight.w600)),
             const SizedBox(height: 4),
             Text(
               relayConnected
                   ? AppL10n.t('peer_search_sub_connected')
                   : AppL10n.t('peer_search_sub_disconnected'),
-              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+              style:
+                  TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
             ),
             const SizedBox(height: 12),
             // Search field
@@ -1658,8 +1920,8 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 10),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 ),
               ),
             ),
@@ -1672,7 +1934,8 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                   return const Padding(
                     padding: EdgeInsets.all(16),
                     child: SizedBox(
-                      width: 20, height: 20,
+                      width: 20,
+                      height: 20,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                   );
@@ -1690,13 +1953,14 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                               ? AppL10n.t('peer_not_found_online')
                               : AppL10n.t('peer_relay_off_no_search'),
                           style: TextStyle(
-                            color: Theme.of(context).hintColor, fontSize: 13),
+                              color: Theme.of(context).hintColor, fontSize: 13),
                         ),
                         if (_ctrl.text.trim().length >= 8) ...[
                           const SizedBox(height: 12),
                           FilledButton.icon(
                             onPressed: _openDirect,
-                            icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                            icon:
+                                const Icon(Icons.chat_bubble_outline, size: 18),
                             label: Text(AppL10n.t('peer_open_chat_by_key')),
                             style: FilledButton.styleFrom(
                               shape: RoundedRectangleBorder(
@@ -1739,13 +2003,14 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
                         subtitle: Text(
                           peer.shortId,
                           style: const TextStyle(
-                            fontFamily: 'monospace', fontSize: 11),
+                              fontFamily: 'monospace', fontSize: 11),
                         ),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Container(
-                              width: 8, height: 8,
+                              width: 8,
+                              height: 8,
                               decoration: const BoxDecoration(
                                 color: Color(0xFF4CAF50),
                                 shape: BoxShape.circle,

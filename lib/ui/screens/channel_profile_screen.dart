@@ -87,6 +87,9 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
     }
     final myId = CryptoService.instance.publicKeyHex;
     final isAdmin = ch.adminId == myId;
+    final isMod = ch.moderatorIds.contains(myId);
+    final canOpenGeneralSettings =
+        isAdmin || (isMod && ch.allowModeratorsManageDriveAccount);
     final subscribed = ch.subscriberIds.contains(myId) || isAdmin;
     final banner = ImageService.instance.resolveStoredPath(ch.bannerImagePath);
     final hasBanner = banner != null && File(banner).existsSync();
@@ -122,7 +125,7 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
                   );
                 },
               ),
-              if (isAdmin)
+              if (canOpenGeneralSettings)
                 IconButton(
                   icon: const Icon(Icons.settings_outlined),
                   tooltip: 'Настройки канала',
@@ -132,6 +135,9 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
                       MaterialPageRoute<void>(
                         builder: (_) => ChannelAdminSettingsScreen(
                           channelId: ch.id,
+                          allowModeratorDriveManagement: isMod &&
+                              !isAdmin &&
+                              ch.allowModeratorsManageDriveAccount,
                         ),
                       ),
                     ).then((_) => _load());
@@ -139,8 +145,8 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
                 ),
             ],
             flexibleSpace: FlexibleSpaceBar(
-              title: Text(ch.name,
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              title:
+                  Text(ch.name, maxLines: 1, overflow: TextOverflow.ellipsis),
               background: Stack(
                 fit: StackFit.expand,
                 children: [
@@ -151,7 +157,8 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
                       fit: BoxFit.cover,
                     )
                   else
-                    Container(color: Color(ch.avatarColor).withValues(alpha: 0.35)),
+                    Container(
+                        color: Color(ch.avatarColor).withValues(alpha: 0.35)),
                   Container(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -170,7 +177,8 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
                     child: AvatarWidget(
                       key: ValueKey(
                           'ch_prof_av_${ch.id}_${ch.avatarImagePath ?? ''}'),
-                      initials: ch.name.isNotEmpty ? ch.name[0].toUpperCase() : '?',
+                      initials:
+                          ch.name.isNotEmpty ? ch.name[0].toUpperCase() : '?',
                       color: ch.avatarColor,
                       emoji: ch.avatarEmoji,
                       imagePath: ch.avatarImagePath,
@@ -209,9 +217,7 @@ class _ChannelProfileScreenState extends State<ChannelProfileScreen> {
                     const SizedBox(height: 6),
                     Text(ch.description!,
                         style: TextStyle(
-                            fontSize: 15,
-                            height: 1.35,
-                            color: cs.onSurface)),
+                            fontSize: 15, height: 1.35, color: cs.onSurface)),
                   ],
                   const SizedBox(height: 24),
                   if (!isAdmin)

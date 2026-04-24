@@ -97,7 +97,7 @@ class ChannelService {
     final path = p.join(dir.path, 'channels.db');
     _db = await openDatabase(
       path,
-      version: 15,
+      version: 17,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE channels (
@@ -125,7 +125,8 @@ class ChannelService {
             is_public INTEGER DEFAULT 1,
             drive_backup_enabled INTEGER DEFAULT 0,
             drive_backup_rev INTEGER DEFAULT 0,
-            drive_file_id TEXT
+            drive_file_id TEXT,
+            allow_mods_manage_drive_account INTEGER DEFAULT 0
           )
         ''');
         await db.execute('''
@@ -199,11 +200,13 @@ class ChannelService {
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
-          await db.execute('ALTER TABLE channels ADD COLUMN verified INTEGER DEFAULT 0');
+          await db.execute(
+              'ALTER TABLE channels ADD COLUMN verified INTEGER DEFAULT 0');
           await db.execute('ALTER TABLE channels ADD COLUMN verified_by TEXT');
         }
         if (oldVersion < 3) {
-          await db.execute("ALTER TABLE channels ADD COLUMN moderators TEXT DEFAULT ''");
+          await db.execute(
+              "ALTER TABLE channels ADD COLUMN moderators TEXT DEFAULT ''");
         }
         if (oldVersion < 4) {
           await db.execute('''
@@ -219,62 +222,81 @@ class ChannelService {
           ''');
         }
         if (oldVersion < 5) {
-          await db.execute('ALTER TABLE channels ADD COLUMN foreign_agent INTEGER DEFAULT 0');
-          await db.execute('ALTER TABLE channels ADD COLUMN blocked INTEGER DEFAULT 0');
+          await db.execute(
+              'ALTER TABLE channels ADD COLUMN foreign_agent INTEGER DEFAULT 0');
+          await db.execute(
+              'ALTER TABLE channels ADD COLUMN blocked INTEGER DEFAULT 0');
         }
         if (oldVersion < 6) {
-          await db.execute("ALTER TABLE channels ADD COLUMN username TEXT DEFAULT ''");
-          await db.execute("ALTER TABLE channels ADD COLUMN universal_code TEXT DEFAULT ''");
-          await db.execute('ALTER TABLE channels ADD COLUMN is_public INTEGER DEFAULT 1');
+          await db.execute(
+              "ALTER TABLE channels ADD COLUMN username TEXT DEFAULT ''");
+          await db.execute(
+              "ALTER TABLE channels ADD COLUMN universal_code TEXT DEFAULT ''");
+          await db.execute(
+              'ALTER TABLE channels ADD COLUMN is_public INTEGER DEFAULT 1');
         }
         if (oldVersion < 7) {
           try {
-            await db.execute('ALTER TABLE channel_posts ADD COLUMN reactions TEXT');
+            await db
+                .execute('ALTER TABLE channel_posts ADD COLUMN reactions TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_comments ADD COLUMN reactions TEXT');
+            await db.execute(
+                'ALTER TABLE channel_comments ADD COLUMN reactions TEXT');
           } catch (_) {}
         }
         if (oldVersion < 8) {
           try {
-            await db.execute('ALTER TABLE channel_posts ADD COLUMN poll_json TEXT');
+            await db
+                .execute('ALTER TABLE channel_posts ADD COLUMN poll_json TEXT');
           } catch (_) {}
         }
         if (oldVersion < 9) {
           try {
-            await db.execute('ALTER TABLE channels ADD COLUMN banner_img_path TEXT');
+            await db.execute(
+                'ALTER TABLE channels ADD COLUMN banner_img_path TEXT');
           } catch (_) {}
         }
         if (oldVersion < 10) {
           try {
-            await db.execute('ALTER TABLE channel_posts ADD COLUMN voice_path TEXT');
+            await db.execute(
+                'ALTER TABLE channel_posts ADD COLUMN voice_path TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_posts ADD COLUMN file_path TEXT');
+            await db
+                .execute('ALTER TABLE channel_posts ADD COLUMN file_path TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_posts ADD COLUMN file_name TEXT');
+            await db
+                .execute('ALTER TABLE channel_posts ADD COLUMN file_name TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_posts ADD COLUMN file_size INTEGER');
+            await db.execute(
+                'ALTER TABLE channel_posts ADD COLUMN file_size INTEGER');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_comments ADD COLUMN image_path TEXT');
+            await db.execute(
+                'ALTER TABLE channel_comments ADD COLUMN image_path TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_comments ADD COLUMN video_path TEXT');
+            await db.execute(
+                'ALTER TABLE channel_comments ADD COLUMN video_path TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_comments ADD COLUMN voice_path TEXT');
+            await db.execute(
+                'ALTER TABLE channel_comments ADD COLUMN voice_path TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_comments ADD COLUMN file_path TEXT');
+            await db.execute(
+                'ALTER TABLE channel_comments ADD COLUMN file_path TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_comments ADD COLUMN file_name TEXT');
+            await db.execute(
+                'ALTER TABLE channel_comments ADD COLUMN file_name TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_comments ADD COLUMN file_size INTEGER');
+            await db.execute(
+                'ALTER TABLE channel_comments ADD COLUMN file_size INTEGER');
           } catch (_) {}
         }
         if (oldVersion < 11) {
@@ -324,7 +346,8 @@ class ChannelService {
                 "ALTER TABLE channels ADD COLUMN staff_labels_json TEXT DEFAULT '{}'");
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channel_posts ADD COLUMN staff_label TEXT');
+            await db.execute(
+                'ALTER TABLE channel_posts ADD COLUMN staff_label TEXT');
           } catch (_) {}
         }
         if (oldVersion < 15) {
@@ -337,13 +360,21 @@ class ChannelService {
                 'ALTER TABLE channels ADD COLUMN drive_backup_rev INTEGER DEFAULT 0');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE channels ADD COLUMN drive_file_id TEXT');
+            await db
+                .execute('ALTER TABLE channels ADD COLUMN drive_file_id TEXT');
           } catch (_) {}
         }
         if (oldVersion < 16) {
           try {
             await db.execute(
                 'ALTER TABLE channel_posts ADD COLUMN is_sticker INTEGER DEFAULT 0');
+          } catch (_) {}
+        }
+        if (oldVersion < 17) {
+          try {
+            await db.execute(
+              'ALTER TABLE channels ADD COLUMN allow_mods_manage_drive_account INTEGER DEFAULT 0',
+            );
           } catch (_) {}
         }
       },
@@ -407,6 +438,8 @@ class ChannelService {
       'drive_backup_enabled': channel.driveBackupEnabled ? 1 : 0,
       'drive_backup_rev': channel.driveBackupRev,
       'drive_file_id': channel.driveFileId,
+      'allow_mods_manage_drive_account':
+          channel.allowModeratorsManageDriveAccount ? 1 : 0,
     });
     _bump();
     unawaited(publishAccountChannelSubscriptions());
@@ -498,11 +531,12 @@ class ChannelService {
         );
         await _db!.delete(
           'channel_comments',
-          where: 'post_id IN (SELECT id FROM channel_posts WHERE channel_id = ?)',
+          where:
+              'post_id IN (SELECT id FROM channel_posts WHERE channel_id = ?)',
           whereArgs: [cid],
         );
-        await _db!.delete('channel_posts',
-            where: 'channel_id = ?', whereArgs: [cid]);
+        await _db!
+            .delete('channel_posts', where: 'channel_id = ?', whereArgs: [cid]);
       }
     }
     _bump();
@@ -521,8 +555,14 @@ class ChannelService {
         id: r['id'] as String,
         name: r['name'] as String,
         adminId: r['admin_id'] as String,
-        subscriberIds: (r['subscribers'] as String).split(',').where((s) => s.isNotEmpty).toList(),
-        moderatorIds: ((r['moderators'] as String?) ?? '').split(',').where((s) => s.isNotEmpty).toList(),
+        subscriberIds: (r['subscribers'] as String)
+            .split(',')
+            .where((s) => s.isNotEmpty)
+            .toList(),
+        moderatorIds: ((r['moderators'] as String?) ?? '')
+            .split(',')
+            .where((s) => s.isNotEmpty)
+            .toList(),
         linkAdminIds: ((r['link_admins'] as String?) ?? '')
             .split(',')
             .where((s) => s.isNotEmpty)
@@ -546,6 +586,8 @@ class ChannelService {
         driveBackupEnabled: (r['drive_backup_enabled'] as int?) == 1,
         driveBackupRev: (r['drive_backup_rev'] as int?) ?? 0,
         driveFileId: r['drive_file_id'] as String?,
+        allowModeratorsManageDriveAccount:
+            (r['allow_mods_manage_drive_account'] as int?) == 1,
       );
 
   Future<void> updateChannel(Channel ch) async {
@@ -575,6 +617,8 @@ class ChannelService {
         'drive_backup_enabled': ch.driveBackupEnabled ? 1 : 0,
         'drive_backup_rev': ch.driveBackupRev,
         'drive_file_id': ch.driveFileId,
+        'allow_mods_manage_drive_account':
+            ch.allowModeratorsManageDriveAccount ? 1 : 0,
       },
       where: 'id = ?',
       whereArgs: [ch.id],
@@ -596,7 +640,8 @@ class ChannelService {
   }
 
   /// Promote or demote [userId] as moderator of [channelId].
-  Future<Channel?> setModerator(String channelId, String userId, bool isMod) async {
+  Future<Channel?> setModerator(
+      String channelId, String userId, bool isMod) async {
     final ch = await getChannel(channelId);
     if (ch == null) return null;
     final mods = List<String>.from(ch.moderatorIds);
@@ -611,7 +656,8 @@ class ChannelService {
   }
 
   /// Админы «ссылок» — публикуют наравне с модераторами.
-  Future<Channel?> setLinkAdmin(String channelId, String userId, bool isLink) async {
+  Future<Channel?> setLinkAdmin(
+      String channelId, String userId, bool isLink) async {
     final ch = await getChannel(channelId);
     if (ch == null) return null;
     final links = List<String>.from(ch.linkAdminIds);
@@ -709,10 +755,8 @@ class ChannelService {
           ? (p['commentsEnabled'] as bool? ?? true)
           : (existing?.commentsEnabled ?? true),
       createdAt: p.containsKey('createdAt')
-          ? (p['createdAt'] as int? ??
-              DateTime.now().millisecondsSinceEpoch)
-          : (existing?.createdAt ??
-              DateTime.now().millisecondsSinceEpoch),
+          ? (p['createdAt'] as int? ?? DateTime.now().millisecondsSinceEpoch)
+          : (existing?.createdAt ?? DateTime.now().millisecondsSinceEpoch),
       verified: p.containsKey('verified')
           ? (p['verified'] as bool? ?? false)
           : (existing?.verified ?? false),
@@ -741,6 +785,10 @@ class ChannelService {
           ? ((p['driveBackupRev'] as num?)?.toInt() ?? 0)
           : (existing?.driveBackupRev ?? 0),
       driveFileId: existing?.driveFileId,
+      allowModeratorsManageDriveAccount:
+          p.containsKey('allowModeratorsManageDriveAccount')
+              ? (p['allowModeratorsManageDriveAccount'] as bool? ?? false)
+              : (existing?.allowModeratorsManageDriveAccount ?? false),
     );
     await saveChannelFromBroadcast(ch);
   }
@@ -829,6 +877,8 @@ class ChannelService {
       'drive_backup_enabled': ch.driveBackupEnabled ? 1 : 0,
       'drive_backup_rev': ch.driveBackupRev,
       'drive_file_id': ch.driveFileId,
+      'allow_mods_manage_drive_account':
+          ch.allowModeratorsManageDriveAccount ? 1 : 0,
     });
     _bump();
   }
@@ -1038,7 +1088,9 @@ class ChannelService {
       final ch = await getChannel(channelId);
       if (ch == null) return;
       final uc = universalCode?.trim() ?? '';
-      if (uc.isNotEmpty && ch.universalCode.isNotEmpty && ch.universalCode != uc) {
+      if (uc.isNotEmpty &&
+          ch.universalCode.isNotEmpty &&
+          ch.universalCode != uc) {
         debugPrint(
             '[RLINK][Channel] Admin delete ignored: universal code mismatch for $channelId');
         return;
@@ -1225,8 +1277,8 @@ class ChannelService {
     await _db!.delete('channel_post_viewers',
         where: 'post_id = ?', whereArgs: [postId]);
     await _db!.delete('channel_posts', where: 'id = ?', whereArgs: [postId]);
-    await _db!.delete('channel_comments',
-        where: 'post_id = ?', whereArgs: [postId]);
+    await _db!
+        .delete('channel_comments', where: 'post_id = ?', whereArgs: [postId]);
     _bump();
   }
 
@@ -1250,13 +1302,14 @@ class ChannelService {
 
   Future<void> deleteCommentById(String commentId) async {
     if (_db == null) return;
-    await _db!.delete('channel_comments',
-        where: 'id = ?', whereArgs: [commentId]);
+    await _db!
+        .delete('channel_comments', where: 'id = ?', whereArgs: [commentId]);
     _bump();
   }
 
   /// Снимок постов и комментариев для шифрованного бэкапа (сырые поля БД, без resolve путей).
-  Future<Map<String, dynamic>> buildChannelBackupSnapshot(String channelId) async {
+  Future<Map<String, dynamic>> buildChannelBackupSnapshot(
+      String channelId) async {
     if (_db == null) throw StateError('ChannelService DB not initialized');
     final rows = await _db!.query(
       'channel_posts',
@@ -1315,8 +1368,7 @@ class ChannelService {
               where: 'post_id = ?', whereArgs: [id]);
           await txn.delete('channel_comments',
               where: 'post_id = ?', whereArgs: [id]);
-          await txn.delete('channel_posts',
-              where: 'id = ?', whereArgs: [id]);
+          await txn.delete('channel_posts', where: 'id = ?', whereArgs: [id]);
         }
       }
 
@@ -1330,8 +1382,8 @@ class ChannelService {
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
         final pid = pmap['id'] as String;
-        await txn.delete('channel_comments',
-            where: 'post_id = ?', whereArgs: [pid]);
+        await txn
+            .delete('channel_comments', where: 'post_id = ?', whereArgs: [pid]);
         final cl = m['comments'] as List<dynamic>? ?? const [];
         for (final c in cl) {
           final cm = Map<String, dynamic>.from(c as Map);
@@ -1381,10 +1433,7 @@ class ChannelService {
     final fp = _pendingPostFilePaths.remove(postId);
     final fn = _pendingPostFileNames.remove(postId);
     final fs = _pendingPostFileSizes.remove(postId);
-    if (img == null &&
-        vid == null &&
-        vo == null &&
-        fp == null) {
+    if (img == null && vid == null && vo == null && fp == null) {
       return;
     }
     final post = await getPost(postId);
@@ -1398,8 +1447,8 @@ class ChannelService {
       return;
     }
     final mergedImg = img ?? post.imagePath;
-    final stickerFromName = mergedImg != null &&
-        p.basename(mergedImg).startsWith('stk_');
+    final stickerFromName =
+        mergedImg != null && p.basename(mergedImg).startsWith('stk_');
     await _db!.update(
       'channel_posts',
       {
@@ -1444,8 +1493,8 @@ class ChannelService {
       return;
     }
     final mergedImg = imagePath ?? post.imagePath;
-    final stickerFromName = mergedImg != null &&
-        p.basename(mergedImg).startsWith('stk_');
+    final stickerFromName =
+        mergedImg != null && p.basename(mergedImg).startsWith('stk_');
     await _db!.update(
       'channel_posts',
       {
@@ -1470,10 +1519,7 @@ class ChannelService {
     final fp = _pendingCommentFilePaths.remove(commentId);
     final fn = _pendingCommentFileNames.remove(commentId);
     final fs = _pendingCommentFileSizes.remove(commentId);
-    if (img == null &&
-        vid == null &&
-        vo == null &&
-        fp == null) {
+    if (img == null && vid == null && vo == null && fp == null) {
       return;
     }
     final c = await getComment(commentId);
@@ -1902,6 +1948,9 @@ class ChannelService {
     await _db?.delete('channel_posts');
     await _db?.delete('channel_read_cursor');
     await _db?.delete('channels');
+    await _db?.delete('verification_requests');
+    pendingChannelInvites.value = [];
+    pendingVerifications.value = [];
     _bump();
   }
 
@@ -1927,8 +1976,8 @@ class ChannelService {
 
   Future<void> _loadVerificationRequests() async {
     if (_db == null) return;
-    final rows = await _db!.query('verification_requests',
-        orderBy: 'requested_at DESC');
+    final rows =
+        await _db!.query('verification_requests', orderBy: 'requested_at DESC');
     pendingVerifications.value =
         rows.map((r) => VerificationRequest.fromMap(r)).toList();
   }
@@ -2041,14 +2090,14 @@ class VerificationRequest {
   });
 
   Map<String, dynamic> toMap() => {
-    'channel_id': channelId,
-    'channel_name': channelName,
-    'admin_id': adminId,
-    'subscriber_count': subscriberCount,
-    'avatar_emoji': avatarEmoji,
-    'description': description,
-    'requested_at': requestedAt,
-  };
+        'channel_id': channelId,
+        'channel_name': channelName,
+        'admin_id': adminId,
+        'subscriber_count': subscriberCount,
+        'avatar_emoji': avatarEmoji,
+        'description': description,
+        'requested_at': requestedAt,
+      };
 
   factory VerificationRequest.fromMap(Map<String, dynamic> m) =>
       VerificationRequest(

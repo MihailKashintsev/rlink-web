@@ -8,6 +8,7 @@ import 'ble_service.dart';
 import 'chat_storage_service.dart';
 import 'crypto_service.dart';
 import 'gossip_router.dart';
+import 'peer_key_directory.dart';
 import 'relay_service.dart';
 
 /// OutboxService — гарантированная доставка исходящих личных сообщений.
@@ -117,11 +118,8 @@ class OutboxService {
         MessageStatus.sending,
       );
 
-      // Use the latest X25519 key we have (BLE first, then relay cache).
-      var x25519Key = BleService.instance.getPeerX25519Key(msg.peerId);
-      if (x25519Key == null || x25519Key.isEmpty) {
-        x25519Key = RelayService.instance.getPeerX25519Key(msg.peerId);
-      }
+      // Use the latest X25519 key known in unified directory.
+      final x25519Key = PeerKeyDirectory.instance.getX25519(msg.peerId);
 
       // IMPORTANT: use the SAME messageId so receiver dedups.
       if (x25519Key != null && x25519Key.isNotEmpty) {

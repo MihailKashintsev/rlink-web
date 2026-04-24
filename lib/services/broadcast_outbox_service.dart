@@ -174,6 +174,8 @@ class BroadcastOutboxService {
     required String text,
     required String messageId,
     int? timestamp,
+    double? latitude,
+    double? longitude,
     String? reactionsJson,
     bool hasImage = false,
     bool hasVideo = false,
@@ -189,14 +191,18 @@ class BroadcastOutboxService {
       'text': text,
       'messageId': messageId,
       if (timestamp != null) 'timestamp': timestamp,
+      if (latitude != null) 'latitude': latitude,
+      if (longitude != null) 'longitude': longitude,
       if (reactionsJson != null) 'reactionsJson': reactionsJson,
       if (hasImage) 'hasImage': true,
       if (hasVideo) 'hasVideo': true,
       if (hasFile) 'hasFile': true,
       if (fileName != null) 'fileName': fileName,
       if (pollJson != null && pollJson.isNotEmpty) 'pollJson': pollJson,
-      if (forwardFromId != null && forwardFromId.isNotEmpty) 'ffid': forwardFromId,
-      if (forwardFromNick != null && forwardFromNick.isNotEmpty) 'ffn': forwardFromNick,
+      if (forwardFromId != null && forwardFromId.isNotEmpty)
+        'ffid': forwardFromId,
+      if (forwardFromNick != null && forwardFromNick.isNotEmpty)
+        'ffn': forwardFromNick,
     });
     unawaited(_pump());
   }
@@ -277,11 +283,11 @@ class BroadcastOutboxService {
         final id = row['id'] as String;
         if (_inflight.contains(id)) continue;
         final createdAt = row['created_at'] as int;
-        final age = now.difference(
-            DateTime.fromMillisecondsSinceEpoch(createdAt));
+        final age =
+            now.difference(DateTime.fromMillisecondsSinceEpoch(createdAt));
         if (age > _maxAge) {
-          await _db!.delete('outbox_broadcast',
-              where: 'id = ?', whereArgs: [id]);
+          await _db!
+              .delete('outbox_broadcast', where: 'id = ?', whereArgs: [id]);
           continue;
         }
         _inflight.add(id);
@@ -351,6 +357,8 @@ class BroadcastOutboxService {
             text: payload['text'] as String,
             messageId: payload['messageId'] as String,
             timestamp: payload['timestamp'] as int?,
+            latitude: (payload['latitude'] as num?)?.toDouble(),
+            longitude: (payload['longitude'] as num?)?.toDouble(),
             reactionsJson: payload['reactionsJson'] as String?,
             hasImage: payload['hasImage'] as bool? ?? false,
             hasVideo: payload['hasVideo'] as bool? ?? false,
@@ -380,8 +388,8 @@ class BroadcastOutboxService {
           );
           break;
         default:
-          await _db!.delete('outbox_broadcast',
-              where: 'id = ?', whereArgs: [id]);
+          await _db!
+              .delete('outbox_broadcast', where: 'id = ?', whereArgs: [id]);
           return;
       }
 
@@ -389,8 +397,7 @@ class BroadcastOutboxService {
       // N успешных ретрансляций: 1-я попытка и ещё 2 подтверждения (~минута).
       final newAttempts = attempts + 1;
       if (newAttempts >= 3) {
-        await _db!
-            .delete('outbox_broadcast', where: 'id = ?', whereArgs: [id]);
+        await _db!.delete('outbox_broadcast', where: 'id = ?', whereArgs: [id]);
       } else {
         await _db!.update(
           'outbox_broadcast',

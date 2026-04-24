@@ -30,6 +30,8 @@ import '../../services/image_service.dart';
 import '../../services/sticker_collection_service.dart';
 import '../../services/invite_dm_service.dart';
 import '../../services/profile_service.dart';
+import 'location_map_screen.dart';
+import '../../utils/external_message_share.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/reactions.dart';
 import '../widgets/rich_message_text.dart';
@@ -128,7 +130,8 @@ class _GroupsScreenState extends State<GroupsScreen> {
               for (var i = 0; i < _groups.length; i++)
                 StaggeredListItem(
                   index: i,
-                  child: _GroupTile(group: _groups[i], onTap: () => _openGroup(_groups[i])),
+                  child: _GroupTile(
+                      group: _groups[i], onTap: () => _openGroup(_groups[i])),
                 ),
             ],
           );
@@ -207,12 +210,11 @@ class _GroupTile extends StatelessWidget {
         imagePath: group.avatarImagePath,
         size: 48,
       ),
-      title: Text(group.name,
-          style: const TextStyle(fontWeight: FontWeight.w600)),
+      title:
+          Text(group.name, style: const TextStyle(fontWeight: FontWeight.w600)),
       subtitle: Text('${group.memberIds.length} участников',
           style: TextStyle(
-              fontSize: 13,
-              color: cs.onSurface.withValues(alpha: 0.5))),
+              fontSize: 13, color: cs.onSurface.withValues(alpha: 0.5))),
       onTap: onTap,
     );
   }
@@ -287,6 +289,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   late Group _group;
   final _focusNode = FocusNode();
   bool _showScrollToBottomFab = false;
+  double? _pendingLat;
+  double? _pendingLng;
   bool _showFormatStrip = false;
   int _length = 0;
   static const _kMaxGroupMsgLen = 12000;
@@ -344,7 +348,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _controller.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
-    if (NotificationService.instance.currentRoute.value == 'group:${_group.id}') {
+    if (NotificationService.instance.currentRoute.value ==
+        'group:${_group.id}') {
       NotificationService.instance.currentRoute.value = null;
     }
     super.dispose();
@@ -355,7 +360,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (!sel.isValid || sel.isCollapsed) return;
     final text = _controller.text;
     final selected = text.substring(sel.start, sel.end);
-    final newText = text.replaceRange(sel.start, sel.end, '$prefix$selected$suffix');
+    final newText =
+        text.replaceRange(sel.start, sel.end, '$prefix$selected$suffix');
     final newOffset = sel.end + prefix.length + suffix.length;
     _controller.value = _controller.value.copyWith(
       text: newText,
@@ -383,7 +389,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, urlCtrl.text.trim()),
             child: const Text('Готово'),
@@ -402,7 +409,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
-  Widget _buildContextMenu(BuildContext context, EditableTextState editableTextState) {
+  Widget _buildContextMenu(
+      BuildContext context, EditableTextState editableTextState) {
     final items = <ContextMenuButtonItem>[
       ...editableTextState.contextMenuButtonItems,
       ContextMenuButtonItem(
@@ -468,7 +476,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (mounted) {
       setState(() {
         _messages = msgs;
-        if (grp != null) { _group = grp; }
+        if (grp != null) {
+          _group = grp;
+        }
       });
       WidgetsBinding.instance.addPostFrameCallback((_) => _onScrollFab());
     }
@@ -480,7 +490,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   void _onScrollFab() {
-    final pos = _scrollController.hasClients ? _scrollController.position : null;
+    final pos =
+        _scrollController.hasClients ? _scrollController.position : null;
     if (pos == null) return;
     final away = pos.maxScrollExtent - pos.pixels;
     final show = away > 120;
@@ -507,6 +518,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
     setState(() => _isSending = true);
     _controller.clear();
+    final lat = _pendingLat;
+    final lng = _pendingLng;
+    setState(() {
+      _pendingLat = null;
+      _pendingLng = null;
+    });
 
     try {
       final myId = CryptoService.instance.publicKeyHex;
@@ -527,6 +544,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           groupId: widget.group.id,
           senderId: myId,
           text: partText,
+          latitude: lat,
+          longitude: lng,
           isOutgoing: true,
           timestamp: now,
         );
@@ -538,6 +557,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           text: partText,
           messageId: msgId,
           timestamp: now,
+          latitude: lat,
+          longitude: lng,
         );
       }
 
@@ -564,6 +585,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   Future<void> _sendStructuredGroupMessage(String encoded) async {
     if (_isSending) return;
     setState(() => _isSending = true);
+    final lat = _pendingLat;
+    final lng = _pendingLng;
+    setState(() {
+      _pendingLat = null;
+      _pendingLng = null;
+    });
     try {
       final myId = _myId;
       final msgId = const Uuid().v4();
@@ -573,6 +600,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         groupId: widget.group.id,
         senderId: myId,
         text: encoded,
+        latitude: lat,
+        longitude: lng,
         isOutgoing: true,
         timestamp: now,
       );
@@ -583,6 +612,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: encoded,
         messageId: msgId,
         timestamp: now,
+        latitude: lat,
+        longitude: lng,
       );
       _scrollToBottom();
     } finally {
@@ -598,8 +629,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       text: newEnc,
       messageId: msg.id,
       timestamp: msg.timestamp,
-      reactionsJson:
-          msg.reactions.isEmpty ? null : jsonEncode(msg.reactions),
+      latitude: msg.latitude,
+      longitude: msg.longitude,
+      reactionsJson: msg.reactions.isEmpty ? null : jsonEncode(msg.reactions),
       pollJson: msg.pollJson,
     );
     _load();
@@ -637,7 +669,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Закрыть')),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Закрыть')),
         ],
       ),
     );
@@ -684,6 +717,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         senderId: myId,
         text: '⬛',
         videoPath: path,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         isOutgoing: true,
         timestamp: now,
       );
@@ -694,18 +729,30 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: '⬛',
         messageId: msgId,
         timestamp: now,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         hasVideo: true,
       );
       _scrollToBottom();
+      if (mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Квадратик: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Квадратик: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
-      if (mounted) setState(() { _isSending = false; _sendProgress = 0.0; });
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
     }
   }
 
@@ -750,6 +797,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         senderId: myId,
         text: '📹',
         videoPath: path,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         isOutgoing: true,
         timestamp: now,
       );
@@ -760,9 +809,17 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: '📹',
         messageId: msgId,
         timestamp: now,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         hasVideo: true,
       );
       _scrollToBottom();
+      if (mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -770,7 +827,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() { _isSending = false; _sendProgress = 0.0; });
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _sendProgress = 0.0;
+        });
+      }
     }
   }
 
@@ -805,10 +867,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                   const SizedBox(height: 8),
                   TextField(
                       controller: o1,
-                      decoration: const InputDecoration(labelText: 'Вариант 1')),
+                      decoration:
+                          const InputDecoration(labelText: 'Вариант 1')),
                   TextField(
                       controller: o2,
-                      decoration: const InputDecoration(labelText: 'Вариант 2')),
+                      decoration:
+                          const InputDecoration(labelText: 'Вариант 2')),
                   TextField(
                     controller: o3,
                     decoration: const InputDecoration(
@@ -861,9 +925,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                     o3.text.trim(),
                   ].where((s) => s.isNotEmpty).toList();
                   if (qCtrl.text.trim().isEmpty || opts.length < 2) return;
-                  final ci = quiz
-                      ? correctIndex.clamp(0, opts.length - 1)
-                      : null;
+                  final ci =
+                      quiz ? correctIndex.clamp(0, opts.length - 1) : null;
                   Navigator.pop(
                     ctx,
                     MessagePoll(
@@ -900,6 +963,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         groupId: widget.group.id,
         senderId: _myId,
         text: '',
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         isOutgoing: true,
         timestamp: now,
         pollJson: pj,
@@ -911,9 +976,17 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: '',
         messageId: msgId,
         timestamp: now,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         pollJson: pj,
       );
       _scrollToBottom();
+      if (mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
@@ -973,6 +1046,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         groupId: widget.group.id,
         senderId: myId,
         text: '\u{1F4CE} $originalName',
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         isOutgoing: true,
         timestamp: now,
       );
@@ -984,14 +1059,23 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: msg.text,
         messageId: msgId,
         timestamp: now,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         hasFile: true,
         fileName: originalName,
       );
       _scrollToBottom();
+      if (mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка файла: $e'), backgroundColor: Colors.red),
+          SnackBar(
+              content: Text('Ошибка файла: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -1026,8 +1110,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     });
     try {
       final myId = _myId;
-      final path =
-          await ImageService.instance.saveChatImageFromPicker(rawPath);
+      final path = await ImageService.instance.saveChatImageFromPicker(rawPath);
       final bytes = await File(path).readAsBytes();
       final chunks = ImageService.instance.splitToBase64Chunks(bytes);
       final msgId = const Uuid().v4();
@@ -1053,6 +1136,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         senderId: myId,
         text: cap.isEmpty ? '🎞 GIF' : cap,
         imagePath: path,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         isOutgoing: true,
         timestamp: now,
       );
@@ -1063,9 +1148,17 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: msg.text,
         messageId: msgId,
         timestamp: now,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         hasImage: true,
       );
       _scrollToBottom();
+      if (mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1103,7 +1196,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       final myId = _myId;
       final tmpDir = await getTemporaryDirectory();
       final tmpFile = File(
-        '${tmpDir.path}/grp_gal_${DateTime.now().millisecondsSinceEpoch}.png');
+          '${tmpDir.path}/grp_gal_${DateTime.now().millisecondsSinceEpoch}.png');
       await tmpFile.writeAsBytes(editedBytes);
       final path = await ImageService.instance.compressAndSave(tmpFile.path);
       final bytes = await File(path).readAsBytes();
@@ -1130,6 +1223,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         senderId: myId,
         text: _controller.text.trim().isEmpty ? '📷' : _controller.text.trim(),
         imagePath: path,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         isOutgoing: true,
         timestamp: now,
       );
@@ -1140,9 +1235,17 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: msg.text,
         messageId: msgId,
         timestamp: now,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         hasImage: true,
       );
       _scrollToBottom();
+      if (mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1196,6 +1299,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         senderId: myId,
         text: '📹',
         videoPath: path,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         isOutgoing: true,
         timestamp: now,
       );
@@ -1206,9 +1311,17 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: '📹',
         messageId: msgId,
         timestamp: now,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         hasVideo: true,
       );
       _scrollToBottom();
+      if (mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1253,6 +1366,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       senderId: myId,
       text: cap.isEmpty ? ' ' : cap,
       imagePath: path,
+      latitude: _pendingLat,
+      longitude: _pendingLng,
       isOutgoing: true,
       timestamp: now,
     );
@@ -1263,9 +1378,17 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       text: msg.text,
       messageId: msgId,
       timestamp: now,
+      latitude: _pendingLat,
+      longitude: _pendingLng,
       hasImage: true,
     );
     _scrollToBottom();
+    if (mounted) {
+      setState(() {
+        _pendingLat = null;
+        _pendingLng = null;
+      });
+    }
   }
 
   Future<void> _groupGalleryStickerCrop(Uint8List bytes) async {
@@ -1362,6 +1485,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         groupId: widget.group.id,
         senderId: myId,
         text: '\u{1F4CE} $originalName',
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         isOutgoing: true,
         timestamp: now,
       );
@@ -1372,10 +1497,18 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         text: msg.text,
         messageId: msgId,
         timestamp: now,
+        latitude: _pendingLat,
+        longitude: _pendingLng,
         hasFile: true,
         fileName: originalName,
       );
       _scrollToBottom();
+      if (mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1390,6 +1523,36 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         });
       }
     }
+  }
+
+  Future<void> _toggleLocation() async {
+    if (_pendingLat != null && _pendingLng != null) {
+      setState(() {
+        _pendingLat = null;
+        _pendingLng = null;
+      });
+      return;
+    }
+    final picked = await Navigator.of(context).push<LocationPickResult>(
+      MaterialPageRoute(
+        builder: (_) => const LocationMapScreen(
+          allowPicking: true,
+          title: 'Геолокация для группы',
+          confirmButtonLabel: 'Прикрепить геометку',
+        ),
+      ),
+    );
+    if (!mounted || picked == null) return;
+    setState(() {
+      _pendingLat = picked.latitude;
+      _pendingLng = picked.longitude;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('📍 Геометка прикреплена к следующему сообщению'),
+        duration: Duration(seconds: 2),
+      ),
+    );
   }
 
   void _inviteMember() async {
@@ -1477,9 +1640,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Покинуть группу?'),
-        content: const Text('Вы больше не будете получать сообщения из этой группы.'),
+        content: const Text(
+            'Вы больше не будете получать сообщения из этой группы.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Отмена')),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
@@ -1511,7 +1677,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               // Avatar image picker
               GestureDetector(
                 onTap: () async {
-                  final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+                  final picked = await ImagePicker()
+                      .pickImage(source: ImageSource.gallery);
                   if (picked == null) return;
                   final saved = await ImageService.instance.compressAndSave(
                     picked.path,
@@ -1521,9 +1688,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 },
                 child: CircleAvatar(
                   radius: 36,
-                  backgroundImage: pickedImagePath != null && File(pickedImagePath!).existsSync()
-                      ? FileImage(File(pickedImagePath!)) : null,
-                  child: pickedImagePath == null || !File(pickedImagePath!).existsSync()
+                  backgroundImage: pickedImagePath != null &&
+                          File(pickedImagePath!).existsSync()
+                      ? FileImage(File(pickedImagePath!))
+                      : null,
+                  child: pickedImagePath == null ||
+                          !File(pickedImagePath!).existsSync()
                       ? const Icon(Icons.add_a_photo, size: 28)
                       : null,
                 ),
@@ -1552,7 +1722,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             ],
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Отмена')),
             FilledButton(
               onPressed: () async {
                 final name = nameCtrl.text.trim();
@@ -1560,7 +1732,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 Navigator.pop(ctx);
                 final updated = _group.copyWith(
                   name: name,
-                  avatarEmoji: emojiCtrl.text.trim().isEmpty ? _group.avatarEmoji : emojiCtrl.text.trim(),
+                  avatarEmoji: emojiCtrl.text.trim().isEmpty
+                      ? _group.avatarEmoji
+                      : emojiCtrl.text.trim(),
                   avatarImagePath: pickedImagePath,
                 );
                 await GroupService.instance.updateGroup(updated);
@@ -1602,12 +1776,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 const Padding(
                   padding: EdgeInsets.all(16),
                   child: Text('Участники группы',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
                 ),
                 if (currentMembers.isEmpty)
                   const Padding(
                     padding: EdgeInsets.all(16),
-                    child: Text('Нет участников', style: TextStyle(color: Colors.grey)),
+                    child: Text('Нет участников',
+                        style: TextStyle(color: Colors.grey)),
                   )
                 else
                   ConstrainedBox(
@@ -1622,15 +1798,21 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                         return ListTile(
                           title: Text(nickFor(uid)),
                           subtitle: Text(
-                            isMod ? 'Модератор · ${uid.substring(0, 12)}…' : '${uid.substring(0, 12)}…',
-                            style: const TextStyle(fontSize: 11, color: Colors.grey),
+                            isMod
+                                ? 'Модератор · ${uid.substring(0, 12)}…'
+                                : '${uid.substring(0, 12)}…',
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.grey),
                           ),
                           trailing: IconButton(
-                            icon: const Icon(Icons.person_remove_outlined, color: Colors.red),
+                            icon: const Icon(Icons.person_remove_outlined,
+                                color: Colors.red),
                             tooltip: 'Исключить',
                             onPressed: () async {
-                              await GroupService.instance.removeMember(_group.id, uid);
-                              final grp = await GroupService.instance.getGroup(_group.id);
+                              await GroupService.instance
+                                  .removeMember(_group.id, uid);
+                              final grp = await GroupService.instance
+                                  .getGroup(_group.id);
                               if (grp != null && mounted) {
                                 setState(() => _group = grp);
                                 setModal(() {});
@@ -1653,9 +1835,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   // ── Moderator management ────────────────────────────────────
 
   void _manageModerators() {
-    final members = _group.memberIds
-        .where((id) => id != _group.creatorId)
-        .toList();
+    final members =
+        _group.memberIds.where((id) => id != _group.creatorId).toList();
     final contacts = ChatStorageService.instance.contactsNotifier.value;
 
     String nickFor(String id) {
@@ -1680,8 +1861,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 const Padding(
                   padding: EdgeInsets.all(16),
                   child: Text('Модераторы группы',
-                      style: TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.w600)),
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
                 ),
                 if (members.isEmpty)
                   const Padding(
@@ -1692,8 +1873,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 else
                   ConstrainedBox(
                     constraints: BoxConstraints(
-                        maxHeight:
-                            MediaQuery.of(ctx2).size.height * 0.5),
+                        maxHeight: MediaQuery.of(ctx2).size.height * 0.5),
                     child: ListView.builder(
                       shrinkWrap: true,
                       itemCount: members.length,
@@ -1709,9 +1889,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                           ),
                           value: isMod,
                           onChanged: (val) async {
-                            final updated =
-                                await GroupService.instance.setModerator(
-                                    _group.id, uid, val);
+                            final updated = await GroupService.instance
+                                .setModerator(_group.id, uid, val);
                             if (updated != null && mounted) {
                               setState(() => _group = updated);
                               setModal(() {});
@@ -1788,6 +1967,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               title: const Text('Переслать…'),
               onTap: () => Navigator.pop(ctx, 'fwd'),
             ),
+            ListTile(
+              leading: const Icon(Icons.share_outlined),
+              title: const Text('Экспортировать…'),
+              onTap: () => Navigator.pop(ctx, 'share'),
+            ),
           ],
         ),
       ),
@@ -1806,6 +1990,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       );
     } else if (action == 'fwd') {
       await _forwardGroupMessageToDm(m);
+    } else if (action == 'share') {
+      await shareGroupMessageExternally(context, m);
     }
   }
 
@@ -1821,8 +2007,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final sel = _controller.selection;
-    final hasSelection =
-        sel.isValid && sel.baseOffset != sel.extentOffset;
+    final hasSelection = sel.isValid && sel.baseOffset != sel.extentOffset;
     final near = _length > _kMaxGroupMsgLen * 0.8;
     final over = _composeOver;
     return Scaffold(
@@ -1833,8 +2018,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             Text(_group.name, style: const TextStyle(fontSize: 16)),
             Text('${_group.memberIds.length} участников',
                 style: TextStyle(
-                    fontSize: 12,
-                    color: cs.onSurface.withValues(alpha: 0.5))),
+                    fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5))),
           ],
         ),
         actions: [
@@ -1956,8 +2140,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               decoration: BoxDecoration(
                 color: cs.surface,
                 border: Border(
-                    top: BorderSide(
-                        color: cs.outline.withValues(alpha: 0.3))),
+                    top: BorderSide(color: cs.outline.withValues(alpha: 0.3))),
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -1992,213 +2175,242 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       ),
                     ),
                   Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                  child: Row(children: [
-                    if (hasSelection)
-                      IconButton(
-                        onPressed: () => setState(
-                            () => _showFormatStrip = !_showFormatStrip),
-                        icon: Icon(
-                          Icons.text_fields_rounded,
-                          color: _showFormatStrip
-                              ? cs.primary
-                              : cs.onSurfaceVariant,
-                          size: 22,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    child: Row(children: [
+                      if (hasSelection)
+                        IconButton(
+                          onPressed: () => setState(
+                              () => _showFormatStrip = !_showFormatStrip),
+                          icon: Icon(
+                            Icons.text_fields_rounded,
+                            color: _showFormatStrip
+                                ? cs.primary
+                                : cs.onSurfaceVariant,
+                            size: 22,
+                          ),
+                          padding: EdgeInsets.zero,
+                          constraints:
+                              const BoxConstraints(minWidth: 36, minHeight: 36),
+                          tooltip: _showFormatStrip
+                              ? 'Скрыть формат'
+                              : 'Формат выделенного текста',
+                        ),
+                      PopupMenuButton<String>(
+                        onSelected: (value) {
+                          if (_isSending) return;
+                          switch (value) {
+                            case 'square_video':
+                              unawaited(_sendGroupSquareVideo());
+                              break;
+                            case 'video':
+                              unawaited(_sendGroupVideoFromGallery());
+                              break;
+                            case 'poll':
+                              _sendPoll();
+                              break;
+                            case 'todo':
+                              _composeAndSendTodo();
+                              break;
+                            case 'cal':
+                              _composeAndSendCalendar();
+                              break;
+                            case 'file':
+                              _sendFile();
+                              break;
+                            case 'location':
+                              unawaited(_toggleLocation());
+                              break;
+                          }
+                        },
+                        icon: AnimatedRotation(
+                          turns: (_pendingLat != null && _pendingLng != null)
+                              ? 0.125
+                              : 0,
+                          duration: const Duration(milliseconds: 200),
+                          child: Icon(Icons.add_rounded,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                              size: 26),
                         ),
                         padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                            minWidth: 36, minHeight: 36),
-                        tooltip: _showFormatStrip
-                            ? 'Скрыть формат'
-                            : 'Формат выделенного текста',
+                        constraints:
+                            const BoxConstraints(minWidth: 36, minHeight: 36),
+                        tooltip: 'Прикрепить',
+                        position: PopupMenuPosition.over,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14)),
+                        itemBuilder: (_) {
+                          return [
+                            const PopupMenuItem(
+                              value: 'square_video',
+                              child: Row(children: [
+                                Icon(Icons.crop_square, size: 20),
+                                SizedBox(width: 12),
+                                Text('Квадратик'),
+                              ]),
+                            ),
+                            const PopupMenuItem(
+                              value: 'video',
+                              child: Row(children: [
+                                Icon(Icons.video_library_outlined, size: 20),
+                                SizedBox(width: 12),
+                                Text('Видео из галереи'),
+                              ]),
+                            ),
+                            const PopupMenuItem(
+                              value: 'poll',
+                              child: Row(children: [
+                                Icon(Icons.poll_outlined, size: 20),
+                                SizedBox(width: 12),
+                                Text('Опрос'),
+                              ]),
+                            ),
+                            const PopupMenuItem(
+                              value: 'todo',
+                              child: Row(children: [
+                                Icon(Icons.checklist_rtl, size: 20),
+                                SizedBox(width: 12),
+                                Text('Список дел'),
+                              ]),
+                            ),
+                            const PopupMenuItem(
+                              value: 'cal',
+                              child: Row(children: [
+                                Icon(Icons.event_available_outlined, size: 20),
+                                SizedBox(width: 12),
+                                Text('Событие'),
+                              ]),
+                            ),
+                            const PopupMenuItem(
+                              value: 'file',
+                              child: Row(children: [
+                                Icon(Icons.attach_file_outlined, size: 20),
+                                SizedBox(width: 12),
+                                Text('Файл'),
+                              ]),
+                            ),
+                            PopupMenuItem(
+                              value: 'location',
+                              child: Row(children: [
+                                Icon(
+                                  (_pendingLat != null && _pendingLng != null)
+                                      ? Icons.location_on
+                                      : Icons.location_on_outlined,
+                                  size: 20,
+                                  color: (_pendingLat != null &&
+                                          _pendingLng != null)
+                                      ? cs.primary
+                                      : null,
+                                ),
+                                const SizedBox(width: 12),
+                                Text(
+                                    (_pendingLat != null && _pendingLng != null)
+                                        ? 'Убрать геометку'
+                                        : 'Геометка'),
+                              ]),
+                            ),
+                          ];
+                        },
                       ),
-                    PopupMenuButton<String>(
-                      onSelected: (value) {
-                        if (_isSending) return;
-                        switch (value) {
-                          case 'square_video':
-                            unawaited(_sendGroupSquareVideo());
-                            break;
-                          case 'video':
-                            unawaited(_sendGroupVideoFromGallery());
-                            break;
-                          case 'poll':
-                            _sendPoll();
-                            break;
-                          case 'todo':
-                            _composeAndSendTodo();
-                            break;
-                          case 'cal':
-                            _composeAndSendCalendar();
-                            break;
-                          case 'file':
-                            _sendFile();
-                            break;
-                        }
-                      },
-                      icon: Icon(Icons.add_rounded,
-                          color: Theme.of(context)
-                              .colorScheme
-                              .onSurfaceVariant,
-                          size: 26),
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                          minWidth: 36, minHeight: 36),
-                      tooltip: 'Прикрепить',
-                      position: PopupMenuPosition.over,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                      itemBuilder: (_) {
-                        return [
-                          const PopupMenuItem(
-                            value: 'square_video',
-                            child: Row(children: [
-                              Icon(Icons.crop_square, size: 20),
-                              SizedBox(width: 12),
-                              Text('Квадратик'),
-                            ]),
-                          ),
-                          const PopupMenuItem(
-                            value: 'video',
-                            child: Row(children: [
-                              Icon(Icons.video_library_outlined, size: 20),
-                              SizedBox(width: 12),
-                              Text('Видео из галереи'),
-                            ]),
-                          ),
-                          const PopupMenuItem(
-                            value: 'poll',
-                            child: Row(children: [
-                              Icon(Icons.poll_outlined, size: 20),
-                              SizedBox(width: 12),
-                              Text('Опрос'),
-                            ]),
-                          ),
-                          const PopupMenuItem(
-                            value: 'todo',
-                            child: Row(children: [
-                              Icon(Icons.checklist_rtl, size: 20),
-                              SizedBox(width: 12),
-                              Text('Список дел'),
-                            ]),
-                          ),
-                          const PopupMenuItem(
-                            value: 'cal',
-                            child: Row(children: [
-                              Icon(Icons.event_available_outlined, size: 20),
-                              SizedBox(width: 12),
-                              Text('Событие'),
-                            ]),
-                          ),
-                          const PopupMenuItem(
-                            value: 'file',
-                            child: Row(children: [
-                              Icon(Icons.attach_file_outlined, size: 20),
-                              SizedBox(width: 12),
-                              Text('Файл'),
-                            ]),
-                          ),
-                        ];
-                      },
-                    ),
-                    IconButton(
-                      onPressed:
-                          _isSending ? null : () => unawaited(_openGroupMediaGallery()),
-                      icon: Icon(
-                        Icons.photo_library_outlined,
-                        color: _isSending
-                            ? cs.onSurface.withValues(alpha: 0.3)
-                            : cs.onSurfaceVariant,
-                        size: 24,
-                      ),
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                          minWidth: 36, minHeight: 36),
-                      tooltip: 'Галерея медиа',
-                    ),
-                    const SizedBox(width: 2),
-                    Expanded(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .surfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(24),
+                      IconButton(
+                        onPressed: _isSending
+                            ? null
+                            : () => unawaited(_openGroupMediaGallery()),
+                        icon: Icon(
+                          Icons.photo_library_outlined,
+                          color: _isSending
+                              ? cs.onSurface.withValues(alpha: 0.3)
+                              : cs.onSurfaceVariant,
+                          size: 24,
                         ),
-                        child: TextField(
-                          controller: _controller,
-                          focusNode: _focusNode,
-                          onTapOutside: (_) => _focusNode.unfocus(),
-                          contextMenuBuilder: _buildContextMenu,
-                          maxLines: AppSettings.instance.sendOnEnter ? 1 : 4,
-                          minLines: 1,
-                          decoration: InputDecoration(
-                            hintText: 'Сообщение...',
-                            border: InputBorder.none,
-                            contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 10),
-                            suffix: near
-                                ? Text(
-                                    '${_kMaxGroupMsgLen - _length}',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: over
-                                          ? Colors.red
-                                          : cs.onSurfaceVariant,
-                                    ),
-                                  )
+                        padding: EdgeInsets.zero,
+                        constraints:
+                            const BoxConstraints(minWidth: 36, minHeight: 36),
+                        tooltip: 'Галерея медиа',
+                      ),
+                      const SizedBox(width: 2),
+                      Expanded(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(24),
+                          ),
+                          child: TextField(
+                            controller: _controller,
+                            focusNode: _focusNode,
+                            onTapOutside: (_) => _focusNode.unfocus(),
+                            contextMenuBuilder: _buildContextMenu,
+                            maxLines: AppSettings.instance.sendOnEnter ? 1 : 4,
+                            minLines: 1,
+                            decoration: InputDecoration(
+                              hintText: 'Сообщение...',
+                              border: InputBorder.none,
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 10),
+                              suffix: near
+                                  ? Text(
+                                      '${_kMaxGroupMsgLen - _length}',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: over
+                                            ? Colors.red
+                                            : cs.onSurfaceVariant,
+                                      ),
+                                    )
+                                  : null,
+                            ),
+                            style: TextStyle(fontSize: 15, color: cs.onSurface),
+                            textInputAction: AppSettings.instance.sendOnEnter
+                                ? TextInputAction.send
+                                : TextInputAction.newline,
+                            onSubmitted: AppSettings.instance.sendOnEnter
+                                ? (_) {
+                                    if (!_composeOver) _send();
+                                  }
                                 : null,
                           ),
-                          style: TextStyle(fontSize: 15, color: cs.onSurface),
-                          textInputAction: AppSettings.instance.sendOnEnter
-                              ? TextInputAction.send
-                              : TextInputAction.newline,
-                          onSubmitted: AppSettings.instance.sendOnEnter
-                              ? (_) {
-                                  if (!_composeOver) _send();
-                                }
-                              : null,
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    if (_composeHasText || _isSending)
-                      GestureDetector(
-                        onTap: _isSending || over || !_composeHasText
-                            ? null
-                            : _send,
-                        child: Container(
-                          width: 44,
-                          height: 44,
-                          decoration: BoxDecoration(
-                            color: _isSending || over || !_composeHasText
-                                ? Theme.of(context)
-                                    .colorScheme
-                                    .onSurface
-                                    .withValues(alpha: 0.3)
-                                : Theme.of(context).colorScheme.primary,
-                            shape: BoxShape.circle,
-                          ),
-                          child: _isSending
-                              ? Padding(
-                                  padding: const EdgeInsets.all(12),
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onPrimary,
-                                  ),
-                                )
-                              : Icon(Icons.send_rounded,
-                                  color: Theme.of(context)
+                      const SizedBox(width: 8),
+                      if (_composeHasText || _isSending)
+                        GestureDetector(
+                          onTap: _isSending || over || !_composeHasText
+                              ? null
+                              : _send,
+                          child: Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              color: _isSending || over || !_composeHasText
+                                  ? Theme.of(context)
                                       .colorScheme
-                                      .onPrimary,
-                                  size: 20),
+                                      .onSurface
+                                      .withValues(alpha: 0.3)
+                                  : Theme.of(context).colorScheme.primary,
+                              shape: BoxShape.circle,
+                            ),
+                            child: _isSending
+                                ? Padding(
+                                    padding: const EdgeInsets.all(12),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onPrimary,
+                                    ),
+                                  )
+                                : Icon(Icons.send_rounded,
+                                    color:
+                                        Theme.of(context).colorScheme.onPrimary,
+                                    size: 20),
+                          ),
                         ),
-                      ),
-                  ]),
-                ),
+                    ]),
+                  ),
                 ],
               ),
             ),
@@ -2214,8 +2426,7 @@ class _GroupBubble extends StatelessWidget {
   final String senderNick;
   final ColorScheme cs;
   final String groupId;
-  final Future<void> Function(GroupMessage msg, String newEnc)?
-      onCollabPersist;
+  final Future<void> Function(GroupMessage msg, String newEnc)? onCollabPersist;
   final Future<void> Function()? onLongPressMenu;
 
   const _GroupBubble({
@@ -2248,6 +2459,8 @@ class _GroupBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final myId = CryptoService.instance.publicKeyHex;
+    final settings = AppSettings.instance;
+    final compact = settings.compactMode;
     final missing = groupMessageMissingLocalMedia(msg);
     return Align(
       alignment: msg.isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
@@ -2260,8 +2473,14 @@ class _GroupBubble extends StatelessWidget {
           }
         },
         child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          margin: EdgeInsets.symmetric(
+            horizontal: compact ? 10 : 12,
+            vertical: compact ? 2 : 3,
+          ),
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 12 : 14,
+            vertical: settings.messageVerticalPadding,
+          ),
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width * 0.75,
           ),
@@ -2413,6 +2632,12 @@ class _GroupBubble extends StatelessWidget {
                   compact: true,
                 ),
               ],
+              if (msg.latitude != null && msg.longitude != null)
+                _GroupLocationPreview(
+                  lat: msg.latitude!,
+                  lng: msg.longitude!,
+                  isOut: msg.isOutgoing,
+                ),
             ],
           ),
         ),
@@ -2422,6 +2647,97 @@ class _GroupBubble extends StatelessWidget {
 
   String _fmt(DateTime dt) =>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+}
+
+class _GroupLocationPreview extends StatelessWidget {
+  final double lat;
+  final double lng;
+  final bool isOut;
+
+  const _GroupLocationPreview({
+    required this.lat,
+    required this.lng,
+    required this.isOut,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () {
+              unawaited(
+                showLocationActionsSheet(
+                  context,
+                  latitude: lat,
+                  longitude: lng,
+                ),
+              );
+            },
+            child: SizedBox(
+              width: 220,
+              height: 124,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.network(
+                    'https://static-maps.yandex.ru/1.x/?lang=ru_RU&ll=$lng,$lat&z=14&size=440,248&l=map&pt=$lng,$lat,pm2rdm',
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      color: isOut
+                          ? Colors.black.withValues(alpha: 0.2)
+                          : cs.surfaceContainerHighest,
+                    ),
+                  ),
+                  Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.transparent,
+                          Colors.black.withValues(alpha: 0.45),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 8,
+                    right: 8,
+                    bottom: 8,
+                    child: Row(
+                      children: [
+                        const Icon(Icons.location_on,
+                            color: Colors.white, size: 14),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ── Group invite card ────────────────────────────────────────────
@@ -2481,7 +2797,8 @@ class _GroupInviteCard extends StatelessWidget {
                 GroupService.instance.removeInvite(invite.groupId);
               },
               child: Text('Нет',
-                  style: TextStyle(color: cs.onPrimaryContainer.withValues(alpha: 0.6))),
+                  style: TextStyle(
+                      color: cs.onPrimaryContainer.withValues(alpha: 0.6))),
             ),
             FilledButton(
               onPressed: () async {
@@ -2714,8 +3031,8 @@ class _GroupInlineVideoState extends State<_GroupInlineVideo> {
                 ),
               Container(color: Colors.black.withValues(alpha: 0.28)),
               const Center(
-                child: Icon(Icons.play_circle_fill,
-                    color: Colors.white, size: 54),
+                child:
+                    Icon(Icons.play_circle_fill, color: Colors.white, size: 54),
               ),
             ],
           ),

@@ -7,33 +7,267 @@
   Магазинов нет — одна кнопка на страницу загрузки DOWNLOAD_PAGE.
 -->
 <style>
-  #rlink-ch-embed { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    max-width: 420px; margin: 0 auto; padding: 24px 16px 40px; text-align: center;
-    color: #1a1a1a; box-sizing: border-box; }
+  /* Всё задизайнено под #rlink-ch-embed — не течёт в остальную Tilda-вёрстку. */
+  #rlink-ch-embed {
+    --rl-accent: #0d9488;
+    --rl-accent-strong: #0f766e;
+    --rl-accent-soft: #14b8a6;
+    --rl-surface: #ffffff;
+    --rl-text: #0f172a;
+    --rl-muted: #64748b;
+    --rl-border: #e5e7eb;
+    --rl-chip: #f1f5f9;
+    --rl-chip-text: #334155;
+    --rl-danger: #dc2626;
+    --rl-danger-bg: #fef2f2;
+    --rl-shadow:
+      0 18px 40px -18px rgba(13, 148, 136, 0.35),
+      0 4px 14px rgba(15, 23, 42, 0.06);
+
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter,
+      "Helvetica Neue", sans-serif;
+    max-width: 440px;
+    margin: 0 auto;
+    padding: 24px 16px 40px;
+    color: var(--rl-text);
+    box-sizing: border-box;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  @media (prefers-color-scheme: dark) {
+    #rlink-ch-embed {
+      --rl-surface: #0b1220;
+      --rl-text: #f1f5f9;
+      --rl-muted: #94a3b8;
+      --rl-border: #1f2937;
+      --rl-chip: #0f1a2b;
+      --rl-chip-text: #cbd5e1;
+      --rl-danger: #f87171;
+      --rl-danger-bg: rgba(248, 113, 113, 0.1);
+      --rl-shadow:
+        0 18px 40px -18px rgba(20, 184, 166, 0.22),
+        0 4px 14px rgba(0, 0, 0, 0.5);
+    }
+  }
+
   #rlink-ch-embed * { box-sizing: border-box; }
-  #rlink-ch-embed h1 { font-size: 1.35rem; font-weight: 700; margin: 0 0 12px; line-height: 1.25; }
-  #rlink-ch-embed p { font-size: 0.95rem; line-height: 1.45; color: #444; margin: 0 0 16px; }
-  #rlink-ch-embed .id { font-size: 0.8rem; color: #888; word-break: break-all; margin-bottom: 20px; }
-  #rlink-ch-embed .btn { display: block; width: 100%; padding: 14px 18px; margin: 10px 0;
-    border-radius: 12px; font-size: 1rem; font-weight: 600; text-decoration: none;
-    border: none; cursor: pointer; text-align: center; }
-  #rlink-ch-embed .btn-primary { background: #0d9488; color: #fff; }
-  #rlink-ch-embed .btn-primary:active { opacity: 0.9; }
-  #rlink-ch-embed .btn-secondary { background: #f3f4f6; color: #111; }
-  #rlink-ch-embed .err { color: #b91c1c; font-size: 0.9rem; }
-  #rlink-ch-embed .stores { margin-top: 28px; padding-top: 20px; border-top: 1px solid #e5e7eb; }
-  #rlink-ch-embed .stores p { font-size: 0.85rem; color: #666; }
+  #rlink-ch-embed [hidden] { display: none !important; }
+
+  #rlink-ch-embed .rl-card {
+    position: relative;
+    background: var(--rl-surface);
+    border: 1px solid var(--rl-border);
+    border-radius: 24px;
+    padding: 32px 24px 28px;
+    text-align: center;
+    box-shadow: var(--rl-shadow);
+    animation: rl-in 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    overflow: hidden;
+  }
+  #rlink-ch-embed .rl-card::before {
+    content: "";
+    position: absolute;
+    inset: -1px -1px auto -1px;
+    height: 4px;
+    background: linear-gradient(
+      90deg,
+      var(--rl-accent-soft),
+      var(--rl-accent),
+      var(--rl-accent-strong)
+    );
+    border-radius: 24px 24px 0 0;
+  }
+  @keyframes rl-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  #rlink-ch-embed .rl-logo {
+    width: 64px;
+    height: 64px;
+    margin: 4px auto 18px;
+    border-radius: 20px;
+    background: linear-gradient(
+      135deg,
+      var(--rl-accent-soft),
+      var(--rl-accent-strong)
+    );
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    box-shadow: 0 10px 24px -10px rgba(13, 148, 136, 0.7);
+    position: relative;
+  }
+  #rlink-ch-embed .rl-logo::after {
+    content: "";
+    position: absolute;
+    inset: -6px;
+    border-radius: 26px;
+    border: 2px solid var(--rl-accent);
+    opacity: 0.28;
+    animation: rl-pulse 2.4s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes rl-pulse {
+    0%, 100% { transform: scale(1);    opacity: 0.28; }
+    50%      { transform: scale(1.08); opacity: 0; }
+  }
+  #rlink-ch-embed .rl-logo svg { width: 30px; height: 30px; }
+
+  #rlink-ch-embed h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+    color: var(--rl-text);
+  }
+  #rlink-ch-embed .rl-subtitle {
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--rl-muted);
+    margin: 0 0 20px;
+  }
+
+  #rlink-ch-embed .id {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    margin: 0 0 18px;
+    padding: 6px 12px;
+    background: var(--rl-chip);
+    color: var(--rl-chip-text);
+    border-radius: 999px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco,
+      "Liberation Mono", monospace;
+    font-size: 0.78rem;
+    line-height: 1.3;
+    word-break: break-all;
+  }
+
+  #rlink-ch-embed .err {
+    margin: 0 0 18px;
+    padding: 12px 14px;
+    background: var(--rl-danger-bg);
+    color: var(--rl-danger);
+    border-radius: 12px;
+    font-size: 0.9rem;
+    line-height: 1.45;
+    text-align: left;
+  }
+
+  #rlink-ch-embed .btn {
+    display: block;
+    width: 100%;
+    margin: 8px 0;
+    padding: 14px 18px;
+    border: 1px solid transparent;
+    border-radius: 14px;
+    font-family: inherit;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.2;
+    text-align: center;
+    text-decoration: none;
+    cursor: pointer;
+    transition:
+      transform 0.15s ease,
+      box-shadow 0.2s ease,
+      background 0.2s ease,
+      border-color 0.2s ease,
+      opacity 0.15s ease;
+  }
+  #rlink-ch-embed .btn:focus-visible {
+    outline: 2px solid var(--rl-accent);
+    outline-offset: 2px;
+  }
+
+  #rlink-ch-embed .btn-primary {
+    color: #fff;
+    background: linear-gradient(
+      135deg,
+      var(--rl-accent-soft),
+      var(--rl-accent-strong)
+    );
+    box-shadow: 0 10px 20px -8px rgba(13, 148, 136, 0.5);
+  }
+  #rlink-ch-embed .btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 24px -8px rgba(13, 148, 136, 0.6);
+  }
+  #rlink-ch-embed .btn-primary:active {
+    transform: translateY(0);
+    opacity: 0.92;
+  }
+  #rlink-ch-embed .btn-primary:disabled,
+  #rlink-ch-embed .btn-primary[disabled] {
+    background: var(--rl-chip);
+    color: var(--rl-muted);
+    box-shadow: none;
+    cursor: not-allowed;
+  }
+
+  #rlink-ch-embed .btn-secondary {
+    background: transparent;
+    color: var(--rl-text);
+    border-color: var(--rl-border);
+  }
+  #rlink-ch-embed .btn-secondary:hover {
+    color: var(--rl-accent);
+    border-color: var(--rl-accent);
+    transform: translateY(-1px);
+  }
+
+  #rlink-ch-embed .stores {
+    margin: 22px 0 0;
+    padding-top: 22px;
+    border-top: 1px solid var(--rl-border);
+  }
+  #rlink-ch-embed .stores p {
+    margin: 0 0 12px;
+    color: var(--rl-muted);
+    font-size: 0.85rem;
+    line-height: 1.45;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #rlink-ch-embed .rl-card { animation: none; }
+    #rlink-ch-embed .rl-logo::after { animation: none; }
+    #rlink-ch-embed .btn { transition: none; }
+  }
 </style>
 
 <div id="rlink-ch-embed">
-  <h1>Канал в Rlink</h1>
-  <p>Откройте ссылку в приложении. Если не открылось — нажмите кнопку ниже или установите Rlink.</p>
-  <div class="id" id="rlink-ch-id-line" hidden></div>
-  <p class="err" id="rlink-ch-err" hidden>Откройте полную ссылку из приглашения (в адресе должно быть ?channel=…). Или установите Rlink и попросите ссылку у автора канала.</p>
-  <button type="button" class="btn btn-primary" id="rlink-ch-open">Открыть в приложении</button>
-  <div class="stores">
-    <p>Нет приложения? В Google Play и App Store пока нет — сборки на сайте.</p>
-    <a class="btn btn-secondary" id="rlink-ch-download" href="https://rendergames.online/rlink" target="_blank" rel="noopener">Скачать Rlink с сайта</a>
+  <div class="rl-card">
+    <div class="rl-logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 17H7a5 5 0 0 1 0-10h2"/>
+        <path d="M15 7h2a5 5 0 0 1 0 10h-2"/>
+        <line x1="8" y1="12" x2="16" y2="12"/>
+      </svg>
+    </div>
+    <h1>Канал в Rlink</h1>
+    <p class="rl-subtitle">
+      Откройте ссылку в приложении. Если не открылось — нажмите кнопку ниже
+      или установите Rlink.
+    </p>
+    <div class="id" id="rlink-ch-id-line" hidden></div>
+    <p class="err" id="rlink-ch-err" hidden aria-live="polite">
+      Откройте полную ссылку из приглашения (в адресе должно быть
+      ?channel=…). Или установите Rlink и попросите ссылку у автора канала.
+    </p>
+    <button type="button" class="btn btn-primary" id="rlink-ch-open">
+      Открыть в приложении
+    </button>
+    <div class="stores">
+      <p>Нет приложения? В Google Play и App Store пока нет — сборки на сайте.</p>
+      <a class="btn btn-secondary" id="rlink-ch-download"
+         href="https://rendergames.online/rlink" target="_blank" rel="noopener">
+        Скачать Rlink с сайта
+      </a>
+    </div>
   </div>
 </div>
 

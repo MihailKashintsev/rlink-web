@@ -15,7 +15,7 @@ class AvatarWidget extends StatelessWidget {
   final String? imagePath; // если задан — показываем фото поверх всего
   final double size;
   final bool isOnline;
-  final bool hasStory;         // показывать ли кольцо сторис
+  final bool hasStory; // показывать ли кольцо сторис
   final bool hasUnviewedStory; // непросмотренная сторис — яркий градиент
 
   const AvatarWidget({
@@ -52,7 +52,8 @@ class AvatarWidget extends StatelessWidget {
       ),
       child: ClipOval(
         child: hasImage
-            ? Image.file(file, width: innerSize, height: innerSize, fit: BoxFit.cover)
+            ? Image.file(file,
+                width: innerSize, height: innerSize, fit: BoxFit.cover)
             : Center(
                 child: emoji.isNotEmpty
                     ? Text(emoji, style: TextStyle(fontSize: innerSize * 0.46))
@@ -85,7 +86,11 @@ class AvatarWidget extends StatelessWidget {
                     ? const LinearGradient(
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
-                        colors: [Color(0xFFE91E63), Color(0xFFFF9800), Color(0xFFFFEB3B)],
+                        colors: [
+                          Color(0xFFE91E63),
+                          Color(0xFFFF9800),
+                          Color(0xFFFFEB3B)
+                        ],
                       )
                     : LinearGradient(
                         colors: [Colors.grey.shade500, Colors.grey.shade700],
@@ -110,7 +115,7 @@ class AvatarWidget extends StatelessWidget {
                 width: size * 0.28,
                 height: size * 0.28,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF4CAF50),
+                  color: AppSettings.instance.onlineStatusColor,
                   shape: BoxShape.circle,
                   border: Border.all(
                     color: Theme.of(context).scaffoldBackgroundColor,
@@ -139,8 +144,7 @@ class AvatarEmojiPicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final useNoto =
-        Platform.isAndroid && AppSettings.instance.useIosStyleEmoji;
+    final useNoto = Platform.isAndroid && AppSettings.instance.useIosStyleEmoji;
     return SizedBox(
       height: 280,
       child: epf.EmojiPicker(

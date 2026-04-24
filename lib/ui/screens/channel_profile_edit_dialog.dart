@@ -8,7 +8,6 @@ import 'package:flutter/material.dart';
 import '../../models/channel.dart';
 import '../../services/channel_backup_service.dart';
 import '../../services/channel_service.dart';
-import '../../services/google_drive_channel_backup.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../widgets/desktop_image_picker.dart';
@@ -57,8 +56,7 @@ Future<void> syncChannelVisualsAfterEdit({
 }) async {
   if (updated.avatarImagePath != prevAvatarPath &&
       updated.avatarImagePath != null) {
-    final rp =
-        ImageService.instance.resolveStoredPath(updated.avatarImagePath);
+    final rp = ImageService.instance.resolveStoredPath(updated.avatarImagePath);
     if (rp != null && File(rp).existsSync()) {
       final bytes = await File(rp).readAsBytes();
       await _broadcastVisualAssetBytes(
@@ -70,8 +68,7 @@ Future<void> syncChannelVisualsAfterEdit({
   }
   if (updated.bannerImagePath != prevBannerPath &&
       updated.bannerImagePath != null) {
-    final rp =
-        ImageService.instance.resolveStoredPath(updated.bannerImagePath);
+    final rp = ImageService.instance.resolveStoredPath(updated.bannerImagePath);
     if (rp != null && File(rp).existsSync()) {
       final bytes = await File(rp).readAsBytes();
       await _broadcastVisualAssetBytes(
@@ -83,27 +80,7 @@ Future<void> syncChannelVisualsAfterEdit({
   }
 }
 
-Future<void> _promptGoogleSignInForDriveBackup({
-  required BuildContext context,
-  required VoidCallback onSuccess,
-}) async {
-  final account =
-      await GoogleDriveChannelBackup.ensureUserSignedIn(interactive: true);
-  if (!context.mounted) return;
-  if (account == null) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Вход в Google отменён или не удался. Резерв на Диск можно подключить позже в настройках канала.',
-        ),
-      ),
-    );
-    return;
-  }
-  onSuccess();
-}
-
-/// [showPolicyToggles]: полные настройки (комментарии, публичность, Drive) — только владелец.
+/// [showPolicyToggles]: полные настройки (комментарии, публичность) — только владелец.
 Future<void> showChannelProfileEditDialog(
   BuildContext context, {
   required Channel channel,
@@ -119,7 +96,6 @@ Future<void> showChannelProfileEditDialog(
   int pickedColor = channel.avatarColor;
   bool commentsEnabled = channel.commentsEnabled;
   bool isPublic = channel.isPublic;
-  bool driveBackupEnabled = channel.driveBackupEnabled;
 
   await showDialog<void>(
     context: context,
@@ -165,9 +141,7 @@ Future<void> showChannelProfileEditDialog(
                         child: () {
                           if (pickedImagePath == null) {
                             return Text(
-                                emojiCtrl.text.isEmpty
-                                    ? '📢'
-                                    : emojiCtrl.text,
+                                emojiCtrl.text.isEmpty ? '📢' : emojiCtrl.text,
                                 style: const TextStyle(fontSize: 28));
                           }
                           final rp = ImageService.instance
@@ -212,7 +186,8 @@ Future<void> showChannelProfileEditDialog(
                               ? Center(
                                   child: Text(
                                     'Нажмите, чтобы выбрать баннер',
-                                    style: TextStyle(color: cs.onSurfaceVariant),
+                                    style:
+                                        TextStyle(color: cs.onSurfaceVariant),
                                   ),
                                 )
                               : Builder(builder: (_) {
@@ -346,32 +321,6 @@ Future<void> showChannelProfileEditDialog(
                       contentPadding: EdgeInsets.zero,
                       dense: true,
                     ),
-                    SwitchListTile(
-                      value: driveBackupEnabled,
-                      onChanged: (v) {
-                        if (!v) {
-                          setDialogState(() => driveBackupEnabled = false);
-                          return;
-                        }
-                        if (myId != channel.adminId) {
-                          setDialogState(() => driveBackupEnabled = true);
-                          return;
-                        }
-                        unawaited(_promptGoogleSignInForDriveBackup(
-                          context: ctx,
-                          onSuccess: () =>
-                              setDialogState(() => driveBackupEnabled = true),
-                        ));
-                      },
-                      title: const Text('Резерв (Google Drive + сеть)'),
-                      subtitle: const Text(
-                        'Отдельный ключ канала; на Диск уходит только шифротекст. Подписчики подтягивают историю в фоне без уведомлений.',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                      secondary: const Icon(Icons.cloud_sync_outlined),
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                    ),
                     ListTile(
                       leading: const Icon(Icons.sync),
                       title: const Text('Синхронизировать историю сейчас'),
@@ -399,7 +348,6 @@ Future<void> showChannelProfileEditDialog(
                           avatarColor: pickedColor,
                           commentsEnabled: commentsEnabled,
                           isPublic: isPublic,
-                          driveBackupEnabled: driveBackupEnabled,
                         );
                         await ChannelService.instance.updateChannel(updated);
                         if (!ctx.mounted) return;
@@ -459,12 +407,10 @@ Future<void> showChannelProfileEditDialog(
                   avatarImagePath: pickedImagePath,
                   bannerImagePath: pickedBannerPath,
                   avatarColor: pickedColor,
-                  commentsEnabled:
-                      showPolicyToggles ? commentsEnabled : channel.commentsEnabled,
+                  commentsEnabled: showPolicyToggles
+                      ? commentsEnabled
+                      : channel.commentsEnabled,
                   isPublic: showPolicyToggles ? isPublic : channel.isPublic,
-                  driveBackupEnabled: showPolicyToggles
-                      ? driveBackupEnabled
-                      : channel.driveBackupEnabled,
                 );
                 await ChannelService.instance.updateChannel(updated);
                 if (!ctx.mounted) return;

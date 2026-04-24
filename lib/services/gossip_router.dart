@@ -39,11 +39,14 @@ class GossipPacket {
     final type = j['t'];
     final ttl = j['ttl'];
     final ts = j['ts'];
-    if (id is! String || id.isEmpty ||
-        type is! String || type.isEmpty ||
+    if (id is! String ||
+        id.isEmpty ||
+        type is! String ||
+        type.isEmpty ||
         ttl is! int ||
         ts is! int) {
-      throw FormatException('Invalid GossipPacket fields: id=$id t=$type ttl=$ttl ts=$ts');
+      throw FormatException(
+          'Invalid GossipPacket fields: id=$id t=$type ttl=$ttl ts=$ts');
     }
     return GossipPacket(
       id: id,
@@ -104,15 +107,15 @@ typedef OnForwardPacket = Future<void> Function(GossipPacket packet);
 // bleId — BLE device ID источника (для маппинга), publicKey — Ed25519 ключ,
 // x25519Key — X25519 ключ base64 для E2E шифрования (пустая строка если нет)
 typedef OnProfileReceived = void Function(
-    String bleId,
-    String publicKey,
-    String nick,
-    String username,
-    int color,
-    String emoji,
-    String x25519Key,
-    List<String> tags,
-    String? statusEmojiPayload,
+  String bleId,
+  String publicKey,
+  String nick,
+  String username,
+  int color,
+  String emoji,
+  String x25519Key,
+  List<String> tags,
+  String? statusEmojiPayload,
 );
 
 typedef OnEditReceived = Future<void> Function(
@@ -138,36 +141,79 @@ typedef OnEtherReceived = void Function(
 });
 
 /// Вызывается при получении сторис от пира.
-typedef OnStoryReceived = void Function(
-    String storyId, String authorId, String text, int bgColor,
-    double textX, double textY, double textSize);
+typedef OnStoryReceived = void Function(String storyId, String authorId,
+    String text, int bgColor, double textX, double textY, double textSize);
 
 /// Вызывается при получении запроса историй от пира.
 typedef OnStoryRequest = void Function(String fromId);
 
 //// Pair request: device wants to exchange profiles.
 typedef OnPairRequest = void Function(
-    String bleId, String publicKey, String nick, String username, int color,
-    String emoji, String x25519Key, List<String> tags);
+    String bleId,
+    String publicKey,
+    String nick,
+    String username,
+    int color,
+    String emoji,
+    String x25519Key,
+    List<String> tags);
 
 /// Typing/activity indicator: 0=stopped, 1=typing, 2=recording video, 3=recording voice
 typedef OnTypingReceived = void Function(String fromId, int activity);
 
 //// Pair accepted: device accepted our pair request.
 typedef OnPairAccepted = void Function(
-    String bleId, String publicKey, String nick, String username, int color,
-    String emoji, String x25519Key, List<String> tags);
+    String bleId,
+    String publicKey,
+    String nick,
+    String username,
+    int color,
+    String emoji,
+    String x25519Key,
+    List<String> tags);
+
+typedef OnDeviceLinkRequest = void Function(
+  String sourceId,
+  String publicKey,
+  String nick,
+  String username,
+);
+
+typedef OnDeviceLinkAck = void Function(
+  String sourceId,
+  String publicKey,
+  String nick,
+  bool accepted,
+);
+
+typedef OnDeviceUnlink = void Function(
+  String sourceId,
+  String publicKey,
+);
+
+typedef OnDeviceDmSyncRequest = void Function(
+  String sourceId,
+  String publicKey,
+);
+
+typedef OnDeviceDmSyncPacket = Future<void> Function(
+  String sourceId,
+  String publicKey,
+  String kind,
+  Map<String, dynamic> data,
+  bool snapshot,
+);
 
 /// Вызывается при получении img_meta (начало передачи изображения/голоса).
 typedef OnImgMeta = void Function(
   String fromId,
   String msgId,
   int totalChunks,
-  bool isAvatar,  // true — аватар
-  bool isVoice,   // true — голосовое сообщение
-  bool isVideo,   // true — видеосообщение
-  bool isSquare,  // true — квадратное видео
-  bool isFile,    // true — произвольный файл/документ
+  bool isAvatar, // true — аватар
+  bool isVoice, // true — голосовое сообщение
+  bool isVideo, // true — видеосообщение
+  bool isSquare, // true — квадратное видео
+  bool isFile, // true — произвольный файл/документ
   bool isSticker, // true — стикер (сохраняется как stk_*.jpg, компактный UI)
   String? fileName, // оригинальное имя файла (только для isFile)
   bool viewOnce, {
@@ -194,10 +240,13 @@ class GossipRouter {
   final _uuid = const Uuid();
   final Map<String, DateTime> _seenIds = {};
   Timer? _cleanupTimer;
+
   /// Maps msgId → rid8 prefix from img_meta for chunk filtering
   final Map<String, String> _imgMetaRid8 = {};
+
   /// Maps msgId → fromId from img_meta for chunk sender tracking
   final Map<String, String> _imgMetaFrom = {};
+
   /// Chunks that arrived before [img_meta] (BLE mesh reordering).
   final Map<String, Map<int, String>> _pendingImgChunks = {};
 
@@ -216,12 +265,18 @@ class GossipRouter {
   void Function(String storyId, String authorId)? onStoryDelete;
   void Function(String storyId, String viewerId)? onStoryView;
   void Function(Map<String, dynamic> payload)? onAdminConfig;
+
   /// Зашифрованный admin_cfg2: только устройства с тем же Ed25519, что и [from].
   /// [channelIds] — список каналов для синхронизации подписок между устройствами.
   void Function(String hash, int revision, List<String> channelIds)?
       onAdminConfigSecure;
   OnPairRequest? onPairRequest;
   OnPairAccepted? onPairAccepted;
+  OnDeviceLinkRequest? onDeviceLinkRequest;
+  OnDeviceLinkAck? onDeviceLinkAck;
+  OnDeviceUnlink? onDeviceUnlink;
+  OnDeviceDmSyncRequest? onDeviceDmSyncRequest;
+  OnDeviceDmSyncPacket? onDeviceDmSyncPacket;
   OnTypingReceived? onTypingReceived;
 
   // Channel/Group callbacks
@@ -309,9 +364,8 @@ class GossipRouter {
     // как поле 'r' в payload. Это позволяет другим узлам отфильтровать пакеты,
     // предназначенные не им (экономим 56 байт по сравнению с полным rid в пакете).
     // Вероятность коллизии 8 hex = 4 байта = 1/2^32 ≈ незначительна.
-    final rid8 = (recipientId?.length ?? 0) >= 8
-        ? recipientId!.substring(0, 8)
-        : null;
+    final rid8 =
+        (recipientId?.length ?? 0) >= 8 ? recipientId!.substring(0, 8) : null;
 
     final packetId = messageId ?? _uuid.v4();
 
@@ -491,8 +545,7 @@ class GossipRouter {
     required bool add,
     required String fromId,
   }) async {
-    final rid8 =
-        recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
+    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'dm_pin',
@@ -702,9 +755,8 @@ class GossipRouter {
     String? recipientId,
   }) async {
     // Include 'r' for directed relay routing (adds ~14 bytes — acceptable).
-    final rid8 = (recipientId?.length ?? 0) >= 8
-        ? recipientId!.substring(0, 8)
-        : null;
+    final rid8 =
+        (recipientId?.length ?? 0) >= 8 ? recipientId!.substring(0, 8) : null;
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'img_chunk',
@@ -961,7 +1013,8 @@ class GossipRouter {
     String x25519Key = '',
     List<String> tags = const [],
   }) async {
-    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final rid8 =
+        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'pair_req',
@@ -998,7 +1051,8 @@ class GossipRouter {
     required String recipientId,
     List<String> tags = const [],
   }) async {
-    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final rid8 =
+        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'pair_acc',
@@ -1021,6 +1075,120 @@ class GossipRouter {
       await _forward(packet);
       if (i < 2) await Future.delayed(const Duration(milliseconds: 400));
     }
+  }
+
+  Future<void> sendDeviceLinkRequest({
+    required String publicKey,
+    required String nick,
+    String username = '',
+    required String recipientId,
+  }) async {
+    final rid8 =
+        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'dev_link_req',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: <String, dynamic>{
+        'id': publicKey,
+        'nick': nick,
+        if (username.isNotEmpty) 'u': username,
+        'r': rid8,
+      },
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
+  }
+
+  Future<void> sendDeviceLinkAck({
+    required String publicKey,
+    required String nick,
+    required String recipientId,
+    required bool accepted,
+  }) async {
+    final rid8 =
+        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'dev_link_ack',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: <String, dynamic>{
+        'id': publicKey,
+        'nick': nick,
+        'ok': accepted,
+        'r': rid8,
+      },
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
+  }
+
+  Future<void> sendDeviceUnlink({
+    required String publicKey,
+    required String recipientId,
+  }) async {
+    final rid8 =
+        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'dev_unlink',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: <String, dynamic>{
+        'id': publicKey,
+        'r': rid8,
+      },
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
+  }
+
+  Future<void> sendDeviceDmSyncRequest({
+    required String publicKey,
+    required String recipientId,
+  }) async {
+    final rid8 =
+        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'dev_dm_sync_req',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: <String, dynamic>{
+        'id': publicKey,
+        'r': rid8,
+      },
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
+  }
+
+  Future<void> sendDeviceDmSync({
+    required String publicKey,
+    required String recipientId,
+    required String kind,
+    Map<String, dynamic> data = const <String, dynamic>{},
+    bool snapshot = false,
+  }) async {
+    final rid8 =
+        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'dev_dm_sync',
+      ttl: _kDefaultTtl,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      payload: <String, dynamic>{
+        'id': publicKey,
+        'k': kind,
+        if (snapshot) 'snap': true,
+        if (data.isNotEmpty) 'd': data,
+        'r': rid8,
+      },
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
   }
 
   /// Send typing/activity indicator. activity: 0=stopped, 1=typing, 2=recording video, 3=recording voice
@@ -1083,14 +1251,16 @@ class GossipRouter {
   Future<void> onPacketReceived(Uint8List rawBytes, {String? sourceId}) async {
     final packet = GossipPacket.decode(rawBytes);
     if (packet == null) {
-      debugPrint('[RLINK][Gossip] Failed to decode packet (${rawBytes.length} bytes)');
+      debugPrint(
+          '[RLINK][Gossip] Failed to decode packet (${rawBytes.length} bytes)');
       return;
     }
 
     if (_hasSeen(packet.id)) return;
     _markSeen(packet.id);
     if (kDebugMode) {
-      debugPrint('[RLINK][Gossip] Received type=${packet.type} ttl=${packet.ttl} id=${packet.id.substring(0, 8)}');
+      debugPrint(
+          '[RLINK][Gossip] Received type=${packet.type} ttl=${packet.ttl} id=${packet.id.substring(0, 8)}');
     }
 
     if (packet.isExpired) return;
@@ -1126,17 +1296,15 @@ class GossipRouter {
         final from = packet.payload['from'] as String? ?? 'unknown';
         final rid8 = packet.payload['r'] as String?;
         // Поддерживаем оба формата: новый компактный 'rt' и старый 'replyToMessageId'
-        final replyToMessageId =
-            (packet.payload['rt'] ?? packet.payload['replyToMessageId'])
-                as String?;
+        final replyToMessageId = (packet.payload['rt'] ??
+            packet.payload['replyToMessageId']) as String?;
 
         // Фильтрация по префиксу получателя: если 'r' задан и не совпадает с нашим ключом
         // значит сообщение предназначено другому пользователю — пропускаем
         final myKey = myPublicKey;
-        if (rid8 != null &&
-            myKey != null &&
-            !myKey.startsWith(rid8)) {
-          debugPrint('[RLINK][Gossip] Raw message not for us (rid prefix mismatch)');
+        if (rid8 != null && myKey != null && !myKey.startsWith(rid8)) {
+          debugPrint(
+              '[RLINK][Gossip] Raw message not for us (rid prefix mismatch)');
           return;
         }
 
@@ -1226,9 +1394,9 @@ class GossipRouter {
         final color = packet.payload['color'] as int?;
         final emoji = packet.payload['emoji'] as String? ?? '';
         final x25519Key = packet.payload['x'] as String? ?? '';
-        final tags = (packet.payload['tags'] as List<dynamic>?)
-                ?.cast<String>() ??
-            const <String>[];
+        final tags =
+            (packet.payload['tags'] as List<dynamic>?)?.cast<String>() ??
+                const <String>[];
         final String? statusEmojiPayload = packet.payload.containsKey('st')
             ? (packet.payload['st'] as String? ?? '')
             : null;
@@ -1245,7 +1413,8 @@ class GossipRouter {
           onProfileReceived?.call(bleId, publicKey, nick, username, color,
               emoji, x25519Key, tags, statusEmojiPayload);
         } else {
-          debugPrint('[RLINK][Gossip] Invalid profile packet: key=$publicKey nick=$nick');
+          debugPrint(
+              '[RLINK][Gossip] Invalid profile packet: key=$publicKey nick=$nick');
         }
         return;
       }
@@ -1264,15 +1433,16 @@ class GossipRouter {
             encrypted.nonce.isEmpty ||
             encrypted.cipherText.isEmpty ||
             encrypted.mac.isEmpty) {
-          debugPrint('[RLINK][Gossip] Dropping malformed msg packet (missing fields)');
+          debugPrint(
+              '[RLINK][Gossip] Dropping malformed msg packet (missing fields)');
           return;
         }
         final handler = onMessageReceived;
         if (handler != null) {
           final lat = (packet.payload['lat'] as num?)?.toDouble();
           final lng = (packet.payload['lng'] as num?)?.toDouble();
-          final rt = (packet.payload['rt'] ?? packet.payload['replyToMessageId'])
-              as String?;
+          final rt = (packet.payload['rt'] ??
+              packet.payload['replyToMessageId']) as String?;
           final ffid = packet.payload['ffid'] as String?;
           final ffn = packet.payload['ffn'] as String?;
           final ffch = packet.payload['ffch'] as String?;
@@ -1316,9 +1486,12 @@ class GossipRouter {
         final ffch = packet.payload['ffch'] as String?;
         // Фильтрация по rid8: не-аватарные пакеты, адресованные другому получателю, игнорируем
         final rid8 = packet.payload['r'] as String?;
-        if (!isAvatar && rid8 != null && myPublicKey != null &&
+        if (!isAvatar &&
+            rid8 != null &&
+            myPublicKey != null &&
             !myPublicKey!.startsWith(rid8)) {
-          debugPrint('[RLINK][Gossip] img_meta not for us (rid8 mismatch), skip');
+          debugPrint(
+              '[RLINK][Gossip] img_meta not for us (rid8 mismatch), skip');
           if (msgId != null) _pendingImgChunks.remove(msgId);
           return;
         }
@@ -1339,7 +1512,8 @@ class GossipRouter {
       if (packet.type == 'ether') {
         final text = packet.payload['text'] as String?;
         final color = packet.payload['col'] as int?;
-        debugPrint('[RLINK][Gossip] Ether packet: text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} col=$color handler=${onEtherReceived != null}');
+        debugPrint(
+            '[RLINK][Gossip] Ether packet: text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} col=$color handler=${onEtherReceived != null}');
         if (text != null && text.isNotEmpty && color != null) {
           final senderId = packet.payload['from'] as String?;
           final senderNick = packet.payload['nick'] as String?;
@@ -1368,9 +1542,7 @@ class GossipRouter {
 
       if (packet.type == 'admin_cfg2') {
         final from = packet.payload['from'] as String?;
-        if (from == null ||
-            myPublicKey == null ||
-            from != myPublicKey) {
+        if (from == null || myPublicKey == null || from != myPublicKey) {
           return;
         }
         final n = packet.payload['n'] as String?;
@@ -1384,8 +1556,8 @@ class GossipRouter {
           final map = jsonDecode(plain) as Map<String, dynamic>;
           final hash = map['hash'] as String?;
           final rev = (map['rev'] as num?)?.toInt() ?? 0;
-          final chans = (map['chans'] as List?)?.cast<String>() ??
-              const <String>[];
+          final chans =
+              (map['chans'] as List?)?.cast<String>() ?? const <String>[];
           if (hash == null ||
               hash.length != 64 ||
               !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hash)) {
@@ -1398,7 +1570,11 @@ class GossipRouter {
 
       if (packet.type == 'admin_cfg') {
         final rid8 = packet.payload['r'] as String?;
-        if (rid8 != null && myPublicKey != null && !myPublicKey!.startsWith(rid8)) return;
+        if (rid8 != null &&
+            myPublicKey != null &&
+            !myPublicKey!.startsWith(rid8)) {
+          return;
+        }
         onAdminConfig?.call(packet.payload);
         return;
       }
@@ -1407,12 +1583,14 @@ class GossipRouter {
         final authorId = packet.payload['from'] as String?;
         final text = packet.payload['text'] as String?;
         final bgColor = packet.payload['col'] as int?;
-        debugPrint('[RLINK][Gossip] Story packet: author=${authorId == null ? 'null' : authorId.substring(0, authorId.length.clamp(0, 16))} text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} handler=${onStoryReceived != null}');
+        debugPrint(
+            '[RLINK][Gossip] Story packet: author=${authorId == null ? 'null' : authorId.substring(0, authorId.length.clamp(0, 16))} text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} handler=${onStoryReceived != null}');
         if (authorId != null && text != null && bgColor != null) {
           final textX = (packet.payload['tx'] as num?)?.toDouble() ?? 0.0;
           final textY = (packet.payload['ty'] as num?)?.toDouble() ?? 0.0;
           final textSize = (packet.payload['ts'] as num?)?.toDouble() ?? 26.0;
-          onStoryReceived?.call(packet.id, authorId, text, bgColor, textX, textY, textSize);
+          onStoryReceived?.call(
+              packet.id, authorId, text, bgColor, textX, textY, textSize);
         }
         return;
       }
@@ -1429,7 +1607,11 @@ class GossipRouter {
       if (packet.type == 'story_view') {
         // Only forward to app when the packet is addressed to us.
         final rid8 = packet.payload['r'] as String?;
-        if (rid8 != null && myPublicKey != null && !myPublicKey!.startsWith(rid8)) return;
+        if (rid8 != null &&
+            myPublicKey != null &&
+            !myPublicKey!.startsWith(rid8)) {
+          return;
+        }
         final storyId = packet.payload['sid'] as String?;
         final viewerId = packet.payload['from'] as String?;
         if (storyId != null && viewerId != null) {
@@ -1446,19 +1628,22 @@ class GossipRouter {
         final emoji = packet.payload['emoji'] as String? ?? '';
         final x25519Key = packet.payload['x'] as String? ?? '';
         final rid8 = packet.payload['r'] as String?;
-        final tags = (packet.payload['tags'] as List<dynamic>?)
-                ?.cast<String>() ??
-            const <String>[];
+        final tags =
+            (packet.payload['tags'] as List<dynamic>?)?.cast<String>() ??
+                const <String>[];
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_req not addressed to us (directed pairing)
-        if (rid8 != null && myPublicKey != null &&
+        if (rid8 != null &&
+            myPublicKey != null &&
             !myPublicKey!.startsWith(rid8)) {
           debugPrint('[RLINK][Gossip] pair_req not for us (r=$rid8), dropping');
           return;
         }
         if (publicKey != null && nick != null && color != null) {
-          debugPrint('[RLINK][Gossip] Pair request from $nick (${publicKey.substring(0, 8)})');
-          onPairRequest?.call(bleId, publicKey, nick, username, color, emoji, x25519Key, tags);
+          debugPrint(
+              '[RLINK][Gossip] Pair request from $nick (${publicKey.substring(0, 8)})');
+          onPairRequest?.call(
+              bleId, publicKey, nick, username, color, emoji, x25519Key, tags);
         }
         return;
       }
@@ -1471,19 +1656,111 @@ class GossipRouter {
         final emoji = packet.payload['emoji'] as String? ?? '';
         final x25519Key = packet.payload['x'] as String? ?? '';
         final rid8 = packet.payload['r'] as String?;
-        final tags = (packet.payload['tags'] as List<dynamic>?)
-                ?.cast<String>() ??
-            const <String>[];
+        final tags =
+            (packet.payload['tags'] as List<dynamic>?)?.cast<String>() ??
+                const <String>[];
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_acc not addressed to us (directed pairing)
-        if (rid8 != null && myPublicKey != null &&
+        if (rid8 != null &&
+            myPublicKey != null &&
             !myPublicKey!.startsWith(rid8)) {
           debugPrint('[RLINK][Gossip] pair_acc not for us (r=$rid8), dropping');
           return;
         }
         if (publicKey != null && nick != null && color != null) {
-          debugPrint('[RLINK][Gossip] Pair accepted by $nick (${publicKey.substring(0, 8)})');
-          onPairAccepted?.call(bleId, publicKey, nick, username, color, emoji, x25519Key, tags);
+          debugPrint(
+              '[RLINK][Gossip] Pair accepted by $nick (${publicKey.substring(0, 8)})');
+          onPairAccepted?.call(
+              bleId, publicKey, nick, username, color, emoji, x25519Key, tags);
+        }
+        return;
+      }
+
+      if (packet.type == 'dev_link_req') {
+        final publicKey = packet.payload['id'] as String?;
+        final nick = packet.payload['nick'] as String?;
+        final username = packet.payload['u'] as String? ?? '';
+        final rid8 = packet.payload['r'] as String?;
+        final srcId = sourceId ?? publicKey ?? '';
+        if (rid8 != null &&
+            myPublicKey != null &&
+            !myPublicKey!.startsWith(rid8)) {
+          return;
+        }
+        if (publicKey != null && nick != null && nick.isNotEmpty) {
+          onDeviceLinkRequest?.call(srcId, publicKey, nick, username);
+        }
+        return;
+      }
+
+      if (packet.type == 'dev_link_ack') {
+        final publicKey = packet.payload['id'] as String?;
+        final nick = packet.payload['nick'] as String? ?? '';
+        final accepted = packet.payload['ok'] == true;
+        final rid8 = packet.payload['r'] as String?;
+        final srcId = sourceId ?? publicKey ?? '';
+        if (rid8 != null &&
+            myPublicKey != null &&
+            !myPublicKey!.startsWith(rid8)) {
+          return;
+        }
+        if (publicKey != null) {
+          onDeviceLinkAck?.call(srcId, publicKey, nick, accepted);
+        }
+        return;
+      }
+
+      if (packet.type == 'dev_unlink') {
+        final publicKey = packet.payload['id'] as String?;
+        final rid8 = packet.payload['r'] as String?;
+        final srcId = sourceId ?? publicKey ?? '';
+        if (rid8 != null &&
+            myPublicKey != null &&
+            !myPublicKey!.startsWith(rid8)) {
+          return;
+        }
+        if (publicKey != null) {
+          onDeviceUnlink?.call(srcId, publicKey);
+        }
+        return;
+      }
+
+      if (packet.type == 'dev_dm_sync_req') {
+        final publicKey = packet.payload['id'] as String?;
+        final rid8 = packet.payload['r'] as String?;
+        final srcId = sourceId ?? publicKey ?? '';
+        if (rid8 != null &&
+            myPublicKey != null &&
+            !myPublicKey!.startsWith(rid8)) {
+          return;
+        }
+        if (publicKey != null) {
+          onDeviceDmSyncRequest?.call(srcId, publicKey);
+        }
+        return;
+      }
+
+      if (packet.type == 'dev_dm_sync') {
+        final publicKey = packet.payload['id'] as String?;
+        final kind = packet.payload['k'] as String?;
+        final data = (packet.payload['d'] as Map?)?.cast<String, dynamic>() ??
+            const <String, dynamic>{};
+        final snapshot = packet.payload['snap'] == true;
+        final rid8 = packet.payload['r'] as String?;
+        final srcId = sourceId ?? publicKey ?? '';
+        if (rid8 != null &&
+            myPublicKey != null &&
+            !myPublicKey!.startsWith(rid8)) {
+          return;
+        }
+        if (publicKey != null && kind != null && kind.isNotEmpty) {
+          await onDeviceDmSyncPacket?.call(
+            srcId,
+            publicKey,
+            kind,
+            data,
+            snapshot,
+          );
         }
         return;
       }
@@ -1494,7 +1771,11 @@ class GossipRouter {
         final rid8 = packet.payload['r'] as String?;
         if (from == null || activity == null) return;
         // Filter by recipient prefix
-        if (rid8 != null && myPublicKey != null && !myPublicKey!.startsWith(rid8)) return;
+        if (rid8 != null &&
+            myPublicKey != null &&
+            !myPublicKey!.startsWith(rid8)) {
+          return;
+        }
         onTypingReceived?.call(from, activity);
         return;
       }
@@ -1503,12 +1784,19 @@ class GossipRouter {
         final msgId = packet.payload['msgId'] as String?;
         final index = packet.payload['idx'] as int?;
         final data = packet.payload['data'] as String?;
-        if (msgId == null || msgId.isEmpty || index == null || index < 0 ||
-            data == null || data.isEmpty) { return; }
+        if (msgId == null ||
+            msgId.isEmpty ||
+            index == null ||
+            index < 0 ||
+            data == null ||
+            data.isEmpty) {
+          return;
+        }
         // Filter chunks: if we received img_meta with rid8 for this msgId,
         // and it wasn't for us, skip the chunk too
         final storedRid8 = _imgMetaRid8[msgId];
-        if (storedRid8 != null && myPublicKey != null &&
+        if (storedRid8 != null &&
+            myPublicKey != null &&
             !myPublicKey!.startsWith(storedRid8)) {
           return; // chunk not for us
         }
@@ -1649,7 +1937,8 @@ class GossipRouter {
     if (onForwardPacket == null) return;
     final bytes = packet.encode();
     if (bytes.length > _kMaxPayloadBytes) {
-      debugPrint('[RLINK][Gossip] Packet too large (${bytes.length} bytes), dropping');
+      debugPrint(
+          '[RLINK][Gossip] Packet too large (${bytes.length} bytes), dropping');
       return;
     }
     try {
@@ -1754,6 +2043,7 @@ class GossipRouter {
     bool? isPublic,
     bool? driveBackup,
     int? driveBackupRev,
+    bool? allowModeratorsManageDriveAccount,
   }) async {
     // Скрытые каналы не рассылаются широковещательно — только прямые invite.
     if (isPublic == false) return;
@@ -1777,12 +2067,17 @@ class GossipRouter {
         if (moderatorIds != null) 'moderatorIds': moderatorIds,
         if (linkAdminIds != null) 'linkAdminIds': linkAdminIds,
         if (signStaffPosts != null) 'signStaffPosts': signStaffPosts,
-        if (staffLabels != null && staffLabels.isNotEmpty) 'staffLabels': staffLabels,
+        if (staffLabels != null && staffLabels.isNotEmpty)
+          'staffLabels': staffLabels,
         if (username != null && username.isNotEmpty) 'username': username,
-        if (universalCode != null && universalCode.isNotEmpty) 'universalCode': universalCode,
+        if (universalCode != null && universalCode.isNotEmpty)
+          'universalCode': universalCode,
         if (isPublic != null) 'isPublic': isPublic,
         if (driveBackup != null) 'driveBackup': driveBackup,
         if (driveBackupRev != null) 'driveBackupRev': driveBackupRev,
+        if (allowModeratorsManageDriveAccount != null)
+          'allowModeratorsManageDriveAccount':
+              allowModeratorsManageDriveAccount,
       },
     );
     await _forward(packet);
@@ -1887,7 +2182,8 @@ class GossipRouter {
         'authorId': authorId,
         if (text != null) 'text': text,
         if (timestamp != null) 'ts': timestamp,
-        if (reactionsJson != null && reactionsJson.isNotEmpty) 'rx': reactionsJson,
+        if (reactionsJson != null && reactionsJson.isNotEmpty)
+          'rx': reactionsJson,
         if (hasImage) 'img': true,
         if (hasVideo) 'vid': true,
         if (hasVoice) 'voice': true,
@@ -2039,7 +2335,8 @@ class GossipRouter {
         'authorId': authorId,
         'text': text,
         if (timestamp != null) 'ts': timestamp,
-        if (reactionsJson != null && reactionsJson.isNotEmpty) 'rx': reactionsJson,
+        if (reactionsJson != null && reactionsJson.isNotEmpty)
+          'rx': reactionsJson,
         if (hasImage) 'img': true,
         if (hasVideo) 'vid': true,
         if (hasVoice) 'voice': true,
@@ -2106,6 +2403,8 @@ class GossipRouter {
     required String text,
     required String messageId,
     int? timestamp,
+    double? latitude,
+    double? longitude,
     String? reactionsJson,
     bool hasImage = false,
     bool hasVideo = false,
@@ -2132,7 +2431,10 @@ class GossipRouter {
           'text': text,
           'messageId': messageId,
           if (timestamp != null) 'ts': timestamp,
-          if (reactionsJson != null && reactionsJson.isNotEmpty) 'rx': reactionsJson,
+          if (latitude != null) 'lat': latitude,
+          if (longitude != null) 'lng': longitude,
+          if (reactionsJson != null && reactionsJson.isNotEmpty)
+            'rx': reactionsJson,
           if (hasImage) 'img': true,
           if (hasVideo) 'vid': true,
           if (hasFile) 'file': true,
@@ -2351,7 +2653,8 @@ class GossipRouter {
       payload: {
         'channelId': channelId,
         'by': byAdmin,
-        if (universalCode != null && universalCode.isNotEmpty) 'uc': universalCode,
+        if (universalCode != null && universalCode.isNotEmpty)
+          'uc': universalCode,
       },
     );
     await _forward(packet);

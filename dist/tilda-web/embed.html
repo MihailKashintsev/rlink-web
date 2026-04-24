@@ -1,0 +1,20 @@
+<div id="rlink-tilda-root" style="width:100%;min-height:700px"></div>
+<script>
+  (function () {
+    var host = window.RLINK_WEB_BUNDLE_URL || '';
+    function createScript(src) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.defer = true;
+      document.body.appendChild(s);
+    }
+    if (!host) {
+      document.getElementById('rlink-tilda-root').innerHTML =
+        '<div style="padding:16px;border:1px solid #ddd;border-radius:10px;font-family:sans-serif">' +
+        'Set window.RLINK_WEB_BUNDLE_URL before embedding (path to Flutter web build folder).' +
+        '</div>';
+      return;
+    }
+    createScript(host.replace(/\/$/, '') + '/flutter_bootstrap.js');
+  })();
+</script>

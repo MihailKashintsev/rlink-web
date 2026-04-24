@@ -2,6 +2,9 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_highlight/flutter_highlight.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart' as hl_atom_dark;
+import 'package:flutter_highlight/themes/github.dart' as hl_github;
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -38,6 +41,131 @@ class _Hit {
   final String kind;
   final String raw;
   const _Hit(this.start, this.end, this.kind, this.raw);
+}
+
+class _TextSegment {
+  final String text;
+  const _TextSegment(this.text);
+}
+
+class _CodeFenceSegment {
+  final String code;
+  final String? languageHint;
+  const _CodeFenceSegment({
+    required this.code,
+    this.languageHint,
+  });
+}
+
+sealed class _RichSegment {
+  const _RichSegment();
+}
+
+class _RichTextSegment extends _RichSegment {
+  final _TextSegment value;
+  const _RichTextSegment(this.value);
+}
+
+class _RichCodeSegment extends _RichSegment {
+  final _CodeFenceSegment value;
+  const _RichCodeSegment(this.value);
+}
+
+List<_RichSegment> _splitCodeFenceSegments(String source) {
+  final segments = <_RichSegment>[];
+  final fenceRegex = RegExp(r'```([^\n`]*)\r?\n?([\s\S]*?)```');
+  var pos = 0;
+  for (final m in fenceRegex.allMatches(source)) {
+    if (m.start > pos) {
+      segments
+          .add(_RichTextSegment(_TextSegment(source.substring(pos, m.start))));
+    }
+    final rawLang = (m.group(1) ?? '').trim();
+    var code = m.group(2) ?? '';
+    if (code.endsWith('\r\n')) {
+      code = code.substring(0, code.length - 2);
+    } else if (code.endsWith('\n')) {
+      code = code.substring(0, code.length - 1);
+    }
+    segments.add(
+      _RichCodeSegment(
+        _CodeFenceSegment(
+          code: code,
+          languageHint: rawLang.isEmpty ? null : rawLang,
+        ),
+      ),
+    );
+    pos = m.end;
+  }
+  if (pos < source.length) {
+    segments.add(_RichTextSegment(_TextSegment(source.substring(pos))));
+  }
+  return segments;
+}
+
+String? _normalizeHighlightLanguage(String? raw) {
+  final l = raw?.trim().toLowerCase();
+  if (l == null || l.isEmpty) return null;
+  switch (l) {
+    case 'код':
+    case 'code':
+      return null;
+    case 'dart/flutter':
+      return 'dart';
+    case 'c/c++':
+    case 'c++':
+    case 'cpp':
+      return 'cpp';
+    case 'c#':
+    case 'cs':
+      return 'cs';
+    case 'js':
+    case 'javascript':
+      return 'javascript';
+    case 'ts':
+    case 'typescript':
+      return 'typescript';
+    case 'py':
+    case 'python':
+      return 'python';
+    case 'kt':
+    case 'kotlin':
+      return 'kotlin';
+    case 'golang':
+    case 'go':
+      return 'go';
+    case 'rs':
+    case 'rust':
+      return 'rust';
+    case 'html':
+    case 'xml':
+      return 'xml';
+    case 'sh':
+    case 'bash':
+    case 'zsh':
+    case 'shell':
+      return 'bash';
+    case 'yml':
+    case 'yaml':
+      return 'yaml';
+    case 'md':
+    case 'markdown':
+      return 'markdown';
+    default:
+      return l;
+  }
+}
+
+String _displayLanguageLabel(String? fenceLanguage, String code) {
+  final hinted = fenceLanguage?.trim();
+  if (hinted != null && hinted.isNotEmpty) return hinted;
+  return guessProgrammingLanguage(code);
+}
+
+String? _highlightLanguageForCode(String? fenceLanguage, String code) {
+  final fromFence = _normalizeHighlightLanguage(fenceLanguage);
+  if (fromFence != null) return fromFence;
+  return _normalizeHighlightLanguage(guessProgrammingLanguage(code));
 }
 
 List<_Hit> _collectInteractiveHits(String s) {
@@ -129,7 +257,8 @@ List<InlineSpan> _spansForPlain(
           child: Text(
             h.raw,
             style: baseStyle.copyWith(
-              color: isOut ? Colors.white.withValues(alpha: 0.95) : cs.secondary,
+              color:
+                  isOut ? Colors.white.withValues(alpha: 0.95) : cs.secondary,
               decoration: TextDecoration.underline,
               fontWeight: FontWeight.w500,
             ),
@@ -300,8 +429,10 @@ class RichMessageText extends StatelessWidget {
   final String text;
   final Color textColor;
   final bool isOut;
+
   /// Упоминания `&` + 64 hex ключа: показ как @лейбл, в [text] остаётся сырое значение.
   final String Function(String publicKeyHex)? mentionLabelFor;
+
   /// Тап по @упоминанию (например переход в личный чат).
   final void Function(String publicKeyHex)? onMentionTap;
 
@@ -315,8 +446,7 @@ class RichMessageText extends StatelessWidget {
   });
 
   static final _urlRegex = RegExp(r'https?://\S+');
-  static final _mdLinkRegex =
-      RegExp(r'\[([^\]]+)\]\((https?://[^\s)]+)\)');
+  static final _mdLinkRegex = RegExp(r'\[([^\]]+)\]\((https?://[^\s)]+)\)');
 
   // Combined regex — order matters: longer/more specific markers first.
   // group 1: **bold**, group 2: __underline__, group 3: ~~strike~~,
@@ -328,23 +458,67 @@ class RichMessageText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final urls = <String>{
-      ..._urlRegex.allMatches(text).map((m) => m.group(0)!),
-      ..._mdLinkRegex.allMatches(text).map((m) => m.group(2)!),
-    }.toList();
+    final segments = _splitCodeFenceSegments(text);
+    final urls = <String>{};
+    for (final seg in segments) {
+      if (seg is! _RichTextSegment) continue;
+      final raw = seg.value.text;
+      for (final m in _urlRegex.allMatches(raw)) {
+        urls.add(m.group(0)!);
+      }
+      for (final m in _mdLinkRegex.allMatches(raw)) {
+        urls.add(m.group(2)!);
+      }
+    }
     return Column(
       crossAxisAlignment:
           isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
-        _buildRichText(context),
+        ..._buildSegments(context, segments),
         ...urls.map((u) => LinkPreviewCard(url: u, isOut: isOut)),
       ],
     );
   }
 
-  Widget _buildRichText(BuildContext context) {
+  List<Widget> _buildSegments(
+    BuildContext context,
+    List<_RichSegment> segments,
+  ) {
+    final widgets = <Widget>[];
+    for (final seg in segments) {
+      switch (seg) {
+        case _RichTextSegment():
+          if (seg.value.text.isEmpty) continue;
+          widgets.add(_buildInlineRichText(context, seg.value.text));
+        case _RichCodeSegment():
+          widgets.add(
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: _CodeBlockView(
+                code: seg.value.code,
+                languageLabel: _displayLanguageLabel(
+                  seg.value.languageHint,
+                  seg.value.code,
+                ),
+                highlightLanguage: _highlightLanguageForCode(
+                  seg.value.languageHint,
+                  seg.value.code,
+                ),
+                isOut: isOut,
+              ),
+            ),
+          );
+      }
+    }
+    if (widgets.isEmpty) {
+      widgets.add(_buildInlineRichText(context, text));
+    }
+    return widgets;
+  }
+
+  Widget _buildInlineRichText(BuildContext context, String sourceText) {
     final cs = Theme.of(context).colorScheme;
-    final matches = _fmtRegex.allMatches(text).toList();
+    final matches = _fmtRegex.allMatches(sourceText).toList();
 
     TextStyle baseEmojiStyle() {
       var st = TextStyle(color: textColor, fontSize: 15);
@@ -376,8 +550,8 @@ class RichMessageText extends StatelessWidget {
       var pos = 0;
       for (final m in kChannelMentionToken.allMatches(s)) {
         if (m.start > pos) {
-          spans.addAll(
-              _spansForPlain(s.substring(pos, m.start), baseStyle, cs, isOut, context));
+          spans.addAll(_spansForPlain(
+              s.substring(pos, m.start), baseStyle, cs, isOut, context));
         }
         final hex = m.group(1)!;
         final label = resolver(hex);
@@ -401,13 +575,14 @@ class RichMessageText extends StatelessWidget {
         pos = m.end;
       }
       if (pos < s.length) {
-        spans.addAll(_spansForPlain(s.substring(pos), baseStyle, cs, isOut, context));
+        spans.addAll(
+            _spansForPlain(s.substring(pos), baseStyle, cs, isOut, context));
       }
     }
 
     if (matches.isEmpty) {
       final spans = <InlineSpan>[];
-      addPlainWithMentions(spans, text);
+      addPlainWithMentions(spans, sourceText);
       return RichText(text: TextSpan(children: spans));
     }
 
@@ -416,7 +591,7 @@ class RichMessageText extends StatelessWidget {
 
     for (final match in matches) {
       if (match.start > lastEnd) {
-        addPlainWithMentions(spans, text.substring(lastEnd, match.start));
+        addPlainWithMentions(spans, sourceText.substring(lastEnd, match.start));
       }
 
       final full = match.group(0)!;
@@ -516,8 +691,8 @@ class RichMessageText extends StatelessWidget {
       lastEnd = match.end;
     }
 
-    if (lastEnd < text.length) {
-      addPlainWithMentions(spans, text.substring(lastEnd));
+    if (lastEnd < sourceText.length) {
+      addPlainWithMentions(spans, sourceText.substring(lastEnd));
     }
 
     return RichText(text: TextSpan(children: spans));
@@ -591,6 +766,112 @@ class LinkPreviewCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _CodeBlockView extends StatelessWidget {
+  final String code;
+  final String languageLabel;
+  final String? highlightLanguage;
+  final bool isOut;
+
+  const _CodeBlockView({
+    required this.code,
+    required this.languageLabel,
+    required this.highlightLanguage,
+    required this.isOut,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDarkTheme = Theme.of(context).brightness == Brightness.dark;
+    final baseTheme =
+        isDarkTheme ? hl_atom_dark.atomOneDarkTheme : hl_github.githubTheme;
+    final theme = _stripHighlightBackgrounds(baseTheme);
+    final shellBg = isOut
+        ? Colors.black.withValues(alpha: 0.24)
+        : cs.surfaceContainerHighest.withValues(alpha: 0.85);
+    final lineColor = isOut
+        ? Colors.white.withValues(alpha: 0.2)
+        : cs.outline.withValues(alpha: 0.3);
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: shellBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: lineColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: lineColor),
+              ),
+            ),
+            child: Row(
+              children: [
+                Text(
+                  languageLabel,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: isOut ? Colors.white70 : cs.onSurfaceVariant,
+                  ),
+                ),
+                const Spacer(),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 18,
+                  tooltip: AppL10n.t('link_code_copy_title'),
+                  icon: Icon(
+                    Icons.copy_rounded,
+                    color: isOut ? Colors.white70 : cs.onSurfaceVariant,
+                  ),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: code));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(AppL10n.t('link_code_snackbar_copied')),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            child: HighlightView(
+              code.isEmpty ? ' ' : code,
+              language: highlightLanguage,
+              theme: theme,
+              textStyle: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 13.5,
+                height: 1.35,
+                color: isOut ? Colors.white : cs.onSurface,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Map<String, TextStyle> _stripHighlightBackgrounds(
+  Map<String, TextStyle> source,
+) {
+  final out = <String, TextStyle>{};
+  source.forEach((key, style) {
+    out[key] = style.copyWith(backgroundColor: Colors.transparent);
+  });
+  return out;
 }
 
 class _SpoilerText extends StatefulWidget {

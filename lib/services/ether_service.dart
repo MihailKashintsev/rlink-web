@@ -96,6 +96,11 @@ class EtherBroadcastOptions extends ChangeNotifier {
 
   bool anonymous = true;
   bool attachGeo = false;
+  double? customLatitude;
+  double? customLongitude;
+
+  bool get hasCustomLocation =>
+      customLatitude != null && customLongitude != null;
 
   void setAnonymous(bool v) {
     if (anonymous == v) return;
@@ -106,6 +111,22 @@ class EtherBroadcastOptions extends ChangeNotifier {
   void setAttachGeo(bool v) {
     if (attachGeo == v) return;
     attachGeo = v;
+    notifyListeners();
+  }
+
+  void setCustomLocation({
+    required double latitude,
+    required double longitude,
+  }) {
+    customLatitude = latitude;
+    customLongitude = longitude;
+    notifyListeners();
+  }
+
+  void clearCustomLocation() {
+    if (customLatitude == null && customLongitude == null) return;
+    customLatitude = null;
+    customLongitude = null;
     notifyListeners();
   }
 }

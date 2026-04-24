@@ -75,7 +75,7 @@ class GroupService {
     final path = p.join(dir.path, 'groups.db');
     _db = await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE groups (
@@ -99,6 +99,8 @@ class GroupService {
             image_path TEXT,
             video_path TEXT,
             voice_path TEXT,
+            latitude REAL,
+            longitude REAL,
             is_outgoing INTEGER DEFAULT 0,
             timestamp INTEGER NOT NULL,
             reactions TEXT,
@@ -119,13 +121,16 @@ class GroupService {
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
-          await db.execute("ALTER TABLE groups ADD COLUMN moderators TEXT DEFAULT ''");
+          await db.execute(
+              "ALTER TABLE groups ADD COLUMN moderators TEXT DEFAULT ''");
         }
         if (oldVersion < 3) {
-          await db.execute('ALTER TABLE group_messages ADD COLUMN reactions TEXT');
+          await db
+              .execute('ALTER TABLE group_messages ADD COLUMN reactions TEXT');
         }
         if (oldVersion < 4) {
-          await db.execute('ALTER TABLE group_messages ADD COLUMN poll_json TEXT');
+          await db
+              .execute('ALTER TABLE group_messages ADD COLUMN poll_json TEXT');
         }
         if (oldVersion < 5) {
           try {
@@ -146,6 +151,16 @@ class GroupService {
             )
           ''');
           await _backfillGroupReadCursors(db);
+        }
+        if (oldVersion < 7) {
+          try {
+            await db
+                .execute('ALTER TABLE group_messages ADD COLUMN latitude REAL');
+          } catch (_) {}
+          try {
+            await db.execute(
+                'ALTER TABLE group_messages ADD COLUMN longitude REAL');
+          } catch (_) {}
         }
       },
     );
@@ -192,8 +207,14 @@ class GroupService {
               id: r['id'] as String,
               name: r['name'] as String,
               creatorId: r['creator_id'] as String,
-              memberIds: (r['members'] as String).split(',').where((s) => s.isNotEmpty).toList(),
-              moderatorIds: ((r['moderators'] as String?) ?? '').split(',').where((s) => s.isNotEmpty).toList(),
+              memberIds: (r['members'] as String)
+                  .split(',')
+                  .where((s) => s.isNotEmpty)
+                  .toList(),
+              moderatorIds: ((r['moderators'] as String?) ?? '')
+                  .split(',')
+                  .where((s) => s.isNotEmpty)
+                  .toList(),
               avatarColor: r['avatar_color'] as int? ?? 0xFF5C6BC0,
               avatarEmoji: r['avatar_emoji'] as String? ?? '👥',
               avatarImagePath: r['avatar_img_path'] as String?,
@@ -216,8 +237,14 @@ class GroupService {
       id: r['id'] as String,
       name: r['name'] as String,
       creatorId: r['creator_id'] as String,
-      memberIds: (r['members'] as String).split(',').where((s) => s.isNotEmpty).toList(),
-      moderatorIds: ((r['moderators'] as String?) ?? '').split(',').where((s) => s.isNotEmpty).toList(),
+      memberIds: (r['members'] as String)
+          .split(',')
+          .where((s) => s.isNotEmpty)
+          .toList(),
+      moderatorIds: ((r['moderators'] as String?) ?? '')
+          .split(',')
+          .where((s) => s.isNotEmpty)
+          .toList(),
       avatarColor: r['avatar_color'] as int? ?? 0xFF5C6BC0,
       avatarEmoji: r['avatar_emoji'] as String? ?? '👥',
       avatarImagePath: r['avatar_img_path'] as String?,
@@ -331,8 +358,8 @@ class GroupService {
           [gid],
         );
       } else {
-        await _db!.delete('group_messages',
-            where: 'group_id = ?', whereArgs: [gid]);
+        await _db!
+            .delete('group_messages', where: 'group_id = ?', whereArgs: [gid]);
         await _db!.delete('group_read_cursor',
             where: 'group_id = ?', whereArgs: [gid]);
       }
@@ -342,8 +369,8 @@ class GroupService {
 
   Future<void> leaveGroup(String groupId) async {
     await _db!.delete('groups', where: 'id = ?', whereArgs: [groupId]);
-    await _db!.delete('group_messages',
-        where: 'group_id = ?', whereArgs: [groupId]);
+    await _db!
+        .delete('group_messages', where: 'group_id = ?', whereArgs: [groupId]);
     await _db!.delete('group_read_cursor',
         where: 'group_id = ?', whereArgs: [groupId]);
     _bump();
@@ -415,6 +442,8 @@ class GroupService {
       imagePath: msg.imagePath,
       videoPath: msg.videoPath,
       voicePath: msg.voicePath,
+      latitude: msg.latitude,
+      longitude: msg.longitude,
       isOutgoing: msg.isOutgoing,
       timestamp: msg.timestamp,
       reactions: updated,

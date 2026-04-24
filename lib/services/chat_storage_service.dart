@@ -24,8 +24,7 @@ Future<void> _backfillDmReadCursors(Database db) async {
       'ORDER BY id DESC LIMIT 1',
       [pid, mt],
     );
-    final mid =
-        idRows.isNotEmpty ? (idRows.first['id'] as String?) ?? '' : '';
+    final mid = idRows.isNotEmpty ? (idRows.first['id'] as String?) ?? '' : '';
     await db.insert(
       'conversation_read_cursor',
       {
@@ -52,6 +51,8 @@ class ChatStorageService {
   static final ChatStorageService instance = ChatStorageService._();
 
   Database? _db;
+  final _messageSavedController = StreamController<ChatMessage>.broadcast();
+  Stream<ChatMessage> get messageSavedStream => _messageSavedController.stream;
 
   /// Bumps when DM read cursors change — chat list refreshes unread badges.
   final readStateVersion = ValueNotifier<int>(0);
@@ -84,7 +85,9 @@ class ChatStorageService {
       path,
       version: 20,
       onCreate: (db, v) async {
-        try { await db.rawQuery('PRAGMA journal_mode = WAL'); } catch (_) {}
+        try {
+          await db.rawQuery('PRAGMA journal_mode = WAL');
+        } catch (_) {}
         await db.execute('''
           CREATE TABLE contacts (
             id                TEXT PRIMARY KEY,
@@ -162,7 +165,9 @@ class ChatStorageService {
         ''');
       },
       onOpen: (db) async {
-        try { await db.rawQuery('PRAGMA journal_mode = WAL'); } catch (_) {}
+        try {
+          await db.rawQuery('PRAGMA journal_mode = WAL');
+        } catch (_) {}
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -221,7 +226,8 @@ class ChatStorageService {
             await db.execute('ALTER TABLE messages ADD COLUMN file_name TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE messages ADD COLUMN file_size INTEGER');
+            await db
+                .execute('ALTER TABLE messages ADD COLUMN file_size INTEGER');
           } catch (_) {}
         }
         if (oldVersion < 9) {
@@ -234,7 +240,8 @@ class ChatStorageService {
             await db.execute('ALTER TABLE contacts ADD COLUMN tags TEXT');
           } catch (_) {}
           try {
-            await db.execute('ALTER TABLE contacts ADD COLUMN banner_img_path TEXT');
+            await db.execute(
+                'ALTER TABLE contacts ADD COLUMN banner_img_path TEXT');
           } catch (_) {}
         }
         if (oldVersion < 11) {
@@ -289,7 +296,7 @@ class ChatStorageService {
         if (oldVersion < 15) {
           try {
             await db.execute(
-                'ALTER TABLE contacts ADD COLUMN profile_music_path TEXT',
+              'ALTER TABLE contacts ADD COLUMN profile_music_path TEXT',
             );
           } catch (_) {}
         }
@@ -305,8 +312,8 @@ class ChatStorageService {
         }
         if (oldVersion < 17) {
           try {
-            await db.execute(
-                'ALTER TABLE contacts ADD COLUMN status_emoji TEXT');
+            await db
+                .execute('ALTER TABLE contacts ADD COLUMN status_emoji TEXT');
           } catch (_) {}
         }
         if (oldVersion < 18) {
@@ -317,8 +324,8 @@ class ChatStorageService {
         }
         if (oldVersion < 19) {
           try {
-            await db.execute(
-                'ALTER TABLE messages ADD COLUMN invite_payload TEXT');
+            await db
+                .execute('ALTER TABLE messages ADD COLUMN invite_payload TEXT');
           } catch (_) {}
         }
         if (oldVersion < 20) {
@@ -449,6 +456,7 @@ class ChatStorageService {
     await _db?.insert('messages', message.toMap(),
         conflictAlgorithm: ConflictAlgorithm.replace);
     _notifyMessages(message.peerId);
+    _messageSavedController.add(message);
   }
 
   Future<void> editMessage(String messageId, String newText) async {
@@ -716,7 +724,8 @@ class ChatStorageService {
   }
 
   Future<void> deleteChat(String peerId) async {
-    await _db?.delete('dm_chat_pins', where: 'peer_id = ?', whereArgs: [peerId]);
+    await _db
+        ?.delete('dm_chat_pins', where: 'peer_id = ?', whereArgs: [peerId]);
     await _db?.delete('messages', where: 'peer_id = ?', whereArgs: [peerId]);
     await _db?.delete('conversation_read_cursor',
         where: 'conv_key = ?', whereArgs: ['dm:$peerId']);
@@ -771,8 +780,8 @@ class ChatStorageService {
           [pid],
         );
       } else {
-        await _db!.delete('dm_chat_pins',
-            where: 'peer_id = ?', whereArgs: [pid]);
+        await _db!
+            .delete('dm_chat_pins', where: 'peer_id = ?', whereArgs: [pid]);
         await _db!.delete('messages', where: 'peer_id = ?', whereArgs: [pid]);
         await _db!.delete('conversation_read_cursor',
             where: 'conv_key = ?', whereArgs: ['dm:$pid']);
@@ -853,18 +862,21 @@ class ChatStorageService {
       ORDER BY m.timestamp DESC
     ''') ?? [];
     final resolve = ImageService.instance.resolveStoredPath;
-    return rows.map((r) => ChatSummary(
-      peerId: r['peer_id'] as String,
-      lastText: (r['text'] as String?) ?? '',
-      lastImagePath: resolve(r['image_path'] as String?),
-      lastVoicePath: resolve(r['voice_path'] as String?),
-      lastVideoPath: resolve(r['video_path'] as String?),
-      timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
-      nickname: r['nick'] as String?,
-      avatarColor: r['color'] as int?,
-      avatarEmoji: r['emoji'] as String?,
-      avatarImagePath: resolve(r['avatar_img_path'] as String?),
-    )).toList();
+    return rows
+        .map((r) => ChatSummary(
+              peerId: r['peer_id'] as String,
+              lastText: (r['text'] as String?) ?? '',
+              lastImagePath: resolve(r['image_path'] as String?),
+              lastVoicePath: resolve(r['voice_path'] as String?),
+              lastVideoPath: resolve(r['video_path'] as String?),
+              timestamp:
+                  DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
+              nickname: r['nick'] as String?,
+              avatarColor: r['color'] as int?,
+              avatarEmoji: r['emoji'] as String?,
+              avatarImagePath: resolve(r['avatar_img_path'] as String?),
+            ))
+        .toList();
   }
 
   /// Per-peer count of incoming DM messages after the read cursor.
@@ -1005,7 +1017,8 @@ class ChatStorageService {
     pinsVersion.value++;
   }
 
-  Future<void> toggleReaction(String messageId, String emoji, String fromId) async {
+  Future<void> toggleReaction(
+      String messageId, String emoji, String fromId) async {
     final rows = await _db?.query(
       'messages',
       where: 'id = ?',

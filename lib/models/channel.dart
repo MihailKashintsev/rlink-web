@@ -10,10 +10,12 @@ class Channel {
   final String name;
   final String adminId; // publicKeyHex единственного админа
   final List<String> subscriberIds; // подписчики
-  final List<String> moderatorIds; // модераторы (могут публиковать посты и управлять контентом)
+  final List<String>
+      moderatorIds; // модераторы (могут публиковать посты и управлять контентом)
   final int avatarColor;
   final String avatarEmoji;
   final String? avatarImagePath;
+
   /// Баннер «профиля» канала (локальный путь; по сети передаётся отдельным img-потоком).
   final String? bannerImagePath;
   final String? description;
@@ -22,20 +24,30 @@ class Channel {
   final bool verified; // канал верифицирован
   final String? verifiedBy; // кто верифицировал: 'auto' или publicKey админа
   final bool foreignAgent; // помечен как ИНОАГЕНТ
-  final bool blocked;      // заблокирован админом сети
-  final String username;       // уникальный юзернейм канала (как у пользователей)
-  final String universalCode;  // публичный «универсальный код» канала, пригодный для поиска
-  final bool isPublic;         // true = найдётся в поиске; false = скрытый (only admin-invited)
+  final bool blocked; // заблокирован админом сети
+  final String username; // уникальный юзернейм канала (как у пользователей)
+  final String
+      universalCode; // публичный «универсальный код» канала, пригодный для поиска
+  final bool
+      isPublic; // true = найдётся в поиске; false = скрытый (only admin-invited)
   /// Резерв истории: шифрованный снимок в сети и опционально в Google Drive (настраивает админ).
   final bool driveBackupEnabled;
+
   /// Номер последнего опубликованного снимка (для подписчиков — из channel_meta).
   final int driveBackupRev;
+
   /// Id файла на Google Drive у админа (локально, в gossip не передаётся).
   final String? driveFileId;
+
+  /// Разрешить модераторам перепривязывать Google-аккаунт резерва в общих настройках.
+  final bool allowModeratorsManageDriveAccount;
+
   /// Админы «ссылок» — могут публиковать наравне с модераторами (роль для делегирования).
   final List<String> linkAdminIds;
+
   /// Показывать подпись к посту для перечисленных в [staffLabels] авторов.
   final bool signStaffPosts;
+
   /// Подпись по публичному ключу автора поста (если включено).
   final Map<String, String> staffLabels;
 
@@ -65,6 +77,7 @@ class Channel {
     this.driveBackupEnabled = false,
     this.driveBackupRev = 0,
     this.driveFileId,
+    this.allowModeratorsManageDriveAccount = false,
   });
 
   bool get isAdmin => false; // checked externally via adminId
@@ -109,6 +122,7 @@ class Channel {
         'pub': isPublic,
         if (driveBackupEnabled) 'drv': true,
         if (driveBackupRev > 0) 'drvRev': driveBackupRev,
+        if (allowModeratorsManageDriveAccount) 'drvMods': true,
       };
 
   factory Channel.fromJson(Map<String, dynamic> j) => Channel(
@@ -116,12 +130,10 @@ class Channel {
         name: j['name'] as String,
         adminId: j['admin'] as String,
         subscriberIds: (j['subs'] as List).cast<String>(),
-        moderatorIds: j['mods'] != null
-            ? (j['mods'] as List).cast<String>()
-            : const [],
-        linkAdminIds: j['links'] != null
-            ? (j['links'] as List).cast<String>()
-            : const [],
+        moderatorIds:
+            j['mods'] != null ? (j['mods'] as List).cast<String>() : const [],
+        linkAdminIds:
+            j['links'] != null ? (j['links'] as List).cast<String>() : const [],
         signStaffPosts: j['signStaff'] == true,
         staffLabels: j['slb'] is Map
             ? (j['slb'] as Map).map(
@@ -145,6 +157,7 @@ class Channel {
         driveBackupEnabled: j['drv'] == true,
         driveBackupRev: (j['drvRev'] as num?)?.toInt() ?? 0,
         driveFileId: j['drvFid'] as String?,
+        allowModeratorsManageDriveAccount: j['drvMods'] == true,
       );
 
   String encode() => jsonEncode(toJson());
@@ -181,6 +194,7 @@ class Channel {
     bool? driveBackupEnabled,
     int? driveBackupRev,
     String? driveFileId,
+    bool? allowModeratorsManageDriveAccount,
   }) =>
       Channel(
         id: id,
@@ -208,6 +222,8 @@ class Channel {
         driveBackupEnabled: driveBackupEnabled ?? this.driveBackupEnabled,
         driveBackupRev: driveBackupRev ?? this.driveBackupRev,
         driveFileId: driveFileId ?? this.driveFileId,
+        allowModeratorsManageDriveAccount: allowModeratorsManageDriveAccount ??
+            this.allowModeratorsManageDriveAccount,
       );
 }
 
@@ -227,12 +243,16 @@ class ChannelPost {
   final List<ChannelComment> comments;
   final Map<String, List<String>> reactions;
   final String? pollJson;
+
   /// Уникальные просмотры (по публичному ключу зрителя), синхронизируются через gossip.
   final int viewCount;
+
   /// Локальный счётчик пересылок поста из канала.
   final int forwardCount;
+
   /// Подпись автора (при включённой опции канала).
   final String? staffLabel;
+
   /// Стикер (компактное отображение; по сети флаг `stk` + файл `stk_*.jpg`).
   final bool isSticker;
 
@@ -464,6 +484,7 @@ extension ChannelGossipBroadcast on Channel {
       isPublic: isPublic,
       driveBackup: driveBackupEnabled,
       driveBackupRev: driveBackupRev,
+      allowModeratorsManageDriveAccount: allowModeratorsManageDriveAccount,
     );
     await ChannelDirectoryRelay.publishIfAdmin(this);
   }

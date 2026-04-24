@@ -6,7 +6,8 @@ class Group {
   final String name;
   final String creatorId; // publicKeyHex создателя
   final List<String> memberIds; // publicKeyHex всех участников
-  final List<String> moderatorIds; // publicKeyHex модераторов (могут всё, кроме удаления группы)
+  final List<String>
+      moderatorIds; // publicKeyHex модераторов (могут всё, кроме удаления группы)
   final int avatarColor;
   final String avatarEmoji;
   final String? avatarImagePath;
@@ -25,7 +26,8 @@ class Group {
   });
 
   /// Returns true if [userId] is an admin (creator) or moderator.
-  bool canModerate(String userId) => userId == creatorId || moderatorIds.contains(userId);
+  bool canModerate(String userId) =>
+      userId == creatorId || moderatorIds.contains(userId);
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -44,9 +46,8 @@ class Group {
         name: j['name'] as String,
         creatorId: j['creator'] as String,
         memberIds: (j['members'] as List).cast<String>(),
-        moderatorIds: j['mods'] != null
-            ? (j['mods'] as List).cast<String>()
-            : const [],
+        moderatorIds:
+            j['mods'] != null ? (j['mods'] as List).cast<String>() : const [],
         avatarColor: j['color'] as int? ?? 0xFF5C6BC0,
         avatarEmoji: j['emoji'] as String? ?? '👥',
         avatarImagePath: j['img'] as String?,
@@ -93,6 +94,8 @@ class GroupMessage {
   final String? imagePath;
   final String? videoPath;
   final String? voicePath;
+  final double? latitude;
+  final double? longitude;
   final bool isOutgoing;
   final int timestamp;
   final Map<String, List<String>> reactions;
@@ -108,6 +111,8 @@ class GroupMessage {
     this.imagePath,
     this.videoPath,
     this.voicePath,
+    this.latitude,
+    this.longitude,
     required this.isOutgoing,
     required this.timestamp,
     this.reactions = const {},
@@ -132,6 +137,8 @@ class GroupMessage {
         'image_path': imagePath,
         'video_path': videoPath,
         'voice_path': voicePath,
+        'latitude': latitude,
+        'longitude': longitude,
         'is_outgoing': isOutgoing ? 1 : 0,
         'timestamp': timestamp,
         'reactions': reactions.isEmpty ? null : jsonEncode(reactions),
@@ -158,6 +165,8 @@ class GroupMessage {
       imagePath: m['image_path'] as String?,
       videoPath: m['video_path'] as String?,
       voicePath: m['voice_path'] as String?,
+      latitude: (m['latitude'] as num?)?.toDouble(),
+      longitude: (m['longitude'] as num?)?.toDouble(),
       isOutgoing: (m['is_outgoing'] as int) == 1,
       timestamp: m['timestamp'] as int,
       reactions: reactions,

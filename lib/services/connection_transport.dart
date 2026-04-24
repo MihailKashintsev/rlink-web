@@ -1,8 +1,8 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'app_settings.dart';
 import 'ble_service.dart';
+import 'platform_capabilities.dart';
 import 'profile_service.dart';
 import 'relay_service.dart';
 import 'wifi_direct_service.dart';
@@ -20,7 +20,7 @@ Future<void> applyConnectionTransport() async {
     await BleService.instance.stop();
   }
 
-  if (Platform.isAndroid && mode == 2) {
+  if (PlatformCapabilities.instance.supportsWifiDirect && mode == 2) {
     final p = ProfileService.instance.profile;
     await WifiDirectService.instance.start(userName: p?.nickname ?? 'Rlink');
   } else {
