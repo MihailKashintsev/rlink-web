@@ -274,6 +274,7 @@
 <script>
 (function () {
   var DOWNLOAD_PAGE = 'https://rendergames.online/rlink';
+  var WEB_APP_PAGE = 'https://rendergames.online/rlink_web';
 
   function parseChannelId() {
     var u = window.location;
@@ -294,11 +295,17 @@
 
   var id = parseChannelId();
   var deep = id ? 'rlink://channel/' + encodeURIComponent(id) : '';
+  var web = id ? (WEB_APP_PAGE + '?channel=' + encodeURIComponent(id)) : WEB_APP_PAGE;
 
   var elErr = document.getElementById('rlink-ch-err');
   var elId = document.getElementById('rlink-ch-id-line');
   var elOpen = document.getElementById('rlink-ch-open');
   var elDl = document.getElementById('rlink-ch-download');
+  var webBtn = document.createElement('a');
+  webBtn.className = 'btn btn-secondary';
+  webBtn.textContent = 'Открыть в веб-версии';
+  webBtn.target = '_self';
+  webBtn.rel = 'noopener';
   if (elDl) elDl.href = DOWNLOAD_PAGE;
 
   if (!id) {
@@ -310,6 +317,10 @@
 
   elId.textContent = 'ID: ' + id;
   elId.hidden = false;
+  webBtn.href = web;
+  if (elDl && elDl.parentNode) {
+    elDl.parentNode.insertBefore(webBtn, elDl);
+  }
 
   function openApp() {
     window.location.href = deep;

@@ -23,7 +23,9 @@
 
     var iframe = document.createElement("iframe");
     var ver = window.RLINK_WEB_VERSION || String(Date.now());
-    iframe.src = appUrl + "/index.html?v=" + encodeURIComponent(ver);
+    var params = new URLSearchParams(window.location.search || "");
+    params.set("v", String(ver));
+    iframe.src = appUrl + "/index.html?" + params.toString();
     iframe.style.width = "100%";
     iframe.style.display = "block";
     iframe.style.border = "0";

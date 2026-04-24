@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'app_settings.dart';
+import 'web_notification_bridge.dart';
 
 /// Единая служба локальных уведомлений.
 ///
@@ -71,6 +72,10 @@ class NotificationService {
 
   /// Запрашивает разрешения на уведомления (iOS/Android 13+/macOS).
   Future<void> requestPermissions() async {
+    if (kIsWeb) {
+      await requestWebNotificationPermission();
+      return;
+    }
     try {
       final iosImpl = _plugin.resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin>();
@@ -167,6 +172,14 @@ class NotificationService {
     required String payload,
     String? threadIdentifier,
   }) async {
+    if (kIsWeb) {
+      await showWebNotification(
+        title: title,
+        body: body,
+        tag: threadIdentifier ?? payload,
+      );
+      return;
+    }
     if (!_initialised) await init();
     try {
       final androidDetails = AndroidNotificationDetails(

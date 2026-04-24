@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:app_links/app_links.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../ui/screens/channels_screen.dart';
@@ -20,11 +21,14 @@ class RlinkDeepLinkService {
   /// Вызывать после инициализации сервисов; [key] — [MaterialApp.navigatorKey].
   Future<void> start(GlobalKey<NavigatorState> key) async {
     _navigatorKey = key;
-    if (_sub == null) {
-      _sub = _appLinks.uriLinkStream.listen(_handle, onError: (e) {
-        debugPrint('[DeepLink] stream: $e');
-      });
+    if (kIsWeb) {
+      // Web entry links come as query params in the current page URL.
+      _handle(Uri.base);
+      return;
     }
+    _sub ??= _appLinks.uriLinkStream.listen(_handle, onError: (e) {
+      debugPrint('[DeepLink] stream: $e');
+    });
     if (!_initialLinkConsumed) {
       _initialLinkConsumed = true;
       try {
