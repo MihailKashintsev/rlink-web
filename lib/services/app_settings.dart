@@ -263,7 +263,7 @@ class AppSettings extends ChangeNotifier {
       await _prefs.remove(_keyLinkedDevicePublicKey);
       await _prefs.remove(_keyLinkedDeviceNickname);
     }
-    if (isDeviceLinked) {
+    if (RuntimePlatform.isWeb || isDeviceLinked) {
       // Linked devices work only through relay.
       _relayEnabled = true;
     }
@@ -448,7 +448,7 @@ class AppSettings extends ChangeNotifier {
   }
 
   Future<void> setRelayEnabled(bool value) async {
-    _relayEnabled = isDeviceLinked ? true : value;
+    _relayEnabled = (RuntimePlatform.isWeb || isDeviceLinked) ? true : value;
     await _prefs.setBool(_keyRelayEnabled, _relayEnabled);
     notifyListeners();
   }
@@ -460,7 +460,8 @@ class AppSettings extends ChangeNotifier {
   }
 
   Future<void> setConnectionMode(int mode) async {
-    _connectionMode = isDeviceLinked ? 1 : mode.clamp(0, 2);
+    _connectionMode =
+        (RuntimePlatform.isWeb || isDeviceLinked) ? 1 : mode.clamp(0, 2);
     // Sync relayEnabled based on connection mode
     _relayEnabled = _connectionMode >= 1; // Internet or Both
     await _prefs.setInt(_keyConnectionMode, _connectionMode);

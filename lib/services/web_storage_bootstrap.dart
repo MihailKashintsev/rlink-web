@@ -1,9 +1,9 @@
 import 'package:flutter/foundation.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 
-/// Placeholder for browser storage bootstrap.
-///
-/// Existing services already persist via shared_preferences/secure storage on web.
-/// Dedicated IndexedDB SQL backend will be wired incrementally behind adapters.
+/// Initializes IndexedDB-backed SQLite factory on web.
 Future<void> initWebStorageIfNeeded() async {
   if (!kIsWeb) return;
+  databaseFactory = databaseFactoryFfiWeb;
 }

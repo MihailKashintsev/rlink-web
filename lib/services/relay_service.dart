@@ -248,7 +248,9 @@ class RelayService {
   void _scheduleReconnect() {
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(const Duration(seconds: 5), () {
-      if (!_disposed && !_intentionalClose && AppSettings.instance.relayEnabled) {
+      if (!_disposed &&
+          !_intentionalClose &&
+          AppSettings.instance.connectionMode >= 1) {
         connect();
       }
     });

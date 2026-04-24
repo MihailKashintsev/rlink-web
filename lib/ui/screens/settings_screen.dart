@@ -754,29 +754,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(children: [
-              _NetChip(
-                icon: Icons.bluetooth,
-                label: 'BLE',
-                selected: settings.connectionMode == 0,
-                onTap: () => _setConnectionModeGuarded(0),
-              ),
-              const SizedBox(width: 8),
-              _NetChip(
-                icon: Icons.wifi,
-                label: AppL10n.t('net_label_internet'),
-                selected: settings.connectionMode == 1,
-                onTap: () => _setConnectionModeGuarded(1),
-              ),
-              const SizedBox(width: 8),
-              _NetChip(
-                icon: Icons.sync_alt_rounded,
-                label: AppL10n.t('net_label_both'),
-                selected: settings.connectionMode == 2,
-                onTap: () => _setConnectionModeGuarded(2),
-              ),
-            ]),
+            child: RuntimePlatform.isWeb
+                ? Row(
+                    children: [
+                      _NetChip(
+                        icon: Icons.wifi,
+                        label: AppL10n.t('net_label_internet'),
+                        selected: true,
+                        onTap: () => _setConnectionModeGuarded(1),
+                      ),
+                    ],
+                  )
+                : Row(children: [
+                    _NetChip(
+                      icon: Icons.bluetooth,
+                      label: 'BLE',
+                      selected: settings.connectionMode == 0,
+                      onTap: () => _setConnectionModeGuarded(0),
+                    ),
+                    const SizedBox(width: 8),
+                    _NetChip(
+                      icon: Icons.wifi,
+                      label: AppL10n.t('net_label_internet'),
+                      selected: settings.connectionMode == 1,
+                      onTap: () => _setConnectionModeGuarded(1),
+                    ),
+                    const SizedBox(width: 8),
+                    _NetChip(
+                      icon: Icons.sync_alt_rounded,
+                      label: AppL10n.t('net_label_both'),
+                      selected: settings.connectionMode == 2,
+                      onTap: () => _setConnectionModeGuarded(2),
+                    ),
+                  ]),
           ),
+          if (RuntimePlatform.isWeb)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              child: Text(
+                'В web-версии доступен только интернет-режим.',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ),
           if (settings.isDeviceLinked)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
@@ -1042,6 +1061,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _setConnectionModeGuarded(int mode) async {
     final settings = AppSettings.instance;
+    if (RuntimePlatform.isWeb && mode != 1) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('В web-версии доступен только интернет-режим'),
+        ),
+      );
+      return;
+    }
     if (settings.isDeviceLinked) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

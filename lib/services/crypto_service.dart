@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'runtime_platform.dart';
+import 'web_state_store.dart';
 
 /// Хранит Ed25519 keypair пользователя (его "аккаунт") и отдельный X25519
 /// keypair для ECDH шифрования сообщений.
@@ -34,12 +35,19 @@ class CryptoService {
   );
 
   Future<String?> _read(String key) async {
+    if (RuntimePlatform.isWeb) {
+      final web = readWebState(key);
+      if (web != null && web.isNotEmpty) return web;
+    }
     if (_isMobile) return _secureSt.read(key: key);
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(key);
   }
 
   Future<void> _write(String key, String value) async {
+    if (RuntimePlatform.isWeb) {
+      await writeWebState(key, value);
+    }
     if (_isMobile) {
       await _secureSt.write(key: key, value: value);
     } else {

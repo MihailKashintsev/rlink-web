@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/user_profile.dart';
 import 'crypto_service.dart';
 import 'runtime_platform.dart';
+import 'web_state_store.dart';
 
 class ProfileService {
   ProfileService._();
@@ -24,12 +25,19 @@ class ProfileService {
   );
 
   Future<String?> _read() async {
+    if (RuntimePlatform.isWeb) {
+      final web = readWebState(_kProfileKey);
+      if (web != null && web.isNotEmpty) return web;
+    }
     if (_isMobile) return _secureSt.read(key: _kProfileKey);
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_kProfileKey);
   }
 
   Future<void> _write(String value) async {
+    if (RuntimePlatform.isWeb) {
+      await writeWebState(_kProfileKey, value);
+    }
     if (_isMobile) {
       await _secureSt.write(key: _kProfileKey, value: value);
     } else {

@@ -2,7 +2,10 @@
 <script>
   (function () {
     var appUrl = (window.RLINK_WEB_APP_URL || "").replace(/\/$/, "");
-    var height = Number(window.RLINK_WEB_HEIGHT || 820);
+    var manualHeight = Number(window.RLINK_WEB_HEIGHT || 0);
+    var minHeight = Number(window.RLINK_WEB_MIN_HEIGHT || 560);
+    var maxHeight = Number(window.RLINK_WEB_MAX_HEIGHT || 980);
+    var viewportOffset = Number(window.RLINK_WEB_VIEWPORT_OFFSET || 120);
     var wrap = document.getElementById("rlink-tilda-app-wrap");
 
     if (!appUrl) {
@@ -16,12 +19,35 @@
     var iframe = document.createElement("iframe");
     iframe.src = appUrl + "/index.html";
     iframe.style.width = "100%";
-    iframe.style.height = height + "px";
+    iframe.style.display = "block";
     iframe.style.border = "0";
     iframe.style.borderRadius = "14px";
     iframe.style.background = "#0B0F1A";
     iframe.loading = "lazy";
     iframe.allow = "camera; microphone; geolocation; clipboard-read; clipboard-write";
     wrap.appendChild(iframe);
+
+    function clamp(v, lo, hi) {
+      return Math.max(lo, Math.min(hi, v));
+    }
+
+    function applyAutoHeight() {
+      if (manualHeight > 0) {
+        iframe.style.height = manualHeight + "px";
+        return;
+      }
+      var vh = window.visualViewport && window.visualViewport.height
+        ? window.visualViewport.height
+        : window.innerHeight;
+      var dynamicHeight = Math.round(vh - viewportOffset);
+      iframe.style.height = clamp(dynamicHeight, minHeight, maxHeight) + "px";
+    }
+
+    applyAutoHeight();
+    window.addEventListener("resize", applyAutoHeight);
+    window.addEventListener("orientationchange", applyAutoHeight);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", applyAutoHeight);
+    }
   })();
 </script>
