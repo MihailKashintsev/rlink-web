@@ -227,7 +227,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
               builder: (_, relayResults, __) {
                 // Show ALL relay results — don't filter out existing contacts.
                 // Existing contacts appear in both sections — user expects to see search results.
-                final filteredRelay = q.isEmpty ? <RelayPeer>[] : relayResults;
+                final filteredRelay = q.isEmpty
+                    ? RelayService.instance.knownOnlinePeers
+                    : relayResults;
 
                 final hasLocal = localVisible.isNotEmpty;
                 final hasRelay = filteredRelay.isNotEmpty;
