@@ -1,8 +1,8 @@
 <script>
   // URL папки с файлами Flutter web (index.html, main.dart.js и т.д.)
   window.RLINK_WEB_APP_URL = "https://mihailkashintsev.github.io/rlink-web";
-  // Меняйте значение при релизе, чтобы iframe точно грузил свежую сборку.
-  window.RLINK_WEB_VERSION = "2026-04-24-1";
+  // Авто-версия: всегда подгружает актуальную сборку (без ручного bump).
+  window.RLINK_WEB_VERSION = String(Date.now());
 
   // Если > 0, задает фиксированную высоту iframe (в px).
   // Если 0 или не задано, используется авто-режим по высоте экрана.

@@ -11,6 +11,7 @@ import 'chat_storage_service.dart';
 import 'crypto_service.dart';
 import 'gossip_router.dart';
 import 'profile_service.dart';
+import 'relay_web_warmup.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
 /// RelayService — WebSocket transport for internet messaging
@@ -171,11 +172,16 @@ class RelayService {
 
     state.value = RelayState.connecting;
     _intentionalClose = false;
+    lastError.value = null;
 
     String? connectedUrl;
     Exception? lastConnectError;
     for (final url in fallbackServerUrls) {
       try {
+        if (kIsWeb) {
+          final httpBase = url.replaceFirst('wss://', 'https://');
+          await warmupRelayWebSession(httpBase);
+        }
         debugPrint('[RLINK][Relay] Connecting to $url');
         _channel = WebSocketChannel.connect(Uri.parse(url));
         await _channel!.ready;

@@ -901,6 +901,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 );
               },
             ),
+          if (settings.connectionMode >= 1)
+            ListTile(
+              leading: Icon(Icons.bug_report_outlined, color: cs.primary),
+              title: const Text('Диагностика связи'),
+              subtitle: ValueListenableBuilder<String?>(
+                valueListenable: RelayService.instance.lastError,
+                builder: (_, lastErr, __) {
+                  final pk = CryptoService.instance.publicKeyHex;
+                  final shortPk =
+                      pk.isEmpty ? 'empty' : '${pk.substring(0, 8)}...';
+                  final relayState = RelayService.instance.state.value.name;
+                  final online = RelayService.instance.onlineCount.value;
+                  final err = (lastErr == null || lastErr.isEmpty)
+                      ? '-'
+                      : lastErr.replaceAll('\n', ' ');
+                  return Text(
+                    'pk=$shortPk, relay=$relayState, online=$online, err=$err',
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                  );
+                },
+              ),
+              trailing: const Icon(Icons.copy_rounded, size: 18),
+              onTap: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                final pk = CryptoService.instance.publicKeyHex;
+                final relayState = RelayService.instance.state.value.name;
+                final online = RelayService.instance.onlineCount.value;
+                final err = RelayService.instance.lastError.value ?? '-';
+                final diag = [
+                  'pk=${pk.isEmpty ? 'empty' : pk}',
+                  'relay=$relayState',
+                  'online=$online',
+                  'err=$err',
+                  'url=${RelayService.instance.serverUrl ?? '-'}',
+                ].join('\n');
+                await Clipboard.setData(ClipboardData(text: diag));
+                if (!mounted) return;
+                messenger.showSnackBar(
+                  const SnackBar(content: Text('Диагностика скопирована')),
+                );
+              },
+            ),
 
           // ── Данные ─────────────────────────────────────────────
           _SectionHeader(AppL10n.t('settings_data')),
