@@ -60,6 +60,7 @@ class ChatMessage {
   });
 
   ChatMessage copyWith({
+    String? peerId,
     MessageStatus? status,
     String? imagePath,
     String? videoPath,
@@ -80,7 +81,7 @@ class ChatMessage {
   }) =>
       ChatMessage(
         id: id,
-        peerId: peerId,
+        peerId: peerId ?? this.peerId,
         text: text,
         replyToMessageId: replyToMessageId,
         imagePath: imagePath ?? this.imagePath,

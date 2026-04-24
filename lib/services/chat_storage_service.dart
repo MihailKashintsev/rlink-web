@@ -50,6 +50,15 @@ class ChatStorageService {
   ChatStorageService._();
   static final ChatStorageService instance = ChatStorageService._();
 
+  /// Один поток ЛС на Ed25519 ключ: в БД и нотификаторах всегда lowercase hex.
+  static String normalizeDmPeerId(String peerId) {
+    final t = peerId.trim();
+    if (t.length == 64 && RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(t)) {
+      return t.toLowerCase();
+    }
+    return t;
+  }
+
   Database? _db;
   final _messageSavedController = StreamController<ChatMessage>.broadcast();
   Stream<ChatMessage> get messageSavedStream => _messageSavedController.stream;
@@ -342,14 +351,17 @@ class ChatStorageService {
   // ── Контакты ─────────────────────────────────────────────────
 
   Future<void> saveContact(Contact contact) async {
-    await _db?.insert('contacts', contact.toMap(),
+    final map = contact.toMap();
+    map['id'] = normalizeDmPeerId(contact.publicKeyHex);
+    await _db?.insert('contacts', map,
         conflictAlgorithm: ConflictAlgorithm.replace);
     _contactsNotifier.value = await getContacts();
     unawaited(_writeContactsCache());
   }
 
   Future<void> deleteContact(String id) async {
-    await _db?.delete('contacts', where: 'id = ?', whereArgs: [id]);
+    await _db?.delete('contacts',
+        where: 'id = ?', whereArgs: [normalizeDmPeerId(id)]);
     _contactsNotifier.value = await getContacts();
   }
 
@@ -359,17 +371,20 @@ class ChatStorageService {
   }
 
   Future<Contact?> getContact(String id) async {
-    final rows = await _db?.query('contacts', where: 'id = ?', whereArgs: [id]);
+    final key = normalizeDmPeerId(id);
+    final rows =
+        await _db?.query('contacts', where: 'id = ?', whereArgs: [key]);
     if (rows == null || rows.isEmpty) return null;
     return Contact.fromMap(rows.first);
   }
 
   Future<void> updateContactLastSeen(String id) async {
+    final key = normalizeDmPeerId(id);
     await _db?.update(
       'contacts',
       {'last_seen': DateTime.now().millisecondsSinceEpoch},
       where: 'id = ?',
-      whereArgs: [id],
+      whereArgs: [key],
     );
   }
 
@@ -391,7 +406,7 @@ class ChatStorageService {
             contact.statusEmoji.isEmpty ? null : contact.statusEmoji,
       },
       where: 'id = ?',
-      whereArgs: [contact.publicKeyHex],
+      whereArgs: [normalizeDmPeerId(contact.publicKeyHex)],
     );
     _contactsNotifier.value = await getContacts();
     unawaited(_writeContactsCache());
@@ -399,11 +414,12 @@ class ChatStorageService {
 
   /// Persist X25519 key for a contact (for E2E encryption across restarts)
   Future<void> updateContactX25519Key(String id, String x25519Key) async {
+    final key = normalizeDmPeerId(id);
     await _db?.update(
       'contacts',
       {'x25519_key': x25519Key},
       where: 'id = ?',
-      whereArgs: [id],
+      whereArgs: [key],
     );
   }
 
@@ -421,21 +437,23 @@ class ChatStorageService {
   }
 
   Future<void> updateContactAvatarImage(String id, String imagePath) async {
+    final key = normalizeDmPeerId(id);
     await _db?.update(
       'contacts',
       {'avatar_img_path': imagePath},
       where: 'id = ?',
-      whereArgs: [id],
+      whereArgs: [key],
     );
     _contactsNotifier.value = await getContacts();
   }
 
   Future<void> updateContactProfileMusic(String id, String musicPath) async {
+    final key = normalizeDmPeerId(id);
     await _db?.update(
       'contacts',
       {'profile_music_path': musicPath},
       where: 'id = ?',
-      whereArgs: [id],
+      whereArgs: [key],
     );
     _contactsNotifier.value = await getContacts();
   }
@@ -453,10 +471,14 @@ class ChatStorageService {
   // ── Сообщения ────────────────────────────────────────────────
 
   Future<void> saveMessage(ChatMessage message) async {
-    await _db?.insert('messages', message.toMap(),
+    final peerKey = normalizeDmPeerId(message.peerId);
+    final stored = peerKey == message.peerId
+        ? message
+        : message.copyWith(peerId: peerKey);
+    await _db?.insert('messages', stored.toMap(),
         conflictAlgorithm: ConflictAlgorithm.replace);
-    _notifyMessages(message.peerId);
-    _messageSavedController.add(message);
+    _notifyMessages(peerKey);
+    _messageSavedController.add(stored);
   }
 
   Future<void> editMessage(String messageId, String newText) async {
@@ -632,10 +654,11 @@ class ChatStorageService {
 
   Future<List<ChatMessage>> getMessages(String peerId,
       {int limit = 100}) async {
+    final pid = normalizeDmPeerId(peerId);
     final rows = await _db?.query(
           'messages',
           where: 'peer_id = ?',
-          whereArgs: [peerId],
+          whereArgs: [pid],
           orderBy: 'timestamp ASC',
           limit: limit,
         ) ??
@@ -646,6 +669,7 @@ class ChatStorageService {
   /// Последние [limit] сообщений в хронологическом порядке (для ИИ / контекста API).
   Future<List<ChatMessage>> getRecentMessagesAscending(String peerId,
       {int limit = 24}) async {
+    final pid = normalizeDmPeerId(peerId);
     final rows = await _db?.rawQuery(
           '''
           SELECT * FROM messages
@@ -653,7 +677,7 @@ class ChatStorageService {
           ORDER BY timestamp DESC, rowid DESC
           LIMIT ?
           ''',
-          [peerId, limit],
+          [pid, limit],
         ) ??
         [];
     final list = rows.map(ChatMessage.fromMap).toList();
@@ -662,10 +686,11 @@ class ChatStorageService {
 
   /// Вся история диалога (для экспорта в файл).
   Future<List<ChatMessage>> getAllMessages(String peerId) async {
+    final pid = normalizeDmPeerId(peerId);
     final rows = await _db?.query(
           'messages',
           where: 'peer_id = ?',
-          whereArgs: [peerId],
+          whereArgs: [pid],
           orderBy: 'timestamp ASC',
         ) ??
         [];
@@ -724,14 +749,15 @@ class ChatStorageService {
   }
 
   Future<void> deleteChat(String peerId) async {
+    final pid = normalizeDmPeerId(peerId);
     await _db
-        ?.delete('dm_chat_pins', where: 'peer_id = ?', whereArgs: [peerId]);
-    await _db?.delete('messages', where: 'peer_id = ?', whereArgs: [peerId]);
+        ?.delete('dm_chat_pins', where: 'peer_id = ?', whereArgs: [pid]);
+    await _db?.delete('messages', where: 'peer_id = ?', whereArgs: [pid]);
     await _db?.delete('conversation_read_cursor',
-        where: 'conv_key = ?', whereArgs: ['dm:$peerId']);
+        where: 'conv_key = ?', whereArgs: ['dm:$pid']);
     pinsVersion.value++;
     readStateVersion.value++;
-    _messagesNotifiers.remove(peerId);
+    _messagesNotifiers.remove(pid);
   }
 
   /// Все личные диалоги (контакты и профиль не затрагиваются).
@@ -754,7 +780,8 @@ class ChatStorageService {
     required bool mediaOnly,
   }) async {
     if (_db == null || peerIds.isEmpty) return;
-    for (final pid in peerIds) {
+    for (final raw in peerIds) {
+      final pid = normalizeDmPeerId(raw);
       if (mediaOnly) {
         final rows = await _db!.query(
           'messages',
@@ -796,28 +823,31 @@ class ChatStorageService {
   /// Переносит все сообщения с [oldPeerId] на [newPeerId].
   /// Используется при смене ключа контакта (переустановка приложения).
   Future<void> migrateMessages(String oldPeerId, String newPeerId) async {
-    if (oldPeerId == newPeerId) return;
+    final oldP = normalizeDmPeerId(oldPeerId);
+    final newP = normalizeDmPeerId(newPeerId);
+    if (oldP == newP) return;
     await _db?.update(
       'messages',
-      {'peer_id': newPeerId},
+      {'peer_id': newP},
       where: 'peer_id = ?',
-      whereArgs: [oldPeerId],
+      whereArgs: [oldP],
     );
     await _db?.update(
       'conversation_read_cursor',
-      {'conv_key': 'dm:$newPeerId'},
+      {'conv_key': 'dm:$newP'},
       where: 'conv_key = ?',
-      whereArgs: ['dm:$oldPeerId'],
+      whereArgs: ['dm:$oldP'],
     );
-    _messagesNotifiers.remove(oldPeerId);
-    _notifyMessages(newPeerId);
+    _messagesNotifiers.remove(oldP);
+    _notifyMessages(newP);
   }
 
   Future<ChatMessage?> getLastMessage(String peerId) async {
+    final pid = normalizeDmPeerId(peerId);
     final rows = await _db?.query(
       'messages',
       where: 'peer_id = ?',
-      whereArgs: [peerId],
+      whereArgs: [pid],
       orderBy: 'timestamp DESC',
       limit: 1,
     );
@@ -900,11 +930,12 @@ class ChatStorageService {
   /// Marks the whole thread as read up to the latest stored message.
   Future<void> markDmRead(String peerId) async {
     if (_db == null) return;
-    final key = 'dm:$peerId';
+    final pid = normalizeDmPeerId(peerId);
+    final key = 'dm:$pid';
     final rows = await _db!.query(
       'messages',
       where: 'peer_id = ?',
-      whereArgs: [peerId],
+      whereArgs: [pid],
       orderBy: 'timestamp DESC, id DESC',
       limit: 1,
     );
@@ -932,20 +963,22 @@ class ChatStorageService {
   final Map<String, ValueNotifier<List<ChatMessage>>> _messagesNotifiers = {};
 
   ValueNotifier<List<ChatMessage>> messagesNotifier(String peerId) {
-    return _messagesNotifiers.putIfAbsent(peerId, () => ValueNotifier([]));
+    final pid = normalizeDmPeerId(peerId);
+    return _messagesNotifiers.putIfAbsent(pid, () => ValueNotifier([]));
   }
 
   Future<void> loadMessages(String peerId) async {
-    final msgs = await getMessages(peerId);
-    messagesNotifier(peerId).value = msgs;
+    final pid = normalizeDmPeerId(peerId);
+    final msgs = await getMessages(pid);
+    messagesNotifier(pid).value = msgs;
   }
 
   void _notifyMessages(String peerId) async {
-    final notifier = _messagesNotifiers[peerId];
-    if (notifier == null) return;
-    final msgs = await getMessages(peerId);
-    // Re-check after await — the notifier could have been removed (e.g., deleteChat)
-    if (_messagesNotifiers.containsKey(peerId)) {
+    final pid = normalizeDmPeerId(peerId);
+    // Всегда get-or-create: иначе при гонке saveMessage до loadMessages UI не обновлялся.
+    final notifier = messagesNotifier(pid);
+    final msgs = await getMessages(pid);
+    if (_messagesNotifiers.containsKey(pid)) {
       notifier.value = msgs;
     }
   }
