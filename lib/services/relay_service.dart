@@ -13,6 +13,23 @@ import 'gossip_router.dart';
 import 'profile_service.dart';
 import 'relay_web_warmup.dart';
 
+int _relayJsonInt(dynamic v) {
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  return 0;
+}
+
+bool? _relayJsonBool(dynamic v) {
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  if (v is String) {
+    final s = v.toLowerCase();
+    if (s == 'true') return true;
+    if (s == 'false') return false;
+  }
+  return null;
+}
+
 /// ═══════════════════════════════════════════════════════════════════
 /// RelayService — WebSocket transport for internet messaging
 /// ═══════════════════════════════════════════════════════════════════
@@ -598,67 +615,77 @@ class RelayService {
       return;
     }
 
-    Map<String, dynamic> msg;
+    final Map<String, dynamic> msg;
     try {
-      msg = jsonDecode(payload) as Map<String, dynamic>;
+      final decoded = jsonDecode(payload);
+      if (decoded is! Map) return;
+      msg = Map<String, dynamic>.from(decoded);
     } catch (_) {
       return;
     }
 
-    final type = msg['type'] as String?;
-    switch (type) {
-      case 'registered':
-        final count = msg['onlineCount'] as int? ?? 0;
-        onlineCount.value = count;
-        debugPrint('[RLINK][Relay] Registered, $count users online');
-        break;
+    try {
+      final type = msg['type']?.toString();
+      switch (type) {
+        case 'registered':
+          final count = _relayJsonInt(msg['onlineCount']);
+          onlineCount.value = count;
+          debugPrint('[RLINK][Relay] Registered, $count users online');
+          break;
 
-      case 'packet':
-        _handleIncomingPacket(msg);
-        break;
+        case 'packet':
+          _handleIncomingPacket(msg);
+          break;
 
-      case 'search_result':
-        _handleSearchResult(msg);
-        break;
+        case 'search_result':
+          _handleSearchResult(msg);
+          break;
 
-      case 'presence':
-        _handlePresence(msg);
-        break;
+        case 'presence':
+          _handlePresence(msg);
+          break;
 
-      case 'blob':
-        _handleIncomingBlob(msg);
-        break;
+        case 'blob':
+          _handleIncomingBlob(msg);
+          break;
 
-      case 'delivery_status':
-        _handleDeliveryStatus(msg);
-        break;
+        case 'delivery_status':
+          _handleDeliveryStatus(msg);
+          break;
 
-      case 'pong':
-        break; // keep-alive response
+        case 'pong':
+          break; // keep-alive response
 
-      case 'account_sync_blob':
-        final data = msg['data'] as String?;
-        if (data != null && data.isNotEmpty) {
-          onAccountSyncBlob?.call(data);
-        }
-        break;
+        case 'account_sync_blob':
+          final data = msg['data'] as String?;
+          if (data != null && data.isNotEmpty) {
+            onAccountSyncBlob?.call(data);
+          }
+          break;
 
-      case 'channel_dir_snapshot':
-        final list = msg['channels'] as List<dynamic>?;
-        if (list != null && list.isNotEmpty) {
-          onChannelDirectorySnapshot?.call(list);
-        }
-        break;
+        case 'channel_dir_snapshot':
+          final list = msg['channels'] as List<dynamic>?;
+          if (list != null && list.isNotEmpty) {
+            onChannelDirectorySnapshot?.call(list);
+          }
+          break;
 
-      case 'channel_dir_ack':
-        break;
+        case 'channel_dir_ack':
+          break;
 
-      case 'account_sync_ack':
-        break;
+        case 'account_sync_ack':
+          break;
 
-      case 'error':
-        debugPrint('[RLINK][Relay] Server error: ${msg['msg']}');
-        break;
+        case 'error':
+          debugPrint('[RLINK][Relay] Server error: ${msg['msg']}');
+          break;
+      }
+    } catch (e, st) {
+      debugPrint('[RLINK][Relay] _onMessage error: $e\n$st');
+      if (kIsWeb) {
+        // ignore: avoid_print
+        print('[RLINK][Relay] _onMessage error: $e');
+      }
     }
   }
 
@@ -740,7 +767,7 @@ class RelayService {
         nick: m['nick'] as String? ?? '',
         username: m['username'] as String? ?? '',
         shortId: m['shortId'] as String? ?? '',
-        online: m['online'] as bool? ?? false,
+        online: _relayJsonBool(m['online']) ?? false,
         x25519Key: m['x25519'] as String? ?? '',
       );
       if (peer.x25519Key.isNotEmpty && peer.publicKey.isNotEmpty) {
@@ -787,7 +814,7 @@ class RelayService {
 
   void _handlePresence(Map<String, dynamic> msg) {
     final publicKey = msg['publicKey'] as String?;
-    final online = msg['online'] as bool?;
+    final online = _relayJsonBool(msg['online']);
     if (publicKey == null || online == null) return;
 
     _peerOnline[publicKey] = online;

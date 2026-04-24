@@ -17,6 +17,13 @@ const _kMaxImgPayloadBytes =
 const _kMaxEncPayloadBytes =
     780; // 'msg': шифртекст + опционально rt/ffid/ffn (пересылка, ответ)
 
+/// JSON numbers on dart2js are often [double]; gossip must still decode.
+int? _jsonIntLoose(dynamic v) {
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  return null;
+}
+
 class GossipPacket {
   final String id;
   final String type;
@@ -37,24 +44,27 @@ class GossipPacket {
   factory GossipPacket.fromJson(Map<String, dynamic> j) {
     final id = j['id'];
     final type = j['t'];
-    final ttl = j['ttl'];
-    final ts = j['ts'];
+    final ttl = _jsonIntLoose(j['ttl']);
+    final ts = _jsonIntLoose(j['ts']);
     if (id is! String ||
         id.isEmpty ||
         type is! String ||
         type.isEmpty ||
-        ttl is! int ||
-        ts is! int) {
+        ttl == null ||
+        ts == null) {
       throw FormatException(
-          'Invalid GossipPacket fields: id=$id t=$type ttl=$ttl ts=$ts');
+          'Invalid GossipPacket fields: id=$id t=$type ttl=${j['ttl']} ts=${j['ts']}');
     }
+    final rawP = j['p'];
+    final Map<String, dynamic> payload =
+        rawP is Map ? Map<String, dynamic>.from(rawP) : <String, dynamic>{};
     return GossipPacket(
       id: id,
       type: type,
       ttl: ttl,
       timestamp: ts,
       recipientId: j['rid'] as String?,
-      payload: (j['p'] as Map?)?.cast<String, dynamic>() ?? {},
+      payload: payload,
     );
   }
 
@@ -1391,7 +1401,7 @@ class GossipRouter {
         final publicKey = packet.payload['id'] as String?;
         final nick = packet.payload['nick'] as String?;
         final username = packet.payload['u'] as String? ?? '';
-        final color = packet.payload['color'] as int?;
+        final color = _jsonIntLoose(packet.payload['color']);
         final emoji = packet.payload['emoji'] as String? ?? '';
         final x25519Key = packet.payload['x'] as String? ?? '';
         final tags =
@@ -1471,7 +1481,7 @@ class GossipRouter {
 
       if (packet.type == 'img_meta') {
         final msgId = packet.payload['msgId'] as String?;
-        final totalChunks = packet.payload['chunks'] as int?;
+        final totalChunks = _jsonIntLoose(packet.payload['chunks']);
         final from = packet.payload['from'] as String? ?? 'unknown';
         final isAvatar = (packet.payload['avatar'] as bool?) ?? false;
         final isVoice = (packet.payload['voice'] as bool?) ?? false;
@@ -1511,7 +1521,7 @@ class GossipRouter {
 
       if (packet.type == 'ether') {
         final text = packet.payload['text'] as String?;
-        final color = packet.payload['col'] as int?;
+        final color = _jsonIntLoose(packet.payload['col']);
         debugPrint(
             '[RLINK][Gossip] Ether packet: text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} col=$color handler=${onEtherReceived != null}');
         if (text != null && text.isNotEmpty && color != null) {
@@ -1582,7 +1592,7 @@ class GossipRouter {
       if (packet.type == 'story') {
         final authorId = packet.payload['from'] as String?;
         final text = packet.payload['text'] as String?;
-        final bgColor = packet.payload['col'] as int?;
+        final bgColor = _jsonIntLoose(packet.payload['col']);
         debugPrint(
             '[RLINK][Gossip] Story packet: author=${authorId == null ? 'null' : authorId.substring(0, authorId.length.clamp(0, 16))} text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} handler=${onStoryReceived != null}');
         if (authorId != null && text != null && bgColor != null) {
