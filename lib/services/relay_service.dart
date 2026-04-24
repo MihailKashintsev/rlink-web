@@ -34,8 +34,11 @@ class RelayService {
   /// Default public relay server.
   /// Захардкожен — пользователь не может переопределить через настройки
   /// (см. serverUrl getter и connect() ниже).
-  static const defaultServerUrl =
-      'wss://rlink.ru.tuna.am';
+  static const defaultServerUrl = 'wss://rlink.ru.tuna.am';
+  static const List<String> fallbackServerUrls = <String>[
+    defaultServerUrl,
+    'wss://ru.tuna.am',
+  ];
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -46,6 +49,7 @@ class RelayService {
 
   /// Current connection state
   final ValueNotifier<RelayState> state = ValueNotifier(RelayState.disconnected);
+  final ValueNotifier<String?> lastError = ValueNotifier<String?>(null);
 
   /// Online users count from server
   final ValueNotifier<int> onlineCount = ValueNotifier(0);
@@ -147,20 +151,41 @@ class RelayService {
       return;
     }
 
-    // URL захардкожен в defaultServerUrl — AppSettings.relayServerUrl
-    // намеренно игнорируется, см. комментарий у defaultServerUrl.
-    const url = defaultServerUrl;
-
     final myKey = CryptoService.instance.publicKeyHex;
     if (myKey.isEmpty) return;
 
     state.value = RelayState.connecting;
     _intentionalClose = false;
 
+    String? connectedUrl;
+    Exception? lastConnectError;
+    for (final url in fallbackServerUrls) {
+      try {
+        debugPrint('[RLINK][Relay] Connecting to $url');
+        _channel = WebSocketChannel.connect(Uri.parse(url));
+        await _channel!.ready;
+        connectedUrl = url;
+        break;
+      } catch (e) {
+        try {
+          await _channel?.sink.close();
+        } catch (_) {}
+        _channel = null;
+        lastConnectError = Exception('$url: $e');
+      }
+    }
+    if (connectedUrl == null || _channel == null) {
+      final msg =
+          (lastConnectError ?? Exception('No relay endpoint available'))
+              .toString();
+      debugPrint('[RLINK][Relay] Connection failed: $msg');
+      lastError.value = msg;
+      state.value = RelayState.disconnected;
+      _scheduleReconnect();
+      return;
+    }
+
     try {
-      debugPrint('[RLINK][Relay] Connecting to $url');
-      _channel = WebSocketChannel.connect(Uri.parse(url));
-      await _channel!.ready;
 
       // Listen for messages
       _subscription = _channel!.stream.listen(
@@ -196,9 +221,11 @@ class RelayService {
       });
 
       state.value = RelayState.connected;
-      debugPrint('[RLINK][Relay] Connected and registered');
+      lastError.value = null;
+      debugPrint('[RLINK][Relay] Connected and registered via $connectedUrl');
     } catch (e) {
       debugPrint('[RLINK][Relay] Connection failed: $e');
+      lastError.value = e.toString();
       state.value = RelayState.disconnected;
       _scheduleReconnect();
     }

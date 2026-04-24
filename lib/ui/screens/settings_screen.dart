@@ -856,43 +856,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 final connecting = relayState == RelayState.connecting;
                 return ValueListenableBuilder<int>(
                   valueListenable: RelayService.instance.onlineCount,
-                  builder: (_, count, __) => ListTile(
-                    leading: Icon(
-                      connected
-                          ? Icons.cloud_done_outlined
-                          : Icons.cloud_off_outlined,
-                      color: connected
-                          ? const Color(0xFF4CAF50)
+                  builder: (_, count, __) => ValueListenableBuilder<String?>(
+                    valueListenable: RelayService.instance.lastError,
+                    builder: (_, lastErr, __) => ListTile(
+                      leading: Icon(
+                        connected
+                            ? Icons.cloud_done_outlined
+                            : Icons.cloud_off_outlined,
+                        color: connected
+                            ? const Color(0xFF4CAF50)
+                            : connecting
+                                ? Colors.amber
+                                : Colors.red,
+                      ),
+                      title: Text(connected
+                          ? AppL10n.t('relay_server_connected')
                           : connecting
-                              ? Colors.amber
-                              : Colors.red,
+                              ? AppL10n.t('relay_server_connecting')
+                              : AppL10n.t('relay_server_unavailable')),
+                      subtitle: Text(
+                        connected
+                            ? AppL10n.t('relay_online').replaceAll('{n}', '$count')
+                            : ((lastErr != null && lastErr.isNotEmpty)
+                                ? '${AppL10n.t('relay_no_connection')}\n$lastErr'
+                                : AppL10n.t('relay_no_connection')),
+                        style:
+                            TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                      ),
+                      trailing: connecting
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : IconButton(
+                              icon: const Icon(Icons.refresh, size: 20),
+                              tooltip: connected
+                                  ? AppL10n.t('tool_reconnect')
+                                  : AppL10n.t('tool_connect'),
+                              onPressed: () => RelayService.instance.reconnect(),
+                            ),
                     ),
-                    title: Text(connected
-                        ? AppL10n.t('relay_server_connected')
-                        : connecting
-                            ? AppL10n.t('relay_server_connecting')
-                            : AppL10n.t('relay_server_unavailable')),
-                    subtitle: Text(
-                      connected
-                          ? AppL10n.t('relay_online')
-                              .replaceAll('{n}', '$count')
-                          : AppL10n.t('relay_no_connection'),
-                      style:
-                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                    ),
-                    trailing: connecting
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : IconButton(
-                            icon: const Icon(Icons.refresh, size: 20),
-                            tooltip: connected
-                                ? AppL10n.t('tool_reconnect')
-                                : AppL10n.t('tool_connect'),
-                            onPressed: () => RelayService.instance.reconnect(),
-                          ),
                   ),
                 );
               },
