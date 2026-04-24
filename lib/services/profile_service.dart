@@ -26,7 +26,7 @@ class ProfileService {
 
   Future<String?> _read() async {
     if (RuntimePlatform.isWeb) {
-      final web = readWebState(_kProfileKey);
+      final web = await readWebState(_kProfileKey);
       if (web != null && web.isNotEmpty) return web;
     }
     if (_isMobile) return _secureSt.read(key: _kProfileKey);

@@ -34,6 +34,28 @@
     iframe.loading = "lazy";
     iframe.allow = "camera; microphone; geolocation; clipboard-read; clipboard-write";
     wrap.appendChild(iframe);
+    var parentStorePrefix = "rlink_parent_store_";
+    window.addEventListener("message", function (event) {
+      try {
+        if (event.source !== iframe.contentWindow) return;
+        var d = event.data || {};
+        if (d.type !== "rlink_parent_storage_req") return;
+        var id = String(d.id || "");
+        var op = String(d.op || "");
+        var key = String(d.key || "");
+        var resp = { type: "rlink_parent_storage_res", id: id, ok: true, value: null };
+        if (!key) {
+          resp.ok = false;
+        } else if (op === "get") {
+          resp.value = localStorage.getItem(parentStorePrefix + key);
+        } else if (op === "set") {
+          localStorage.setItem(parentStorePrefix + key, String(d.value || ""));
+        } else {
+          resp.ok = false;
+        }
+        event.source.postMessage(resp, "*");
+      } catch (_) {}
+    });
 
     var errShown = false;
     function showLoadError(reason) {

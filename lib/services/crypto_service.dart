@@ -36,7 +36,7 @@ class CryptoService {
 
   Future<String?> _read(String key) async {
     if (RuntimePlatform.isWeb) {
-      final web = readWebState(key);
+      final web = await readWebState(key);
       if (web != null && web.isNotEmpty) return web;
     }
     if (_isMobile) return _secureSt.read(key: key);
