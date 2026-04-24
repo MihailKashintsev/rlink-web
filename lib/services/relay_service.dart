@@ -577,11 +577,30 @@ class RelayService {
   // ── Receive ──────────────────────────────────────────────────
 
   void _onMessage(dynamic raw) {
-    if (raw is! String) return;
+    // package:web_socket may deliver JSON as UTF-8 [Uint8List] on some browsers
+    // or proxies; treat both text and binary frames as JSON payloads.
+    final String payload;
+    if (raw is String) {
+      payload = raw;
+    } else if (raw is Uint8List) {
+      try {
+        payload = utf8.decode(raw);
+      } catch (_) {
+        return;
+      }
+    } else if (raw is List<int>) {
+      try {
+        payload = utf8.decode(raw);
+      } catch (_) {
+        return;
+      }
+    } else {
+      return;
+    }
 
     Map<String, dynamic> msg;
     try {
-      msg = jsonDecode(raw) as Map<String, dynamic>;
+      msg = jsonDecode(payload) as Map<String, dynamic>;
     } catch (_) {
       return;
     }

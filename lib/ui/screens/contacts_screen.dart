@@ -199,9 +199,15 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
       // ── Content ──
       Expanded(
-        child: ValueListenableBuilder<List<Contact>>(
-          valueListenable: ChatStorageService.instance.contactsNotifier,
-          builder: (_, contacts, __) {
+        child: AnimatedBuilder(
+          animation: Listenable.merge([
+            ChatStorageService.instance.contactsNotifier,
+            RelayService.instance.searchResults,
+            RelayService.instance.presenceVersion,
+          ]),
+          builder: (context, _) {
+            final contacts = ChatStorageService.instance.contactsNotifier.value;
+            final relayResults = RelayService.instance.searchResults.value;
             final List<Contact> localVisible;
             if (q.isEmpty) {
               localVisible = contacts;
@@ -222,41 +228,39 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   c.shortId.toLowerCase().contains(q)).toList();
             }
 
-            return ValueListenableBuilder<List<RelayPeer>>(
-              valueListenable: RelayService.instance.searchResults,
-              builder: (_, relayResults, __) {
-                // Show ALL relay results — don't filter out existing contacts.
-                // Existing contacts appear in both sections — user expects to see search results.
-                final filteredRelay = q.isEmpty
-                    ? RelayService.instance.knownOnlinePeers
-                    : relayResults;
+            // Show ALL relay results — don't filter out existing contacts.
+            // Existing contacts appear in both sections — user expects to see search results.
+            final filteredRelay = q.isEmpty
+                ? RelayService.instance.knownOnlinePeers
+                : relayResults;
 
-                final hasLocal = localVisible.isNotEmpty;
-                final hasRelay = filteredRelay.isNotEmpty;
-                final showDirectButton =
-                    q.length >= 8 && !hasLocal && !hasRelay;
+            final hasLocal = localVisible.isNotEmpty;
+            final hasRelay = filteredRelay.isNotEmpty;
+            final showDirectButton =
+                q.length >= 8 && !hasLocal && !hasRelay;
 
-                if (contacts.isEmpty && q.isEmpty) {
-                  return Center(
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.people_outline,
-                          size: 64, color: Colors.grey.shade700),
-                      const SizedBox(height: 16),
-                      Text('Нет контактов',
-                          style: TextStyle(
-                              color: Colors.grey.shade500, fontSize: 16)),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Введи имя или ID в поле выше\nчтобы найти собеседников',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                            color: Colors.grey.shade600, fontSize: 13),
-                      ),
-                    ]),
-                  );
-                }
+            // Пустой экран только если нет локальных контактов И нет онлайна на relay.
+            if (contacts.isEmpty && q.isEmpty && !hasRelay) {
+              return Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.people_outline,
+                      size: 64, color: Colors.grey.shade700),
+                  const SizedBox(height: 16),
+                  Text('Нет контактов',
+                      style: TextStyle(
+                          color: Colors.grey.shade500, fontSize: 16)),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Введи имя или ID в поле выше\nчтобы найти собеседников',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        color: Colors.grey.shade600, fontSize: 13),
+                  ),
+                ]),
+              );
+            }
 
-                return ListView(
+            return ListView(
                   children: [
                     // ── Relay results (top priority when searching) ──
                     if (hasRelay) ...[
@@ -394,8 +398,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     const SizedBox(height: 80),
                   ],
                 );
-              },
-            );
           },
         ),
       ),
