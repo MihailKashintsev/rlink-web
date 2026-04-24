@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'runtime_platform.dart';
@@ -286,7 +284,7 @@ class AppSettings extends ChangeNotifier {
     if ((_prefs.getInt(_keyAppIconVariant) ?? -1) != _appIconVariant) {
       await _prefs.setInt(_keyAppIconVariant, _appIconVariant);
     }
-    _useIosStyleEmoji = Platform.isAndroid
+    _useIosStyleEmoji = RuntimePlatform.isAndroid
         ? (_prefs.getBool(_keyUseIosStyleEmoji) ?? true)
         : false;
   }
@@ -316,7 +314,7 @@ class AppSettings extends ChangeNotifier {
   }
 
   Future<void> setUseIosStyleEmoji(bool v) async {
-    if (!Platform.isAndroid) return;
+    if (!RuntimePlatform.isAndroid) return;
     _useIosStyleEmoji = v;
     await _prefs.setBool(_keyUseIosStyleEmoji, v);
     notifyListeners();

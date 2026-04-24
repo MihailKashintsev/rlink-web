@@ -55,6 +55,7 @@ import 'services/app_icon_service.dart';
 import 'services/desktop_tray_service.dart';
 import 'services/packet_transport.dart';
 import 'services/rlink_deep_link_service.dart';
+import 'services/runtime_platform.dart';
 import 'services/web_storage_bootstrap.dart';
 import 'app_route_observer.dart';
 import 'ui/screens/chat_list_screen.dart';
@@ -407,7 +408,7 @@ class IncomingMessage {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   VoiceService.instance.configureNavigator(navigatorKey);
-  if (Platform.isWindows) {
+  if (RuntimePlatform.isDesktopWindows) {
     await windowManager.ensureInitialized();
     const windowOptions = WindowOptions(
       size: Size(1280, 720),
@@ -429,7 +430,7 @@ Future<void> main() async {
   // UI: Google Sans; на Android — ещё Noto Color Emoji (ближе к «яблочному» виду).
   try {
     final pending = <dynamic>[GoogleFonts.googleSans()];
-    if (Platform.isAndroid) pending.add(GoogleFonts.notoColorEmoji());
+    if (RuntimePlatform.isAndroid) pending.add(GoogleFonts.notoColorEmoji());
     await GoogleFonts.pendingFonts(pending);
   } catch (_) {}
   runApp(const ProviderScope(child: RlinkApp()));
@@ -440,7 +441,7 @@ Future<void> initServices() async {
     await initWebStorageIfNeeded();
     await BrowserCacheService.instance.init();
     // Запрашиваем все необходимые разрешения при первом запуске
-    if (Platform.isAndroid) {
+    if (RuntimePlatform.isAndroid) {
       await [
         Permission.camera,
         Permission.microphone,
@@ -453,7 +454,7 @@ Future<void> initServices() async {
         Permission.bluetoothAdvertise,
         Permission.notification,
       ].request();
-    } else if (Platform.isIOS) {
+    } else if (RuntimePlatform.isIos) {
       await [
         Permission.camera,
         Permission.microphone,
@@ -2311,7 +2312,7 @@ Future<void> initServices() async {
     unawaited(AppIconService.setVariant(AppSettings.instance.appIconVariant));
 
     // Dynamic Island: только BLE-счётчик (режимы 0 и 2) или крупная отправка медиа.
-    if (Platform.isIOS) {
+    if (RuntimePlatform.isIos) {
       MediaUploadQueue.instance.onLiveActivityMediaProgress =
           _onLiveActivityMediaProgress;
       _iosLiveActivityLastConnectionMode = AppSettings.instance.connectionMode;
@@ -3219,7 +3220,7 @@ void _onBlobReceived(
 }
 
 Future<void> _startLiveActivity() async {
-  if (!Platform.isIOS) return;
+  if (!RuntimePlatform.isIos) return;
   if (AppSettings.instance.connectionMode == 1) return;
   try {
     await _kBleChannel.invokeMethod('startLiveActivity', {
@@ -3238,14 +3239,14 @@ Future<void> _startLiveActivity() async {
 }
 
 void _iosLiveActivityBleDataChanged() {
-  if (!Platform.isIOS) return;
+  if (!RuntimePlatform.isIos) return;
   if (_iosMediaLiveActivityActive) return;
   if (AppSettings.instance.connectionMode == 1) return;
   _updateLiveActivity();
 }
 
 void _iosOnSettingsForLiveActivity() {
-  if (!Platform.isIOS) return;
+  if (!RuntimePlatform.isIos) return;
   if (_iosMediaLiveActivityActive) return;
   final mode = AppSettings.instance.connectionMode;
   if (mode == _iosLiveActivityLastConnectionMode) return;
@@ -3260,7 +3261,7 @@ void _iosOnSettingsForLiveActivity() {
 }
 
 void _onLiveActivityMediaProgress(String label, double progress) {
-  if (!Platform.isIOS) return;
+  if (!RuntimePlatform.isIos) return;
   try {
     if (progress >= 1.0) {
       _iosMediaLiveActivityActive = false;
@@ -3288,7 +3289,7 @@ void _onLiveActivityMediaProgress(String label, double progress) {
 }
 
 void _updateLiveActivity() {
-  if (!Platform.isIOS) return;
+  if (!RuntimePlatform.isIos) return;
   if (_iosMediaLiveActivityActive) return;
   if (AppSettings.instance.connectionMode == 1) return;
   final blePeers = BleService.instance.peersCount.value;
@@ -3328,7 +3329,7 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     AppSettings.instance.addListener(_onSettingsChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (Platform.isWindows) {
+      if (RuntimePlatform.isDesktopWindows) {
         await DesktopTrayService.instance.init();
       }
       await initServices();
@@ -3388,7 +3389,7 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
       debugPrint('[App] Notifying peers - back online');
       await applyConnectionTransport();
       unawaited(NotificationService.instance.clearApplicationIconBadge());
-      if (Platform.isIOS && AppSettings.instance.connectionMode != 1) {
+      if (RuntimePlatform.isIos && AppSettings.instance.connectionMode != 1) {
         unawaited(_startLiveActivity());
       }
     } catch (e) {
@@ -3457,7 +3458,7 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
 
     // Android: Noto Color Emoji как fallback — ближе к единому виду с iOS (вкл. в настройках).
     final emojiFallback =
-        (Platform.isAndroid && AppSettings.instance.useIosStyleEmoji)
+        (RuntimePlatform.isAndroid && AppSettings.instance.useIosStyleEmoji)
             ? [GoogleFonts.notoColorEmoji().fontFamily!]
             : <String>[];
 

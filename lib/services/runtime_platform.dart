@@ -11,4 +11,7 @@ class RuntimePlatform {
 
   static bool get isIos =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+
+  static bool get isDesktopWindows =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 }
