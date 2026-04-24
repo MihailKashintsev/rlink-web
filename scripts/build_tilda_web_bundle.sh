@@ -6,7 +6,7 @@ OUT_DIR="$ROOT_DIR/dist/tilda-web"
 BASE_HREF="${RLINK_WEB_BASE_HREF:-/rlink_web/}"
 
 cd "$ROOT_DIR"
-flutter build web --release --base-href "$BASE_HREF"
+flutter build web --release --pwa-strategy=none --base-href "$BASE_HREF"
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"

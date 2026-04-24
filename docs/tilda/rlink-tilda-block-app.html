@@ -22,7 +22,8 @@
     }
 
     var iframe = document.createElement("iframe");
-    iframe.src = appUrl + "/index.html";
+    var ver = window.RLINK_WEB_VERSION || String(Date.now());
+    iframe.src = appUrl + "/index.html?v=" + encodeURIComponent(ver);
     iframe.style.width = "100%";
     iframe.style.display = "block";
     iframe.style.border = "0";
