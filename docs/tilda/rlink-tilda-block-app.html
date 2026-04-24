@@ -16,6 +16,11 @@
       return;
     }
 
+    // On HTTPS pages (Tilda), HTTP iframe URL is blocked by browser (mixed content).
+    if (window.location.protocol === "https:" && appUrl.indexOf("http://") === 0) {
+      appUrl = "https://" + appUrl.substring("http://".length);
+    }
+
     var iframe = document.createElement("iframe");
     iframe.src = appUrl + "/index.html";
     iframe.style.width = "100%";
@@ -26,6 +31,35 @@
     iframe.loading = "lazy";
     iframe.allow = "camera; microphone; geolocation; clipboard-read; clipboard-write";
     wrap.appendChild(iframe);
+
+    var errShown = false;
+    function showLoadError(reason) {
+      if (errShown) return;
+      errShown = true;
+      var msg = document.createElement("div");
+      msg.style.marginTop = "12px";
+      msg.style.padding = "12px 14px";
+      msg.style.border = "1px solid #fecaca";
+      msg.style.borderRadius = "10px";
+      msg.style.background = "#fff1f2";
+      msg.style.color = "#9f1239";
+      msg.style.fontFamily = "Arial,sans-serif";
+      msg.style.fontSize = "13px";
+      msg.textContent =
+        "Не удалось загрузить Rlink Web (" + reason + "). Проверьте RLINK_WEB_APP_URL и что используется HTTPS.";
+      wrap.appendChild(msg);
+    }
+
+    var loadTimer = setTimeout(function () {
+      showLoadError("timeout");
+    }, 15000);
+    iframe.addEventListener("load", function () {
+      clearTimeout(loadTimer);
+    });
+    iframe.addEventListener("error", function () {
+      clearTimeout(loadTimer);
+      showLoadError("iframe error");
+    });
 
     function clamp(v, lo, hi) {
       return Math.max(lo, Math.min(hi, v));
