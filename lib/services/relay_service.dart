@@ -151,10 +151,22 @@ class RelayService {
       return;
     }
 
-    final myKey = CryptoService.instance.publicKeyHex;
+    var myKey = CryptoService.instance.publicKeyHex;
     if (myKey.isEmpty) {
-      lastError.value = 'Локальный публичный ключ не инициализирован';
-      return;
+      // Web can occasionally start with stale/corrupted browser storage.
+      // Try to self-heal keys before giving up.
+      try {
+        await CryptoService.instance.regenerateKeys();
+        myKey = CryptoService.instance.publicKeyHex;
+        final p = ProfileService.instance.profile;
+        if (p != null && p.publicKeyHex != myKey) {
+          await ProfileService.instance.updateProfile();
+        }
+      } catch (_) {}
+      if (myKey.isEmpty) {
+        lastError.value = 'Локальный публичный ключ не инициализирован';
+        return;
+      }
     }
 
     state.value = RelayState.connecting;
