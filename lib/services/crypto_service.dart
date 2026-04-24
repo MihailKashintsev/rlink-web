@@ -1,11 +1,11 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'runtime_platform.dart';
 
 /// Хранит Ed25519 keypair пользователя (его "аккаунт") и отдельный X25519
 /// keypair для ECDH шифрования сообщений.
@@ -26,7 +26,7 @@ class CryptoService {
   // On desktop (macOS/Windows/Linux) Keychain/secure storage isn't reliable;
   // use SharedPreferences as fallback (keys are still generated fresh each time
   // on desktop and persisted across launches).
-  static bool get _isMobile => Platform.isIOS || Platform.isAndroid;
+  static bool get _isMobile => RuntimePlatform.isIos || RuntimePlatform.isAndroid;
 
   final _secureSt = const FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),

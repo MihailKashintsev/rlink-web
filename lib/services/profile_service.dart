@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -7,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/user_profile.dart';
 import 'crypto_service.dart';
+import 'runtime_platform.dart';
 
 class ProfileService {
   ProfileService._();
@@ -16,7 +16,7 @@ class ProfileService {
 
   // On desktop (macOS/Windows/Linux) use SharedPreferences — Keychain is
   // mobile-only; on desktop it can fail silently in sandboxed environments.
-  static bool get _isMobile => Platform.isIOS || Platform.isAndroid;
+  static bool get _isMobile => RuntimePlatform.isIos || RuntimePlatform.isAndroid;
 
   final _secureSt = const FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
