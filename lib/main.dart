@@ -706,6 +706,22 @@ Future<void> initServices() async {
 
         // Сохраняем сообщение в БД (peerId = fromId = public key).
         // Контакт НЕ создаётся автоматически — только через pair_req/pair_acc.
+        // Web exception: without BLE pairing flow, unknown relay peers would stay
+        // invisible in contacts/chat list; create a lightweight placeholder.
+        if (RuntimePlatform.isWeb) {
+          final existing = await ChatStorageService.instance.getContact(fromId);
+          if (existing == null) {
+            await ChatStorageService.instance.saveContact(
+              Contact(
+                publicKeyHex: fromId,
+                nickname: '${fromId.substring(0, 8)}...',
+                avatarColor: 0xFF607D8B,
+                avatarEmoji: '',
+                addedAt: DateTime.now(),
+              ),
+            );
+          }
+        }
         await ChatStorageService.instance.saveMessage(ChatMessage(
           id: msgId,
           peerId: fromId,
