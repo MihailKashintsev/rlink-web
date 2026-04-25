@@ -53,7 +53,9 @@
         } else {
           resp.ok = false;
         }
-        event.source.postMessage(resp, "*");
+        // Send stringified payload so Flutter web can parse it reliably
+        // across browsers/iframe contexts where event.data isn't a plain Map.
+        event.source.postMessage(JSON.stringify(resp), "*");
       } catch (_) {}
     });
 

@@ -425,10 +425,11 @@ void _handleAccountSyncPut(_User user, Map<String, dynamic> msg) {
 }
 
 void _handlePacket(_User sender, Map<String, dynamic> msg) {
-  final to = msg['to'] as String?;
+  final toRaw = msg['to'] as String?;
   final data = msg['data'] as String?; // base64-encoded encrypted packet
-  if (to == null || data == null) return;
+  if (toRaw == null || data == null) return;
   if (data.length > 262144) return; // 256 KB max (blob chunks double-base64 ~90 KB each)
+  final to = toRaw.toLowerCase();
 
   final recipient = _users[to];
   if (recipient == null) {
@@ -482,8 +483,9 @@ void _handleBroadcast(_User sender, Map<String, dynamic> msg) {
 }
 
 void _handleBlob(_User sender, Map<String, dynamic> msg) {
-  final to = msg['to'] as String?;
-  if (to == null) return;
+  final toRaw = msg['to'] as String?;
+  if (toRaw == null) return;
+  final to = toRaw.toLowerCase();
 
   final recipient = _users[to];
   if (recipient == null) {
@@ -565,14 +567,15 @@ shelf.Handler _wsHandler() {
               ws.sink.add(jsonEncode({'type': 'error', 'msg': 'register_first'}));
               return;
             }
-            final publicKey = msg['publicKey'] as String?;
+            final publicKeyRaw = msg['publicKey'] as String?;
             final nick = msg['nick'] as String? ?? '';
             final x25519Key = msg['x25519'] as String? ?? '';
-            if (publicKey == null ||
-                !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(publicKey)) {
+            if (publicKeyRaw == null ||
+                !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(publicKeyRaw)) {
               ws.sink.add(jsonEncode({'type': 'error', 'msg': 'invalid_key'}));
               return;
             }
+            final publicKey = publicKeyRaw.toLowerCase();
 
             // Disconnect previous connection for same key
             final prev = _users[publicKey];

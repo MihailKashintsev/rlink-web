@@ -31,7 +31,9 @@ class DefaultPacketTransport implements PacketTransport {
         String? recipientKey;
         if (explicitRecipient != null &&
             _pubKeyHex.hasMatch(explicitRecipient.trim())) {
-          recipientKey = explicitRecipient.trim().toLowerCase();
+          // Keep canonical key as provided by sender side to avoid
+          // case-mismatch with relay maps from mixed-version clients.
+          recipientKey = explicitRecipient.trim();
         } else if (rid8 != null) {
           recipientKey = RelayService.instance.findPeerByPrefix(rid8);
         }
