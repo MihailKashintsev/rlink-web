@@ -11,6 +11,34 @@ const _bridgeResType = 'rlink_parent_storage_res';
 
 int _bridgeSeq = 0;
 
+Map<String, dynamic>? _messageAsMap(dynamic raw) {
+  if (raw is Map) {
+    return raw.map((k, v) => MapEntry(k.toString(), v));
+  }
+  if (raw is String) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return decoded.map((k, v) => MapEntry(k.toString(), v));
+      }
+    } catch (_) {}
+    return null;
+  }
+  try {
+    final type = raw['type'];
+    final id = raw['id'];
+    if (type != null || id != null) {
+      return <String, dynamic>{
+        'type': type,
+        'id': id,
+        'ok': raw['ok'],
+        'value': raw['value'],
+      };
+    }
+  } catch (_) {}
+  return null;
+}
+
 Future<String?> _bridgeGet(String fullKey) async {
   try {
     if (html.window.parent == null || html.window.parent == html.window) {
@@ -20,8 +48,8 @@ Future<String?> _bridgeGet(String fullKey) async {
     final c = Completer<String?>();
     late StreamSubscription<html.MessageEvent> sub;
     sub = html.window.onMessage.listen((event) {
-      final data = event.data;
-      if (data is! Map) return;
+      final data = _messageAsMap(event.data);
+      if (data == null) return;
       if (data['type'] != _bridgeResType) return;
       if (data['id'] != id) return;
       final ok = data['ok'] == true;
@@ -56,8 +84,8 @@ Future<void> _bridgeSet(String fullKey, String value) async {
     final c = Completer<void>();
     late StreamSubscription<html.MessageEvent> sub;
     sub = html.window.onMessage.listen((event) {
-      final data = event.data;
-      if (data is! Map) return;
+      final data = _messageAsMap(event.data);
+      if (data == null) return;
       if (data['type'] != _bridgeResType) return;
       if (data['id'] != id) return;
       c.complete();
