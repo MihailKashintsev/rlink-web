@@ -3082,7 +3082,10 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onMessagePointerDownQuickReact(PointerDownEvent e, ChatMessage msg) {
     if (e.kind != PointerDeviceKind.mouse) return;
     if ((e.buttons & kPrimaryButton) == 0) return;
-    if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) return;
+    if (kIsWeb ||
+        (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS)) {
+      return;
+    }
     final now = DateTime.now();
     if (_lastQuickPointerMsgId == msg.id &&
         _lastQuickPointerAt != null &&
@@ -3162,13 +3165,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _saveImageToGallery(String imagePath) async {
     try {
-      if (Platform.isAndroid || Platform.isIOS) {
+      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
         await Gal.putImage(imagePath);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Фото сохранено в галерею')));
         }
-      } else {
+      } else if (!kIsWeb) {
         // Desktop: copy to Downloads folder
         final downloads =
             Directory('${Platform.environment['HOME'] ?? '.'}/Downloads');
@@ -3179,6 +3182,10 @@ class _ChatScreenState extends State<ChatScreen> {
           ScaffoldMessenger.of(context)
               .showSnackBar(SnackBar(content: Text('Сохранено: ${dst.path}')));
         }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Сохранение на web пока не поддерживается')),
+        );
       }
     } catch (e) {
       if (mounted) {

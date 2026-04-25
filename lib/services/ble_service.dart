@@ -15,6 +15,12 @@ class BleService {
   BleService._();
   static final BleService instance = BleService._();
 
+  bool get _isWindows => !kIsWeb && Platform.isWindows;
+  bool get _isLinux => !kIsWeb && Platform.isLinux;
+  bool get _isAndroid => !kIsWeb && Platform.isAndroid;
+  bool get _isIOS => !kIsWeb && Platform.isIOS;
+  bool get _isMacOS => !kIsWeb && Platform.isMacOS;
+
   static const _method = MethodChannel('com.rendergames.rlink/ble');
   static const _events = EventChannel('com.rendergames.rlink/ble_events');
   static const _dataChannel = MethodChannel('com.rendergames.rlink/ble_data');
@@ -333,8 +339,9 @@ class BleService {
     _isRunning = true;
 
     // BLE не поддерживается на Windows/Linux — работаем только на мобильных и macOS
-    if (Platform.isWindows || Platform.isLinux) {
-      debugPrint('[RLINK][BLE] BLE not supported on ${Platform.operatingSystem}, skipping');
+    if (kIsWeb || _isWindows || _isLinux) {
+      final os = kIsWeb ? 'web' : Platform.operatingSystem;
+      debugPrint('[RLINK][BLE] BLE not supported on $os, skipping');
       return;
     }
 
@@ -416,7 +423,7 @@ class BleService {
   Future<void> stop() async {
     _isRunning = false;
     _advertisingStarted = false;
-    if (!Platform.isWindows && !Platform.isLinux) {
+    if (!kIsWeb && !_isWindows && !_isLinux) {
       try {
         await _method.invokeMethod('stopAdvertising');
       } catch (_) {}
@@ -439,7 +446,7 @@ class BleService {
 
   Future<void> broadcastPacket(GossipPacket packet) async {
     final bytes = packet.encode();
-    if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+    if (_isAndroid || _isIOS || _isMacOS) {
       // Notify subscribed Centrals via native peripheral manager
       try {
         await _method.invokeMethod('sendPacket', {'data': bytes});
@@ -694,7 +701,7 @@ class BleService {
   }
 
   Future<void> _requestPermissions() async {
-    if (Platform.isAndroid) {
+    if (_isAndroid) {
       await [
         Permission.bluetoothScan,
         Permission.bluetoothConnect,
@@ -704,7 +711,7 @@ class BleService {
         Permission.microphone,
         Permission.photos,
       ].request();
-    } else if (Platform.isIOS) {
+    } else if (_isIOS) {
       await [
         Permission.bluetooth,
         Permission.camera,
@@ -712,7 +719,7 @@ class BleService {
         Permission.location,
         Permission.photos,
       ].request();
-    } else if (Platform.isMacOS) {
+    } else if (_isMacOS) {
       await [
         Permission.bluetooth,
         Permission.camera,

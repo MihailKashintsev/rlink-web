@@ -258,6 +258,7 @@ class BroadcastOutboxService {
     final allowBle = mode != 1;
     final hasBlePeers = allowBle && BleService.instance.peersCount.value > 0;
     final hasWifiPeers = mode == 2 &&
+        !kIsWeb &&
         Platform.isAndroid &&
         WifiDirectService.instance.peersCount.value > 0;
     return hasRelay || hasBlePeers || hasWifiPeers;
