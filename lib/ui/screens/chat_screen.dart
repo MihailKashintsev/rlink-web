@@ -502,6 +502,14 @@ class _ChatScreenState extends State<ChatScreen> {
     _resolvedPeerId = widget.peerId == kAiBotPeerId
         ? kAiBotPeerId
         : BleService.instance.resolvePublicKey(widget.peerId);
+    // If chat was opened by short code, try resolving to full relay key.
+    if (!_isAiBot && !_looksLikePublicKey(_resolvedPeerId)) {
+      final byPrefix =
+          RelayService.instance.findPeerByPrefix(_resolvedPeerId.toLowerCase());
+      if (byPrefix != null && _looksLikePublicKey(byPrefix)) {
+        _resolvedPeerId = byPrefix;
+      }
+    }
     unawaited(_loadAndMarkRead());
     unawaited(_checkContactStatus());
     _pinsListener = () {

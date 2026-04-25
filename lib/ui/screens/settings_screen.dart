@@ -1942,6 +1942,7 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
   final _ctrl = TextEditingController();
   bool _searching = false;
   Timer? _debounce;
+  static final RegExp _pubKey64 = RegExp(r'^[0-9a-fA-F]{64}$');
 
   @override
   void initState() {
@@ -1977,8 +1978,22 @@ class _PeerSearchSheetState extends State<_PeerSearchSheet> {
   }
 
   void _openDirect() {
-    final id = _ctrl.text.trim().toLowerCase();
-    if (id.length < 8) return;
+    final raw = _ctrl.text.trim();
+    if (raw.isEmpty) return;
+    String? id;
+    if (_pubKey64.hasMatch(raw)) {
+      id = raw.toLowerCase();
+    } else if (raw.length >= 8) {
+      id = RelayService.instance.findPeerByPrefix(raw.toLowerCase());
+    }
+    if (id == null || !_pubKey64.hasMatch(id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Нужен полный ключ (64 hex) или онлайн-пир по короткому коду'),
+        ),
+      );
+      return;
+    }
     widget.onOpenChat(id, '${id.substring(0, 8)}...', 0xFF607D8B, '');
   }
 

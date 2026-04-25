@@ -25,6 +25,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Timer? _debounce;
   String _lastQuery = '';
   bool _isSearching = false;
+  static final RegExp _pubKey64 = RegExp(r'^[0-9a-fA-F]{64}$');
 
   /// Query comes from parent AppBar search field
   String get _effectiveQuery => widget.searchQuery.trim();
@@ -145,8 +146,22 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 
   void _openDirectByKey(BuildContext context) {
-    final key = _effectiveQuery.toLowerCase();
-    if (key.length < 8) return;
+    final raw = _effectiveQuery.trim();
+    if (raw.isEmpty) return;
+    String? key;
+    if (_pubKey64.hasMatch(raw)) {
+      key = raw.toLowerCase();
+    } else if (raw.length >= 8) {
+      key = RelayService.instance.findPeerByPrefix(raw.toLowerCase());
+    }
+    if (key == null || !_pubKey64.hasMatch(key)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Нужен полный публичный ключ (64 hex) или онлайн-пир по коду'),
+        ),
+      );
+      return;
+    }
     final nick = '${key.substring(0, 8)}...';
     ChatStorageService.instance.saveContact(Contact(
       publicKeyHex: key,
