@@ -24,6 +24,19 @@ int? _jsonIntLoose(dynamic v) {
   return null;
 }
 
+String? _rid8From(String? publicKey) {
+  if (publicKey == null || publicKey.isEmpty) return null;
+  final key = publicKey.trim().toLowerCase();
+  if (key.isEmpty) return null;
+  return key.length >= 8 ? key.substring(0, 8) : key;
+}
+
+bool _matchesRid8(String? myPublicKey, String? rid8) {
+  if (rid8 == null || rid8.isEmpty) return true;
+  if (myPublicKey == null || myPublicKey.isEmpty) return false;
+  return myPublicKey.toLowerCase().startsWith(rid8.toLowerCase());
+}
+
 class GossipPacket {
   final String id;
   final String type;
@@ -374,8 +387,7 @@ class GossipRouter {
     // как поле 'r' в payload. Это позволяет другим узлам отфильтровать пакеты,
     // предназначенные не им (экономим 56 байт по сравнению с полным rid в пакете).
     // Вероятность коллизии 8 hex = 4 байта = 1/2^32 ≈ незначительна.
-    final rid8 =
-        (recipientId?.length ?? 0) >= 8 ? recipientId!.substring(0, 8) : null;
+    final rid8 = _rid8From(recipientId);
 
     final packetId = messageId ?? _uuid.v4();
 
@@ -473,7 +485,7 @@ class GossipRouter {
     String? forwardFromNick,
     String? forwardFromChannelId,
   }) async {
-    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
+    final rid8 = _rid8From(recipientId);
 
     final payload = <String, dynamic>{
       ...encrypted.toJson(),
@@ -1028,8 +1040,7 @@ class GossipRouter {
     String x25519Key = '',
     List<String> tags = const [],
   }) async {
-    final rid8 =
-        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final rid8 = _rid8From(recipientId) ?? '';
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'pair_req',
@@ -1067,8 +1078,7 @@ class GossipRouter {
     required String recipientId,
     List<String> tags = const [],
   }) async {
-    final rid8 =
-        recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    final rid8 = _rid8From(recipientId) ?? '';
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'pair_acc',
@@ -1319,7 +1329,7 @@ class GossipRouter {
         // Фильтрация по префиксу получателя: если 'r' задан и не совпадает с нашим ключом
         // значит сообщение предназначено другому пользователю — пропускаем
         final myKey = myPublicKey;
-        if (rid8 != null && myKey != null && !myKey.startsWith(rid8)) {
+        if (!_matchesRid8(myKey, rid8)) {
           debugPrint(
               '[RLINK][Gossip] Raw message not for us (rid prefix mismatch)');
           return;
@@ -1440,7 +1450,7 @@ class GossipRouter {
         // Фильтрация по 8-символьному префиксу получателя
         final rid8 = packet.payload['r'] as String?;
         final myKey = myPublicKey;
-        if (rid8 != null && myKey != null && !myKey.startsWith(rid8)) {
+        if (!_matchesRid8(myKey, rid8)) {
           // Не нам — пакет будет переслан в onPacketReceived
           return;
         }
@@ -1503,10 +1513,7 @@ class GossipRouter {
         final ffch = packet.payload['ffch'] as String?;
         // Фильтрация по rid8: не-аватарные пакеты, адресованные другому получателю, игнорируем
         final rid8 = packet.payload['r'] as String?;
-        if (!isAvatar &&
-            rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!isAvatar && !_matchesRid8(myPublicKey, rid8)) {
           debugPrint(
               '[RLINK][Gossip] img_meta not for us (rid8 mismatch), skip');
           if (msgId != null) _pendingImgChunks.remove(msgId);
@@ -1587,9 +1594,7 @@ class GossipRouter {
 
       if (packet.type == 'admin_cfg') {
         final rid8 = packet.payload['r'] as String?;
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           return;
         }
         onAdminConfig?.call(packet.payload);
@@ -1624,9 +1629,7 @@ class GossipRouter {
       if (packet.type == 'story_view') {
         // Only forward to app when the packet is addressed to us.
         final rid8 = packet.payload['r'] as String?;
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           return;
         }
         final storyId = packet.payload['sid'] as String?;
@@ -1650,9 +1653,7 @@ class GossipRouter {
                 const <String>[];
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_req not addressed to us (directed pairing)
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           debugPrint('[RLINK][Gossip] pair_req not for us (r=$rid8), dropping');
           return;
         }
@@ -1678,9 +1679,7 @@ class GossipRouter {
                 const <String>[];
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_acc not addressed to us (directed pairing)
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           debugPrint('[RLINK][Gossip] pair_acc not for us (r=$rid8), dropping');
           return;
         }
@@ -1699,9 +1698,7 @@ class GossipRouter {
         final username = packet.payload['u'] as String? ?? '';
         final rid8 = packet.payload['r'] as String?;
         final srcId = sourceId ?? publicKey ?? '';
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           return;
         }
         if (publicKey != null && nick != null && nick.isNotEmpty) {
@@ -1716,9 +1713,7 @@ class GossipRouter {
         final accepted = packet.payload['ok'] == true;
         final rid8 = packet.payload['r'] as String?;
         final srcId = sourceId ?? publicKey ?? '';
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           return;
         }
         if (publicKey != null) {
@@ -1731,9 +1726,7 @@ class GossipRouter {
         final publicKey = packet.payload['id'] as String?;
         final rid8 = packet.payload['r'] as String?;
         final srcId = sourceId ?? publicKey ?? '';
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           return;
         }
         if (publicKey != null) {
@@ -1746,9 +1739,7 @@ class GossipRouter {
         final publicKey = packet.payload['id'] as String?;
         final rid8 = packet.payload['r'] as String?;
         final srcId = sourceId ?? publicKey ?? '';
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           return;
         }
         if (publicKey != null) {
@@ -1765,9 +1756,7 @@ class GossipRouter {
         final snapshot = packet.payload['snap'] == true;
         final rid8 = packet.payload['r'] as String?;
         final srcId = sourceId ?? publicKey ?? '';
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           return;
         }
         if (publicKey != null && kind != null && kind.isNotEmpty) {
@@ -1788,9 +1777,7 @@ class GossipRouter {
         final rid8 = packet.payload['r'] as String?;
         if (from == null || activity == null) return;
         // Filter by recipient prefix
-        if (rid8 != null &&
-            myPublicKey != null &&
-            !myPublicKey!.startsWith(rid8)) {
+        if (!_matchesRid8(myPublicKey, rid8)) {
           return;
         }
         onTypingReceived?.call(from, activity);

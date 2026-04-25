@@ -8,6 +8,7 @@ const _statePrefix = 'rlink_web_';
 const _windowNameBucket = 'rlinkWebStateV1';
 const _bridgeReqType = 'rlink_parent_storage_req';
 const _bridgeResType = 'rlink_parent_storage_res';
+const _bridgeTimeout = Duration(milliseconds: 2500);
 
 int _bridgeSeq = 0;
 
@@ -64,7 +65,7 @@ Future<String?> _bridgeGet(String fullKey) async {
       'key': fullKey,
     }, '*');
     try {
-      return await c.future.timeout(const Duration(milliseconds: 800));
+      return await c.future.timeout(_bridgeTimeout);
     } on TimeoutException {
       await sub.cancel();
       if (!c.isCompleted) c.complete(null);
@@ -99,7 +100,7 @@ Future<void> _bridgeSet(String fullKey, String value) async {
       'value': value,
     }, '*');
     try {
-      await c.future.timeout(const Duration(milliseconds: 800));
+      await c.future.timeout(_bridgeTimeout);
     } on TimeoutException {
       await sub.cancel();
       if (!c.isCompleted) c.complete();
@@ -144,6 +145,9 @@ Future<String?> readWebState(String key) async {
   } catch (_) {}
   final bridged = await _bridgeGet(k);
   if (bridged != null && bridged.isNotEmpty) return bridged;
+  // Retry once: iframe/parent handshake can race on cold load.
+  final bridgedRetry = await _bridgeGet(k);
+  if (bridgedRetry != null && bridgedRetry.isNotEmpty) return bridgedRetry;
   final wm = _readWindowNameState();
   final fromName = wm[k];
   if (fromName != null && fromName.isNotEmpty) return fromName;
