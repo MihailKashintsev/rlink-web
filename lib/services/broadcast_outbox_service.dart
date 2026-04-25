@@ -25,6 +25,12 @@ class BroadcastOutboxService {
   BroadcastOutboxService._();
   static final BroadcastOutboxService instance = BroadcastOutboxService._();
 
+  Future<String> _dbPath(String fileName) async {
+    if (kIsWeb) return fileName;
+    final dir = await getApplicationDocumentsDirectory();
+    return p.join(dir.path, fileName);
+  }
+
   Database? _db;
   Timer? _timer;
   bool _running = false;
@@ -46,8 +52,7 @@ class BroadcastOutboxService {
 
   Future<void> init() async {
     if (_disposed) return;
-    final dir = await getApplicationDocumentsDirectory();
-    final path = p.join(dir.path, 'outbox_broadcast.db');
+    final path = await _dbPath('outbox_broadcast.db');
     _db = await openDatabase(
       path,
       version: 1,

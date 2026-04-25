@@ -51,6 +51,12 @@ class ChatStorageService {
   ChatStorageService._();
   static final ChatStorageService instance = ChatStorageService._();
 
+  Future<String> _dbPath(String fileName) async {
+    if (kIsWeb) return fileName;
+    final dir = await getApplicationDocumentsDirectory();
+    return join(dir.path, fileName);
+  }
+
   /// Один поток ЛС на Ed25519 ключ: в БД и нотификаторах всегда lowercase hex.
   static String normalizeDmPeerId(String peerId) {
     final t = peerId.trim();
@@ -82,8 +88,7 @@ class ChatStorageService {
     await close();
     // Очищаем кэш нотификаторов сообщений
     _messagesNotifiers.clear();
-    final dir = await getApplicationDocumentsDirectory();
-    final path = join(dir.path, 'rlink.db');
+    final path = await _dbPath('rlink.db');
     await deleteDatabase(path);
   }
 
@@ -93,8 +98,7 @@ class ChatStorageService {
       sqfliteFfiInit();
       databaseFactory = databaseFactoryFfi;
     }
-    final dir = await getApplicationDocumentsDirectory();
-    final path = join(dir.path, 'rlink.db');
+    final path = await _dbPath('rlink.db');
     _db = await openDatabase(
       path,
       version: 20,
@@ -434,6 +438,7 @@ class ChatStorageService {
   /// Записывает кэш имён контактов в файл для iOS-уведомлений.
   Future<void> _writeContactsCache() async {
     try {
+      if (kIsWeb) return;
       final dir = await getApplicationDocumentsDirectory();
       final file = File(join(dir.path, 'contacts_cache.json'));
       final contacts = _contactsNotifier.value;
