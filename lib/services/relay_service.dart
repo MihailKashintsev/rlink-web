@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart'
+    show WidgetsBinding, WidgetsBindingObserver, AppLifecycleState;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'app_settings.dart';
@@ -45,9 +47,17 @@ bool? _relayJsonBool(dynamic v) {
 /// go through the relay. GossipRouter doesn't even know which
 /// transport delivered the packet.
 /// ═══════════════════════════════════════════════════════════════════
-class RelayService {
+class RelayService with WidgetsBindingObserver {
   RelayService._();
   static final RelayService instance = RelayService._();
+
+  // ── Reliability state ────────────────────────────────────────
+  /// Время последнего полученного pong от сервера (для watchdog'а).
+  DateTime _lastPongAt = DateTime.now();
+  /// Счётчик неудачных попыток подключения (для exp backoff).
+  int _retryCount = 0;
+  /// Один раз навешиваем lifecycle-наблюдатель.
+  bool _lifecycleAttached = false;
 
   /// Default public relay server.
   /// Захардкожен — пользователь не может переопределить через настройки
@@ -248,15 +258,30 @@ class RelayService {
         if (x25519Key.isNotEmpty) 'x25519': x25519Key,
       }));
 
-      // Start ping timer (keep-alive every 30s)
+      // Start ping timer (keep-alive every 30s) с pong-watchdog'ом.
+      // Если за 70 сек не пришёл ни один pong — соединение мертво (tuna закрыла,
+      // сеть оборвалась без RST), форсим close → reconnect.
       _pingTimer?.cancel();
+      _lastPongAt = DateTime.now();
       _pingTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-        if (isConnected) {
+        if (!isConnected) return;
+        final since = DateTime.now().difference(_lastPongAt);
+        if (since > const Duration(seconds: 70)) {
+          debugPrint(
+              '[RLINK][Relay] No pong for ${since.inSeconds}s — closing socket');
           try {
-            _channel?.sink.add(jsonEncode({'type': 'ping'}));
+            _channel?.sink.close();
           } catch (_) {}
+          return;
         }
+        try {
+          _channel?.sink.add(jsonEncode({'type': 'ping'}));
+        } catch (_) {}
       });
+
+      // Подписаться на AppLifecycleState один раз — чтобы при возврате окна
+      // из background сразу проверить, жив ли сокет.
+      _attachLifecycleObserver();
 
       state.value = RelayState.connected;
       lastError.value = null;
@@ -300,14 +325,20 @@ class RelayService {
   }
 
   void _onDisconnected() {
+    // Capture closeCode/closeReason до того как обнулим _channel.
+    final cc = _channel?.closeCode;
+    final cr = _channel?.closeReason;
     _pingTimer?.cancel();
     _subscription?.cancel();
     _channel = null;
     _chunkQueue.clear();
     _draining = false;
     state.value = RelayState.disconnected;
-    lastError.value ??=
-        'Соединение закрыто сервером (возможен блок по Origin/прокси)';
+    final detail = cc == null
+        ? ''
+        : ' (closeCode=$cc${cr == null || cr.isEmpty ? '' : ', $cr'})';
+    debugPrint('[RLINK][Relay] Disconnected$detail');
+    lastError.value = 'Соединение закрыто$detail';
     if (!_intentionalClose && !_disposed) {
       _scheduleReconnect();
     }
@@ -315,7 +346,11 @@ class RelayService {
 
   void _scheduleReconnect() {
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(const Duration(seconds: 5), () {
+    // Экспоненциальный backoff: 1, 2, 4, 8, 16, 30, 30, … секунд (cap 30).
+    final delay = _retryCount >= 5 ? 30 : (1 << _retryCount);
+    _retryCount++;
+    debugPrint('[RLINK][Relay] Reconnect in ${delay}s (attempt #$_retryCount)');
+    _reconnectTimer = Timer(Duration(seconds: delay), () {
       if (!_disposed &&
           !_intentionalClose &&
           AppSettings.instance.connectionMode >= 1) {
@@ -324,8 +359,46 @@ class RelayService {
     });
   }
 
+  // ── Lifecycle observer ─────────────────────────────────────────
+  void _attachLifecycleObserver() {
+    if (_lifecycleAttached) return;
+    try {
+      WidgetsBinding.instance.addObserver(this);
+      _lifecycleAttached = true;
+    } catch (_) {
+      // WidgetsBinding ещё не инициализирован (например, в early init или unit-test) — не критично.
+    }
+  }
+
+  // Параметр назван `lifecycle`, чтобы не затенять поле класса `state`
+  // (ValueNotifier<RelayState>). Линт avoid_renaming_method_parameters
+  // здесь игнорируется осознанно.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycle) { // ignore: avoid_renaming_method_parameters
+    if (lifecycle != AppLifecycleState.resumed) return;
+    if (state.value != RelayState.connected) {
+      debugPrint('[RLINK][Relay] Lifecycle resumed (state=${state.value}) → reconnect');
+      reconnect();
+      return;
+    }
+    // Соединение помечено connected, но за время сна сокет мог стать мёртвым
+    // незаметно. Если pong старее 30 сек — превентивно переподключаемся.
+    final since = DateTime.now().difference(_lastPongAt);
+    if (since > const Duration(seconds: 30)) {
+      debugPrint(
+          '[RLINK][Relay] Lifecycle resumed, stale pong (${since.inSeconds}s) → reconnect');
+      reconnect();
+    }
+  }
+
   void dispose() {
     _disposed = true;
+    if (_lifecycleAttached) {
+      try {
+        WidgetsBinding.instance.removeObserver(this);
+      } catch (_) {}
+      _lifecycleAttached = false;
+    }
     disconnect();
   }
 
@@ -630,6 +703,9 @@ class RelayService {
         case 'registered':
           final count = _relayJsonInt(msg['onlineCount']);
           onlineCount.value = count;
+          // Успешный handshake → сбрасываем backoff.
+          _retryCount = 0;
+          _lastPongAt = DateTime.now();
           debugPrint('[RLINK][Relay] Registered, $count users online');
           break;
 
@@ -654,7 +730,9 @@ class RelayService {
           break;
 
         case 'pong':
-          break; // keep-alive response
+          // keep-alive response — обновляем watchdog
+          _lastPongAt = DateTime.now();
+          break;
 
         case 'account_sync_blob':
           final data = msg['data'] as String?;

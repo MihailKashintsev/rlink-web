@@ -548,6 +548,10 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
 // ── WebSocket handler ───────────────────────────────────────────
 
 shelf.Handler _wsHandler() {
+  // pingInterval=25s включает native WebSocket control-pings (RFC 6455 ping/pong
+  // на уровне протокола, не application-level). Браузер отвечает автоматически
+  // без JS-таймеров — не подвержен throttling неактивных табов. Это держит WS
+  // живым через tuna и другие прокси (обычный idle-timeout 60-120 сек).
   return webSocketHandler((WebSocketChannel ws) {
     _User? user;
     ws.stream.listen(
@@ -625,18 +629,25 @@ shelf.Handler _wsHandler() {
       },
       onDone: () {
         if (user != null) {
+          final cc = ws.closeCode;
+          final cr = ws.closeReason;
           _users.remove(user!.publicKey);
           _broadcastPresence(user!.publicKey, false);
-          stdout.writeln('[-] ${user!.nick.isEmpty ? user!.shortId : user!.nick} disconnected (${_users.length} online)');
+          final id = user!.nick.isEmpty ? user!.shortId : user!.nick;
+          final detail = cc == null
+              ? ''
+              : ' [closeCode=$cc${cr == null || cr.isEmpty ? '' : ', $cr'}]';
+          stdout.writeln('[-] $id disconnected (${_users.length} online)$detail');
         }
       },
-      onError: (_) {
+      onError: (e) {
         if (user != null) {
           _users.remove(user!.publicKey);
+          stdout.writeln('[-] ${user!.shortId} ws error: $e');
         }
       },
     );
-  });
+  }, pingInterval: const Duration(seconds: 25));
 }
 
 void _broadcastPresence(String publicKey, bool online) {
