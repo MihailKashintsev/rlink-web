@@ -27,6 +27,8 @@ dependencies:
   sqflite: ^2.3.3+1
   sqflite_common_ffi: ^2.3.3  # Windows / Linux desktop
   sqflite_common_ffi_web: ^0.4.2
+  # Keep sqlite3 on 2.x: sqflite_common_ffi_web currently ships a 2.x wasm binary.
+  sqlite3: 2.4.6
   path_provider: ^2.1.3
   path: ^1.9.0
   characters: ^1.3.0
