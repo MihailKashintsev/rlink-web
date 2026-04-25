@@ -5,6 +5,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'account_kv_store.dart';
 import 'runtime_platform.dart';
 import 'web_state_store.dart';
 
@@ -38,6 +39,12 @@ class CryptoService {
     if (RuntimePlatform.isWeb) {
       final web = await readWebState(key);
       if (web != null && web.isNotEmpty) return web;
+      final durable = await AccountKvStore.read(key);
+      if (durable != null && durable.isNotEmpty) {
+        // Best-effort resync back to bridge/local storage.
+        await writeWebState(key, durable);
+        return durable;
+      }
     }
     if (_isMobile) return _secureSt.read(key: key);
     final prefs = await SharedPreferences.getInstance();
@@ -47,6 +54,7 @@ class CryptoService {
   Future<void> _write(String key, String value) async {
     if (RuntimePlatform.isWeb) {
       await writeWebState(key, value);
+      await AccountKvStore.write(key, value);
     }
     if (_isMobile) {
       await _secureSt.write(key: key, value: value);

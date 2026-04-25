@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/user_profile.dart';
+import 'account_kv_store.dart';
 import 'crypto_service.dart';
 import 'runtime_platform.dart';
 import 'web_state_store.dart';
@@ -28,6 +29,11 @@ class ProfileService {
     if (RuntimePlatform.isWeb) {
       final web = await readWebState(_kProfileKey);
       if (web != null && web.isNotEmpty) return web;
+      final durable = await AccountKvStore.read(_kProfileKey);
+      if (durable != null && durable.isNotEmpty) {
+        await writeWebState(_kProfileKey, durable);
+        return durable;
+      }
     }
     if (_isMobile) return _secureSt.read(key: _kProfileKey);
     final prefs = await SharedPreferences.getInstance();
@@ -37,6 +43,7 @@ class ProfileService {
   Future<void> _write(String value) async {
     if (RuntimePlatform.isWeb) {
       await writeWebState(_kProfileKey, value);
+      await AccountKvStore.write(_kProfileKey, value);
     }
     if (_isMobile) {
       await _secureSt.write(key: _kProfileKey, value: value);
