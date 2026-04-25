@@ -146,6 +146,25 @@ class RelayService with WidgetsBindingObserver {
   /// чтобы клиенты не могли подключаться к чужим relay.
   String? get serverUrl => defaultServerUrl;
 
+  Future<void> _safeSend(
+    Map<String, dynamic> payload, {
+    String context = '',
+  }) async {
+    final ch = _channel;
+    if (ch == null) return;
+    try {
+      ch.sink.add(jsonEncode(payload));
+    } catch (e) {
+      final msg = e.toString();
+      debugPrint('[RLINK][Relay] send failed${context.isEmpty ? '' : ' ($context)'}: $msg');
+      // Browser can throw NotFoundError when underlying WS object is gone.
+      // Force reconnect to restore a valid transport.
+      if (!_intentionalClose && !_disposed) {
+        unawaited(reconnect());
+      }
+    }
+  }
+
   /// Check if a peer is online on relay
   bool isPeerOnline(String publicKey) => _peerOnline[publicKey] ?? false;
 
@@ -255,13 +274,13 @@ class RelayService with WidgetsBindingObserver {
       final nick = profile?.nickname ?? '';
       final username = profile?.username ?? '';
       final x25519Key = CryptoService.instance.x25519PublicKeyBase64;
-      _channel!.sink.add(jsonEncode({
+      await _safeSend({
         'type': 'register',
         'publicKey': myKey,
         'nick': nick,
         if (username.isNotEmpty) 'username': username,
         if (x25519Key.isNotEmpty) 'x25519': x25519Key,
-      }));
+      }, context: 'register');
 
       // Start ping timer (keep-alive every 30s) с pong-watchdog'ом.
       // Если за 70 сек не пришёл ни один pong — соединение мертво (tuna закрыла,
@@ -280,7 +299,7 @@ class RelayService with WidgetsBindingObserver {
           return;
         }
         try {
-          _channel?.sink.add(jsonEncode({'type': 'ping'}));
+          _safeSend({'type': 'ping'}, context: 'ping');
         } catch (_) {}
       });
 
@@ -441,7 +460,7 @@ class RelayService with WidgetsBindingObserver {
             'to=${_relayShort(recipientKey ?? '')} rid=${_relayShort(packet.recipientId ?? '')} '
             'r8=${packet.payload['r'] ?? '-'}');
       }
-      _channel?.sink.add(jsonEncode(envelope));
+      await _safeSend(envelope, context: 'sendPacket:${packet.type}');
     }
   }
 
@@ -457,7 +476,7 @@ class RelayService with WidgetsBindingObserver {
       return;
     }
     final msg = _chunkQueue.removeAt(0);
-    _channel?.sink.add(jsonEncode(msg));
+    unawaited(_safeSend(msg, context: 'drainChunk'));
     Future.delayed(_chunkInterval, _drainNext);
   }
 
@@ -477,7 +496,7 @@ class RelayService with WidgetsBindingObserver {
         debugPrint('[RLINK][Relay][TX] type=ether id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
             'len=${(packet.payload['text'] as String?)?.length ?? 0}');
       }
-      _channel?.sink.add(jsonEncode(envelope));
+      await _safeSend(envelope, context: 'broadcastPacket:${packet.type}');
     }
   }
 
@@ -518,7 +537,7 @@ class RelayService with WidgetsBindingObserver {
       if (viewOnce) 'vo': true,
     };
     try {
-      _channel?.sink.add(jsonEncode(msg));
+      await _safeSend(msg, context: 'sendBlob');
       debugPrint('[RLINK][Relay] Sent blob ${compressedData.length} bytes for $msgId');
     } catch (e) {
       debugPrint('[RLINK][Relay] Failed to send blob: $e');
@@ -564,7 +583,7 @@ class RelayService with WidgetsBindingObserver {
       if (chunkIdx == 0 && viewOnce) 'vo': true,
     };
     try {
-      _channel?.sink.add(jsonEncode(msg));
+      await _safeSend(msg, context: 'sendBlobChunk');
       debugPrint('[RLINK][Relay] Sent blob chunk $chunkIdx/$chunkTotal '
           '(${chunkData.length} bytes) for $msgId');
     } catch (e) {
@@ -601,10 +620,10 @@ class RelayService with WidgetsBindingObserver {
 
     // Also query server for authoritative results
     if (isConnected) {
-      _channel?.sink.add(jsonEncode({
+      _safeSend({
         'type': 'search',
         'query': q,
-      }));
+      }, context: 'search');
     }
   }
 
@@ -793,11 +812,11 @@ class RelayService with WidgetsBindingObserver {
     if (payload.isEmpty || payload.length > 16384) return;
     if (signatureHex.length != 128) return;
     try {
-      _channel?.sink.add(jsonEncode({
+      await _safeSend({
         'type': 'channel_dir_put',
         'payload': payload,
         'signature': signatureHex,
-      }));
+      }, context: 'channel_dir_put');
     } catch (e) {
       debugPrint('[RLINK][Relay] channel_dir_put failed: $e');
     }
@@ -808,10 +827,10 @@ class RelayService with WidgetsBindingObserver {
     if (!isConnected) return;
     if (sealedBoxJson.length > 131072) return;
     try {
-      _channel?.sink.add(jsonEncode({
+      await _safeSend({
         'type': 'account_sync_put',
         'data': sealedBoxJson,
-      }));
+      }, context: 'account_sync_put');
     } catch (e) {
       debugPrint('[RLINK][Relay] account_sync_put failed: $e');
     }
