@@ -255,10 +255,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Диалог «Избранное» (peer_id = наш ключ): только локальная БД, без mesh/relay.
   bool get _savedMessagesLocalOnly {
-    final my = CryptoService.instance.publicKeyHex;
+    final my = ChatStorageService.normalizeDmPeerId(
+        CryptoService.instance.publicKeyHex);
     if (my.isEmpty) return false;
-    final peer =
-        _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
+    final peer = ChatStorageService.normalizeDmPeerId(
+        _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId);
     return peer == my;
   }
 
@@ -733,7 +734,7 @@ class _ChatScreenState extends State<ChatScreen> {
       await _saveAndTrack(
           ChatMessage(
             id: msgId,
-            peerId: targetPeerId,
+            peerId: ChatStorageService.normalizeDmPeerId(targetPeerId),
             text: '🎤 Голосовое',
             isOutgoing: true,
             timestamp: DateTime.now(),
@@ -1841,6 +1842,8 @@ class _ChatScreenState extends State<ChatScreen> {
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
           ? _resolvedPeerId
           : widget.peerId;
+      final canonicalTargetPeerId =
+          ChatStorageService.normalizeDmPeerId(targetPeerId);
       final lat = _pendingLat;
       final lng = _pendingLng;
       setState(() {
@@ -1849,7 +1852,7 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       final msg = ChatMessage(
         id: msgId,
-        peerId: targetPeerId,
+        peerId: canonicalTargetPeerId,
         text: text,
         replyToMessageId: _replyToMessageId,
         latitude: lat,
@@ -1859,15 +1862,18 @@ class _ChatScreenState extends State<ChatScreen> {
         status: MessageStatus.sending,
       );
       await ChatStorageService.instance.saveMessage(msg);
+      await ChatStorageService.instance.loadMessages(canonicalTargetPeerId);
       _scrollToBottom();
 
       // Check X25519 key: BLE service first, then relay service
-      var x25519Key = BleService.instance.getPeerX25519Key(targetPeerId);
+      var x25519Key =
+          BleService.instance.getPeerX25519Key(canonicalTargetPeerId);
       if (x25519Key == null || x25519Key.isEmpty) {
-        x25519Key = RelayService.instance.getPeerX25519Key(targetPeerId);
+        x25519Key =
+            RelayService.instance.getPeerX25519Key(canonicalTargetPeerId);
       }
 
-      debugPrint('[RLINK][Chat] Sending to ${targetPeerId.substring(0, 8)}, '
+      debugPrint('[RLINK][Chat] Sending to ${canonicalTargetPeerId.substring(0, 8)}, '
           'x25519=${x25519Key != null && x25519Key.isNotEmpty ? "YES" : "NO"}, '
           'relay=${RelayService.instance.isConnected}, '
           'mode=${AppSettings.instance.connectionMode}');
@@ -1882,7 +1888,7 @@ class _ChatScreenState extends State<ChatScreen> {
           await GossipRouter.instance.sendEncryptedMessage(
             encrypted: encrypted,
             senderId: myId,
-            recipientId: targetPeerId,
+            recipientId: canonicalTargetPeerId,
             messageId: msgId,
             latitude: lat,
             longitude: lng,
@@ -1894,7 +1900,7 @@ class _ChatScreenState extends State<ChatScreen> {
           await GossipRouter.instance.sendRawMessage(
             text: text,
             senderId: myId,
-            recipientId: targetPeerId,
+            recipientId: canonicalTargetPeerId,
             messageId: msgId,
             replyToMessageId: _replyToMessageId,
             latitude: lat,

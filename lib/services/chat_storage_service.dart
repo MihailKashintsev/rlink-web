@@ -63,6 +63,11 @@ class ChatStorageService {
   final _messageSavedController = StreamController<ChatMessage>.broadcast();
   Stream<ChatMessage> get messageSavedStream => _messageSavedController.stream;
 
+  Future<void> _ensureDbReady() async {
+    if (_db != null) return;
+    await init();
+  }
+
   /// Bumps when DM read cursors change — chat list refreshes unread badges.
   final readStateVersion = ValueNotifier<int>(0);
 
@@ -351,6 +356,7 @@ class ChatStorageService {
   // ── Контакты ─────────────────────────────────────────────────
 
   Future<void> saveContact(Contact contact) async {
+    await _ensureDbReady();
     final map = contact.toMap();
     map['id'] = normalizeDmPeerId(contact.publicKeyHex);
     await _db?.insert('contacts', map,
@@ -366,11 +372,13 @@ class ChatStorageService {
   }
 
   Future<List<Contact>> getContacts() async {
+    await _ensureDbReady();
     final rows = await _db?.query('contacts', orderBy: 'nick ASC') ?? [];
     return rows.map(Contact.fromMap).toList();
   }
 
   Future<Contact?> getContact(String id) async {
+    await _ensureDbReady();
     final key = normalizeDmPeerId(id);
     final rows =
         await _db?.query('contacts', where: 'id = ?', whereArgs: [key]);
@@ -471,6 +479,7 @@ class ChatStorageService {
   // ── Сообщения ────────────────────────────────────────────────
 
   Future<void> saveMessage(ChatMessage message) async {
+    await _ensureDbReady();
     final peerKey = normalizeDmPeerId(message.peerId);
     final stored = peerKey == message.peerId
         ? message
@@ -654,6 +663,7 @@ class ChatStorageService {
 
   Future<List<ChatMessage>> getMessages(String peerId,
       {int limit = 100}) async {
+    await _ensureDbReady();
     final pid = normalizeDmPeerId(peerId);
     final rows = await _db?.query(
           'messages',
@@ -968,6 +978,7 @@ class ChatStorageService {
   }
 
   Future<void> loadMessages(String peerId) async {
+    await _ensureDbReady();
     final pid = normalizeDmPeerId(peerId);
     final msgs = await getMessages(pid);
     messagesNotifier(pid).value = msgs;
