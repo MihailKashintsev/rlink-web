@@ -13,6 +13,8 @@ abstract class PacketTransport {
 class DefaultPacketTransport implements PacketTransport {
   final MeshForwarder _meshForwarder = createMeshForwarder();
 
+  static final RegExp _pubKeyHex = RegExp(r'^[0-9a-fA-F]{64}$');
+
   @override
   Future<void> forward(GossipPacket packet) async {
     final mode = AppSettings.instance.connectionMode;
@@ -23,9 +25,14 @@ class DefaultPacketTransport implements PacketTransport {
     // 2) Relay transport (works for mobile and web internet mode).
     if (RelayService.instance.isConnected && mode >= 1) {
       try {
+        // Prefer explicit full recipient id when packet carries one.
+        final explicitRecipient = packet.recipientId;
         final rid8 = packet.payload['r'] as String?;
         String? recipientKey;
-        if (rid8 != null) {
+        if (explicitRecipient != null &&
+            _pubKeyHex.hasMatch(explicitRecipient.trim())) {
+          recipientKey = explicitRecipient.trim().toLowerCase();
+        } else if (rid8 != null) {
           recipientKey = RelayService.instance.findPeerByPrefix(rid8);
         }
         if (recipientKey != null && recipientKey.isNotEmpty) {

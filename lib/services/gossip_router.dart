@@ -448,6 +448,7 @@ class GossipRouter {
       type: 'raw',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
       payload: payload,
     );
     _markSeen(packet.id);
@@ -539,6 +540,7 @@ class GossipRouter {
       type: 'msg',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
       payload: payload,
     );
     _markSeen(packet.id);
@@ -561,6 +563,7 @@ class GossipRouter {
       type: 'dm_pin',
       ttl: 5,
       timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
       payload: {
         'mid': messageId,
         'a': add,
@@ -612,6 +615,7 @@ class GossipRouter {
       type: 'edit',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
       payload: {
         'messageId': messageId,
         'text': newText,
@@ -636,6 +640,7 @@ class GossipRouter {
       type: 'delete',
       ttl: _kDefaultTtl,
       timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
       payload: {
         'messageId': messageId,
         if (rid8 != null) 'r': rid8,
@@ -1030,6 +1035,7 @@ class GossipRouter {
       type: 'pair_req',
       ttl: 1,
       timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
       payload: {
         'id': publicKey,
         'nick': nick,
@@ -1068,6 +1074,7 @@ class GossipRouter {
       type: 'pair_acc',
       ttl: 1,
       timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
       payload: {
         'id': publicKey,
         'nick': nick,
