@@ -38,6 +38,7 @@ Future<void> _backfillDmReadCursors(Database db) async {
 }
 
 Future<void> _tryDeleteLocalMediaFile(String? path) async {
+  if (kIsWeb) return;
   if (path == null || path.isEmpty) return;
   final resolved = ImageService.instance.resolveStoredPath(path) ?? path;
   try {
@@ -83,13 +84,12 @@ class ChatStorageService {
     _messagesNotifiers.clear();
     final dir = await getApplicationDocumentsDirectory();
     final path = join(dir.path, 'rlink.db');
-    final file = File(path);
-    if (await file.exists()) await file.delete();
+    await deleteDatabase(path);
   }
 
   Future<void> init() async {
     // Windows/Linux: использует FFI-реализацию SQLite вместо нативной
-    if (Platform.isWindows || Platform.isLinux) {
+    if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {
       sqfliteFfiInit();
       databaseFactory = databaseFactoryFfi;
     }
