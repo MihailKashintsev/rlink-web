@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -28,7 +29,10 @@ class GigachatService {
   static const _filesUrl =
       'https://gigachat.devices.sberbank.ru/api/v1/files';
 
-  static bool get _isMobile => Platform.isIOS || Platform.isAndroid;
+  static bool get _isMobile =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android);
 
   final _secure = const FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
@@ -70,13 +74,7 @@ class GigachatService {
   }
 
   Future<void> _syncDioAdapter() async {
-    if (!Platform.isAndroid &&
-        !Platform.isIOS &&
-        !Platform.isMacOS &&
-        !Platform.isLinux &&
-        !Platform.isWindows) {
-      return;
-    }
+    if (kIsWeb) return;
     final prefs = await SharedPreferences.getInstance();
     final insecure = prefs.getBool(_kInsecureTlsWorkaround) ?? false;
     if (_dioAdapterSynced && insecure == _dioAdapterInsecure) return;
