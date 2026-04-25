@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 
 import 'app_settings.dart';
 import 'gossip_router.dart' show GossipPacket;
@@ -14,6 +15,7 @@ class DefaultPacketTransport implements PacketTransport {
   final MeshForwarder _meshForwarder = createMeshForwarder();
 
   static final RegExp _pubKeyHex = RegExp(r'^[0-9a-fA-F]{64}$');
+  String _short(String v) => v.isEmpty ? 'empty' : (v.length > 8 ? v.substring(0, 8) : v);
 
   @override
   Future<void> forward(GossipPacket packet) async {
@@ -36,6 +38,18 @@ class DefaultPacketTransport implements PacketTransport {
           recipientKey = explicitRecipient.trim();
         } else if (rid8 != null) {
           recipientKey = RelayService.instance.findPeerByPrefix(rid8);
+        }
+        if (packet.type == 'msg' ||
+            packet.type == 'raw' ||
+            packet.type == 'pair_req' ||
+            packet.type == 'pair_acc' ||
+            packet.type == 'ether') {
+          final route = (recipientKey != null && recipientKey.isNotEmpty) ? 'direct' : 'broadcast';
+          // Detailed routing trace for DM/pair/ether diagnostics.
+          // Helps identify wrong key/prefix resolution in web flows.
+          debugPrint('[RLINK][Transport] type=${packet.type} route=$route '
+              'rid=${_short(packet.recipientId ?? '')} r8=${packet.payload['r'] ?? '-'} '
+              'resolved=${_short(recipientKey ?? '')} explicit=${_short(explicitRecipient ?? '')}');
         }
         if (recipientKey != null && recipientKey.isNotEmpty) {
           await RelayService.instance.sendPacket(packet, recipientKey: recipientKey);

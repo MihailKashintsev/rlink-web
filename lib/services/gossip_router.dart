@@ -463,6 +463,8 @@ class GossipRouter {
       recipientId: recipientId,
       payload: payload,
     );
+    debugPrint('[RLINK][Gossip][TX] type=raw id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+        'to=${_rid8From(recipientId) ?? '-'} from=${senderId.substring(0, senderId.length.clamp(0, 8))}');
     _markSeen(packet.id);
     for (var i = 0; i < 3; i++) {
       await _forward(packet);
@@ -555,6 +557,8 @@ class GossipRouter {
       recipientId: recipientId,
       payload: payload,
     );
+    debugPrint('[RLINK][Gossip][TX] type=msg id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+        'to=${_rid8From(recipientId) ?? '-'} from=${senderId.substring(0, senderId.length.clamp(0, 8))}');
     _markSeen(packet.id);
     for (var i = 0; i < 3; i++) {
       await _forwardEncrypted(packet);
@@ -827,6 +831,8 @@ class GossipRouter {
       timestamp: DateTime.now().millisecondsSinceEpoch,
       payload: payload,
     );
+    debugPrint('[RLINK][Gossip][TX] type=ether id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+        'len=${text.length} from=${(senderId ?? '').substring(0, (senderId ?? '').length.clamp(0, 8))}');
     _markSeen(packet.id);
     // Ether is broadcast — retry 3 times for reliability over flaky BLE.
     // Receivers dedup via _hasSeen so this is safe.
@@ -1058,6 +1064,8 @@ class GossipRouter {
         if (tags.isNotEmpty) 'tags': tags,
       },
     );
+    debugPrint('[RLINK][Gossip][TX] type=pair_req id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+        'to=$rid8 from=${publicKey.substring(0, publicKey.length.clamp(0, 8))}');
     _markSeen(packet.id);
     // Retry for reliability over BLE
     for (var i = 0; i < 3; i++) {
@@ -1096,6 +1104,8 @@ class GossipRouter {
         if (tags.isNotEmpty) 'tags': tags,
       },
     );
+    debugPrint('[RLINK][Gossip][TX] type=pair_acc id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+        'to=$rid8 from=${publicKey.substring(0, publicKey.length.clamp(0, 8))}');
     _markSeen(packet.id);
     // Retry for reliability
     for (var i = 0; i < 3; i++) {
@@ -1451,9 +1461,12 @@ class GossipRouter {
         final rid8 = packet.payload['r'] as String?;
         final myKey = myPublicKey;
         if (!_matchesRid8(myKey, rid8)) {
+          debugPrint('[RLINK][Gossip][DROP] type=msg id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+              'my=${(myKey ?? '').substring(0, (myKey ?? '').length.clamp(0, 8))} rid8=${rid8 ?? '-'}');
           // Не нам — пакет будет переслан в onPacketReceived
           return;
         }
+        debugPrint('[RLINK][Gossip][RX] type=msg id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} rid8=${rid8 ?? '-'}');
         final encrypted = EncryptedMessage.fromJson(packet.payload);
         // Drop malformed encrypted messages — prevents ciphertext leaking as plaintext
         if (encrypted.ephemeralPublicKey.isEmpty ||
@@ -1536,8 +1549,8 @@ class GossipRouter {
       if (packet.type == 'ether') {
         final text = packet.payload['text'] as String?;
         final color = _jsonIntLoose(packet.payload['col']);
-        debugPrint(
-            '[RLINK][Gossip] Ether packet: text=${text == null ? 'null' : text.substring(0, text.length.clamp(0, 20))} col=$color handler=${onEtherReceived != null}');
+        debugPrint('[RLINK][Gossip][RX] type=ether id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+            'textLen=${text?.length ?? 0} col=$color handler=${onEtherReceived != null}');
         if (text != null && text.isNotEmpty && color != null) {
           final senderId = packet.payload['from'] as String?;
           final senderNick = packet.payload['nick'] as String?;
@@ -1654,12 +1667,13 @@ class GossipRouter {
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_req not addressed to us (directed pairing)
         if (!_matchesRid8(myPublicKey, rid8)) {
-          debugPrint('[RLINK][Gossip] pair_req not for us (r=$rid8), dropping');
+          debugPrint('[RLINK][Gossip][DROP] type=pair_req id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+              'my=${(myPublicKey ?? '').substring(0, (myPublicKey ?? '').length.clamp(0, 8))} r=$rid8');
           return;
         }
         if (publicKey != null && nick != null && color != null) {
           debugPrint(
-              '[RLINK][Gossip] Pair request from $nick (${publicKey.substring(0, 8)})');
+              '[RLINK][Gossip][RX] type=pair_req from=${publicKey.substring(0, 8)} nick=$nick');
           onPairRequest?.call(
               bleId, publicKey, nick, username, color, emoji, x25519Key, tags);
         }
@@ -1680,12 +1694,13 @@ class GossipRouter {
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_acc not addressed to us (directed pairing)
         if (!_matchesRid8(myPublicKey, rid8)) {
-          debugPrint('[RLINK][Gossip] pair_acc not for us (r=$rid8), dropping');
+          debugPrint('[RLINK][Gossip][DROP] type=pair_acc id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+              'my=${(myPublicKey ?? '').substring(0, (myPublicKey ?? '').length.clamp(0, 8))} r=$rid8');
           return;
         }
         if (publicKey != null && nick != null && color != null) {
           debugPrint(
-              '[RLINK][Gossip] Pair accepted by $nick (${publicKey.substring(0, 8)})');
+              '[RLINK][Gossip][RX] type=pair_acc from=${publicKey.substring(0, 8)} nick=$nick');
           onPairAccepted?.call(
               bleId, publicKey, nick, username, color, emoji, x25519Key, tags);
         }

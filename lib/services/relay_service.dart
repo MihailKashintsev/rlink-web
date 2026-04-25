@@ -32,6 +32,11 @@ bool? _relayJsonBool(dynamic v) {
   return null;
 }
 
+String _relayShort(String key) {
+  if (key.isEmpty) return 'empty';
+  return key.length > 8 ? key.substring(0, 8) : key;
+}
+
 /// ═══════════════════════════════════════════════════════════════════
 /// RelayService — WebSocket transport for internet messaging
 /// ═══════════════════════════════════════════════════════════════════
@@ -428,6 +433,14 @@ class RelayService with WidgetsBindingObserver {
       _startDraining();
     } else {
       // Control, text, meta, profile packets go out immediately
+      if (packet.type == 'msg' ||
+          packet.type == 'raw' ||
+          packet.type == 'pair_req' ||
+          packet.type == 'pair_acc') {
+        debugPrint('[RLINK][Relay][TX] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+            'to=${_relayShort(recipientKey ?? '')} rid=${_relayShort(packet.recipientId ?? '')} '
+            'r8=${packet.payload['r'] ?? '-'}');
+      }
       _channel?.sink.add(jsonEncode(envelope));
     }
   }
@@ -460,6 +473,10 @@ class RelayService with WidgetsBindingObserver {
       _chunkQueue.add(envelope);
       _startDraining();
     } else {
+      if (packet.type == 'ether') {
+        debugPrint('[RLINK][Relay][TX] type=ether id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+            'len=${(packet.payload['text'] as String?)?.length ?? 0}');
+      }
       _channel?.sink.add(jsonEncode(envelope));
     }
   }
@@ -825,6 +842,16 @@ class RelayService with WidgetsBindingObserver {
       }
 
       if (!handled) {
+        final decoded = GossipPacket.decode(Uint8List.fromList(bytes));
+        if (decoded != null &&
+            (decoded.type == 'msg' ||
+                decoded.type == 'raw' ||
+                decoded.type == 'pair_req' ||
+                decoded.type == 'pair_acc' ||
+                decoded.type == 'ether')) {
+          debugPrint('[RLINK][Relay][RX] type=${decoded.type} id=${decoded.id.substring(0, decoded.id.length.clamp(0, 8))} '
+              'from=${_relayShort(from)} rid=${_relayShort(decoded.recipientId ?? '')} r8=${decoded.payload['r'] ?? '-'}');
+        }
         // Regular gossip packet — feed to GossipRouter
         GossipRouter.instance.onPacketReceived(
           Uint8List.fromList(bytes),
