@@ -336,12 +336,17 @@ class BleService {
 
   Future<void> start() async {
     if (_isRunning) return;
+    if (kIsWeb) {
+      _isRunning = false;
+      return;
+    }
     _isRunning = true;
 
     // BLE не поддерживается на Windows/Linux — работаем только на мобильных и macOS
-    if (kIsWeb || _isWindows || _isLinux) {
-      final os = kIsWeb ? 'web' : Platform.operatingSystem;
+    if (_isWindows || _isLinux) {
+      final os = Platform.operatingSystem;
       debugPrint('[RLINK][BLE] BLE not supported on $os, skipping');
+      _isRunning = false;
       return;
     }
 
@@ -382,6 +387,7 @@ class BleService {
   }
 
   Future<void> rescan() async {
+    if (kIsWeb) return;
     debugPrint('[RLINK][BLE] Manual rescan');
     _startScan();
   }
@@ -421,6 +427,20 @@ class BleService {
   }
 
   Future<void> stop() async {
+    if (kIsWeb) {
+      _isRunning = false;
+      _advertisingStarted = false;
+      _scanRestartTimer?.cancel();
+      _keepAliveTimer?.cancel();
+      _scanRestartTimer = null;
+      _keepAliveTimer = null;
+      _connectedPeers.clear();
+      _txChars.clear();
+      _connecting.clear();
+      _connectedCentralIds.clear();
+      peersCount.value = 0;
+      return;
+    }
     _isRunning = false;
     _advertisingStarted = false;
     if (!kIsWeb && !_isWindows && !_isLinux) {
@@ -445,6 +465,7 @@ class BleService {
   }
 
   Future<void> broadcastPacket(GossipPacket packet) async {
+    if (kIsWeb) return;
     final bytes = packet.encode();
     if (_isAndroid || _isIOS || _isMacOS) {
       // Notify subscribed Centrals via native peripheral manager
