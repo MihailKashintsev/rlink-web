@@ -1315,6 +1315,22 @@ class GossipRouter {
 
     await _handleIncoming(packet, sourceId: sourceId);
 
+    final fromRelay = sourceId != null && sourceId.startsWith('relay:');
+    // Do not re-inject relay-delivered packets back into relay transport.
+    // Otherwise internet peers bounce the same packet in loops and create
+    // self-echo traffic that obscures real delivery behavior.
+    if (fromRelay) {
+      if (packet.type == 'msg' ||
+          packet.type == 'raw' ||
+          packet.type == 'pair_req' ||
+          packet.type == 'pair_acc' ||
+          packet.type == 'ether') {
+        _gossipTrace(
+            '[RLINK][Gossip] relay_ingress_no_reforward type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))}');
+      }
+      return;
+    }
+
     if (packet.ttl > 1) {
       // Зашифрованные 'msg' пакеты (~380-420 байт) пересылаем с увеличенным лимитом.
       // Обычные пакеты (сообщения, ack, profile) — стандартный 288-байтный лимит.
