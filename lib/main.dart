@@ -446,6 +446,15 @@ Future<void> initServices() async {
   debugPrint('[RLINK][Init] GossipRouter forward bootstrap installed');
   try {
     await initWebStorageIfNeeded();
+    // Identity + profile must restore before any dart:io-heavy services: on web
+    // StickerCollection / file scans can throw and previously aborted init before
+    // CryptoService ran — making GitHub Pages look like it "never saves".
+    await ImageService.instance.init();
+    await CryptoService.instance.init();
+    await AppSettings.instance.init();
+    await _restoreAdminPasswordFromSealedIfNeeded();
+    await ProfileService.instance.init();
+
     await BrowserCacheService.instance.init();
     // Запрашиваем все необходимые разрешения при первом запуске
     if (RuntimePlatform.isAndroid) {
@@ -473,15 +482,13 @@ Future<void> initServices() async {
       ].request();
     }
 
-    await AppSettings.instance.init();
     await ChatInboxService.instance.init();
     EtherService.instance.init();
-    await ImageService.instance
-        .init(); // Must be before ProfileService (path resolution)
-    await StickerCollectionService.instance.ensureInitialized();
-    await CryptoService.instance.init();
-    await _restoreAdminPasswordFromSealedIfNeeded();
-    await ProfileService.instance.init();
+    try {
+      await StickerCollectionService.instance.ensureInitialized();
+    } catch (e, st) {
+      debugPrint('[RLINK][Init] StickerCollectionService skipped: $e\n$st');
+    }
     await ChatStorageService.instance.init();
     await ChannelService.instance.init();
     await GroupService.instance.init();

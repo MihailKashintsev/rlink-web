@@ -12,6 +12,14 @@ const _bridgeTimeout = Duration(milliseconds: 2500);
 
 int _bridgeSeq = 0;
 
+/// Extra mirror for keys that must survive flaky localStorage in some browsers.
+bool _isAccountPersistenceKey(String fullKey) {
+  return fullKey.contains('mesh_identity') ||
+      fullKey.contains('mesh_x25519') ||
+      fullKey.contains('rlink_user_profile') ||
+      fullKey.contains('account_bundle');
+}
+
 Map<String, dynamic>? _messageAsMap(dynamic raw) {
   if (raw is Map) {
     return raw.map((k, v) => MapEntry(k.toString(), v));
@@ -143,6 +151,12 @@ Future<String?> readWebState(String key) async {
     final v = html.window.localStorage[k];
     if (v != null && v.isNotEmpty) return v;
   } catch (_) {}
+  if (_isAccountPersistenceKey(k)) {
+    try {
+      final s = html.window.sessionStorage[k];
+      if (s != null && s.isNotEmpty) return s;
+    } catch (_) {}
+  }
   final bridged = await _bridgeGet(k);
   if (bridged != null && bridged.isNotEmpty) return bridged;
   // Retry once: iframe/parent handshake can race on cold load.
@@ -159,6 +173,11 @@ Future<void> writeWebState(String key, String value) async {
   try {
     html.window.localStorage[k] = value;
   } catch (_) {}
+  if (_isAccountPersistenceKey(k)) {
+    try {
+      html.window.sessionStorage[k] = value;
+    } catch (_) {}
+  }
   await _bridgeSet(k, value);
   final wm = _readWindowNameState();
   wm[k] = value;

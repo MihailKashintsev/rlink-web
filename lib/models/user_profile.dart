@@ -62,22 +62,42 @@ class UserProfile {
         if (statusEmoji.isNotEmpty) 'st': statusEmoji,
       };
 
-  factory UserProfile.fromJson(Map<String, dynamic> j) => UserProfile(
-        publicKeyHex: j['id'] as String,
-        nickname: j['nick'] as String,
-        username: j['u'] as String? ?? '',
-        avatarColor: (j['color'] as num).toInt(),
-        avatarEmoji: j['emoji'] as String,
-        avatarImagePath: ImageService.instance.resolveStoredPath(
-            j['imgPath'] as String?),
-        tags: (j['tags'] as List<dynamic>?)?.cast<String>() ?? const [],
-        bannerImagePath: ImageService.instance.resolveStoredPath(
-            j['bannerPath'] as String?),
-        profileMusicPath: ImageService.instance.resolveStoredPath(
-            j['musicPath'] as String?),
-        statusEmoji:
-            normalizeStatusEmoji((j['st'] as String?) ?? ''),
-      );
+  static String _jsonString(Object? v) {
+    if (v == null) return '';
+    if (v is String) return v;
+    return v.toString();
+  }
+
+  static List<String> _jsonStringList(Object? v) {
+    if (v is! List) return const [];
+    return v
+        .map((e) => e == null ? '' : e.toString())
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+
+  factory UserProfile.fromJson(Map<String, dynamic> j) {
+    final colorRaw = j['color'];
+    final color = colorRaw is num
+        ? colorRaw.toInt()
+        : int.tryParse(_jsonString(colorRaw), radix: 10) ??
+            UserProfile.avatarColors[0];
+    return UserProfile(
+      publicKeyHex: _jsonString(j['id']),
+      nickname: _jsonString(j['nick']).isEmpty ? 'User' : _jsonString(j['nick']),
+      username: _jsonString(j['u']),
+      avatarColor: color,
+      avatarEmoji: _jsonString(j['emoji']).isEmpty ? '😎' : _jsonString(j['emoji']),
+      avatarImagePath: ImageService.instance.resolveStoredPath(
+          j['imgPath'] == null ? null : _jsonString(j['imgPath'])),
+      tags: _jsonStringList(j['tags']),
+      bannerImagePath: ImageService.instance.resolveStoredPath(
+          j['bannerPath'] == null ? null : _jsonString(j['bannerPath'])),
+      profileMusicPath: ImageService.instance.resolveStoredPath(
+          j['musicPath'] == null ? null : _jsonString(j['musicPath'])),
+      statusEmoji: normalizeStatusEmoji(_jsonString(j['st'])),
+    );
+  }
 
   String encode() => jsonEncode(toJson());
 
