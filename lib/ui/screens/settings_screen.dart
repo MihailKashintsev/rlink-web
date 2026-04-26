@@ -798,12 +798,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
               ),
             ),
-          if (RuntimePlatform.isWeb) ...[
+          if (RuntimePlatform.isWeb)
             ListTile(
               leading: Icon(Icons.key_rounded, color: cs.primary),
               title: const Text('Скачать файл ключа входа'),
               subtitle: const Text(
-                'Сохраните JSON в надёжное место — это ваш ID и логин для web.',
+                'Сохраните JSON в надёжное место — это ваш ID и логин для web. Восстановление — на экране регистрации.',
                 style: TextStyle(fontSize: 12),
               ),
               onTap: () async {
@@ -815,27 +815,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 }
               },
             ),
-            ListTile(
-              leading: Icon(Icons.upload_file_rounded, color: cs.primary),
-              title: const Text('Восстановить из файла ключа'),
-              subtitle: const Text(
-                'Выберите ранее скачанный .rlink.json — страница перезагрузится',
-                style: TextStyle(fontSize: 12),
-              ),
-              onTap: () async {
-                final ok =
-                    await WebIdentityPortable.importIdentityKeyFromUserFile();
-                if (!context.mounted) return;
-                if (!ok) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Импорт отменён или файл не подходит'),
-                    ),
-                  );
-                }
-              },
-            ),
-          ],
           if (settings.isDeviceLinked)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),

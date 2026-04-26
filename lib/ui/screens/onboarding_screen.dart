@@ -12,6 +12,7 @@ import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
+import '../../services/runtime_platform.dart';
 import '../../services/web_identity_portable.dart';
 import '../widgets/avatar_widget.dart';
 import '../../main.dart' show navigatorKey;
@@ -34,6 +35,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   String  _selectedEmoji = UserProfile.avatarEmojis[0];
   String? _selectedImagePath;
   bool    _loading         = false;
+  bool    _importBusy     = false;
   bool    _showEmojiPicker = false;
 
   final _picker = ImagePicker();
@@ -133,6 +135,20 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       content: Text(msg),
       backgroundColor: isError ? Colors.red : null,
     ));
+  }
+
+  Future<void> _importFromKeyFile() async {
+    if (!RuntimePlatform.isWeb) return;
+    setState(() => _importBusy = true);
+    try {
+      final ok = await WebIdentityPortable.importIdentityKeyFromUserFile();
+      if (!mounted) return;
+      if (!ok) {
+        _showSnack('Импорт отменён или файл не подходит', isError: true);
+      }
+    } finally {
+      if (mounted) setState(() => _importBusy = false);
+    }
   }
 
   /// Restart BLE + relay after profile creation so both transports use the
@@ -389,6 +405,31 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   onSubmitted: (_) => _create(),
                   onChanged: (_) => setState(() {}),
                 ),
+                if (RuntimePlatform.isWeb) ...[
+                  const SizedBox(height: 16),
+                  TextButton.icon(
+                    onPressed: (_loading || _importBusy) ? null : _importFromKeyFile,
+                    icon: _importBusy
+                        ? SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: cs.primary,
+                            ),
+                          )
+                        : const Icon(Icons.upload_file_rounded),
+                    label: const Text('Восстановить из файла ключа'),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Text(
+                      'Выберите ранее скачанный .rlink.json — страница перезагрузится',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 20),
 
                 // ── Кнопка ───────────────────────────────────
@@ -396,7 +437,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   width: double.infinity,
                   height: 52,
                   child: FilledButton(
-                    onPressed: _loading ? null : _create,
+                    onPressed: (_loading || _importBusy) ? null : _create,
                     style: FilledButton.styleFrom(
                       backgroundColor: const Color(0xFF1DB954),
                       shape: RoundedRectangleBorder(
