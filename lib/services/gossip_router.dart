@@ -38,6 +38,16 @@ bool _matchesRid8(String? myPublicKey, String? rid8) {
   return myPublicKey.toLowerCase().startsWith(rid8.toLowerCase());
 }
 
+bool _matchesRecipient(String? myPublicKey, String? recipientId) {
+  if (recipientId == null || recipientId.isEmpty) return true;
+  if (myPublicKey == null || myPublicKey.isEmpty) return false;
+  final me = myPublicKey.toLowerCase();
+  final rid = recipientId.toLowerCase();
+  // Accept both full 64-hex recipient ids and legacy/short 8-char ids.
+  if (rid.length >= 64) return me == rid;
+  return me.startsWith(rid);
+}
+
 void _gossipTrace(String line) {
   debugPrint(line);
   DiagnosticsLogService.instance.add(line);
@@ -1346,11 +1356,10 @@ class GossipRouter {
     try {
       // Point-to-point filtering for packets that include recipientId.
       final rid = packet.recipientId;
-      if (rid != null &&
-          rid.isNotEmpty &&
-          myPublicKey != null &&
-          rid != myPublicKey) {
-        debugPrint('[RLINK][Gossip] Message for $rid — not for us, skip');
+      if (!_matchesRecipient(myPublicKey, rid)) {
+        _gossipTrace(
+            '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+            'reason=recipient_mismatch rid=${rid ?? '-'} my=${(myPublicKey ?? '').substring(0, (myPublicKey ?? '').length.clamp(0, 8))}');
         return;
       }
 
