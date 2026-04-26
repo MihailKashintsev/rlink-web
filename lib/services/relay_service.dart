@@ -187,13 +187,19 @@ class RelayService with WidgetsBindingObserver {
   /// Checks online peers first, then contacts cache.
   String? findPeerByPrefix(String rid8) {
     final prefix = rid8.toLowerCase();
+    final fullHex = RegExp(r'^[0-9a-fA-F]{64}$');
     // Check online peers first
     for (final key in _peerOnline.keys) {
-      if (key.toLowerCase().startsWith(prefix)) return key;
+      if (fullHex.hasMatch(key) && key.toLowerCase().startsWith(prefix)) {
+        return key;
+      }
     }
     // Fallback: check contacts cache
     for (final c in ChatStorageService.instance.contactsNotifier.value) {
-      if (c.publicKeyHex.toLowerCase().startsWith(prefix)) return c.publicKeyHex;
+      final key = c.publicKeyHex.trim();
+      if (fullHex.hasMatch(key) && key.toLowerCase().startsWith(prefix)) {
+        return key;
+      }
     }
     return null;
   }

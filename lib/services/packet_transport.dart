@@ -53,6 +53,19 @@ class DefaultPacketTransport implements PacketTransport {
         } else if (rid8 != null) {
           recipientKey = RelayService.instance.findPeerByPrefix(rid8);
         }
+        final directedTypes = <String>{
+          'msg',
+          'raw',
+          'pair_req',
+          'pair_acc',
+          'typing',
+          'ack',
+          'edit',
+          'delete',
+          'dm_pin',
+        };
+        final isDirectedType = directedTypes.contains(packet.type);
+
         if (packet.type == 'msg' ||
             packet.type == 'raw' ||
             packet.type == 'pair_req' ||
@@ -67,8 +80,17 @@ class DefaultPacketTransport implements PacketTransport {
           debugPrint(line);
           DiagnosticsLogService.instance.add(line);
         }
-        if (recipientKey != null && recipientKey.isNotEmpty) {
+        final hasValidRecipient =
+            recipientKey != null && _pubKeyHex.hasMatch(recipientKey);
+        if (hasValidRecipient) {
           await RelayService.instance.sendPacket(packet, recipientKey: recipientKey);
+        } else if (isDirectedType) {
+          final line =
+              '[RLINK][Transport][DROP] type=${packet.type} reason=invalid_direct_recipient '
+              'rid=${_short(packet.recipientId ?? '')} r8=${packet.payload['r'] ?? '-'} '
+              'resolved=${_short(recipientKey ?? '')}';
+          debugPrint(line);
+          DiagnosticsLogService.instance.add(line);
         } else {
           await RelayService.instance.broadcastPacket(packet);
         }
