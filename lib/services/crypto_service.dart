@@ -5,9 +5,8 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'account_kv_store.dart';
 import 'runtime_platform.dart';
-import 'web_state_store.dart';
+import 'web_account_bundle.dart';
 
 /// Хранит Ed25519 keypair пользователя (его "аккаунт") и отдельный X25519
 /// keypair для ECDH шифрования сообщений.
@@ -37,15 +36,7 @@ class CryptoService {
 
   Future<String?> _read(String key) async {
     if (RuntimePlatform.isWeb) {
-      final web = await readWebState(key);
-      if (web != null && web.isNotEmpty) return web;
-      final durable = await AccountKvStore.read(key);
-      if (durable != null && durable.isNotEmpty) {
-        // Best-effort resync back to bridge/local storage.
-        await writeWebState(key, durable);
-        return durable;
-      }
-      return null;
+      return WebAccountBundle.layeredRead(key);
     }
     if (_isMobile) return _secureSt.read(key: key);
     final prefs = await SharedPreferences.getInstance();
@@ -54,8 +45,7 @@ class CryptoService {
 
   Future<void> _write(String key, String value) async {
     if (RuntimePlatform.isWeb) {
-      await writeWebState(key, value);
-      await AccountKvStore.write(key, value);
+      await WebAccountBundle.layeredWrite(key, value);
       return;
     }
     if (_isMobile) {
@@ -87,24 +77,62 @@ class CryptoService {
   Future<void> init() async {
     // ── Ed25519 identity keypair ──────────────────────────────────
     var restoredEd = false;
-    try {
-      final storedPrivate = await _read(_keyPrivate);
-      final storedPublic = await _read(_keyPublic);
-      if (storedPrivate != null &&
-          storedPublic != null &&
-          storedPrivate.isNotEmpty &&
-          storedPublic.isNotEmpty) {
-        final privateBytes = base64.decode(storedPrivate);
-        final publicBytes = base64.decode(storedPublic);
-        _identityKeyPair = SimpleKeyPairData(
-          privateBytes,
-          publicKey: SimplePublicKey(publicBytes, type: KeyPairType.ed25519),
-          type: KeyPairType.ed25519,
-        );
-        restoredEd = true;
+    var restoredX = false;
+
+    if (RuntimePlatform.isWeb) {
+      final bundle = await WebAccountBundle.loadValidatedBundleWithRetries();
+      if (bundle != null) {
+        try {
+          final edPr = bundle['edPr'] as String;
+          final edPu = bundle['edPu'] as String;
+          final xPr = bundle['xPr'] as String;
+          final xPu = bundle['xPu'] as String;
+          _identityKeyPair = SimpleKeyPairData(
+            base64.decode(edPr),
+            publicKey:
+                SimplePublicKey(base64.decode(edPu), type: KeyPairType.ed25519),
+            type: KeyPairType.ed25519,
+          );
+          restoredEd = true;
+          _x25519IdentityKeyPair = SimpleKeyPairData(
+            base64.decode(xPr),
+            publicKey:
+                SimplePublicKey(base64.decode(xPu), type: KeyPairType.x25519),
+            type: KeyPairType.x25519,
+          );
+          restoredX = true;
+          await WebAccountBundle.layeredWrite(_keyPrivate, edPr);
+          await WebAccountBundle.layeredWrite(_keyPublic, edPu);
+          await WebAccountBundle.layeredWrite(_keyX25519Private, xPr);
+          await WebAccountBundle.layeredWrite(_keyX25519Public, xPu);
+        } catch (e) {
+          debugPrint('[Crypto] Web bundle restore failed: $e');
+          restoredEd = false;
+          restoredX = false;
+        }
       }
-    } catch (e) {
-      debugPrint('[Crypto] Failed to restore Ed25519 keys, regenerating: $e');
+    }
+
+    if (!restoredEd) {
+      try {
+        final storedPrivate = await _read(_keyPrivate);
+        final storedPublic = await _read(_keyPublic);
+        if (storedPrivate != null &&
+            storedPublic != null &&
+            storedPrivate.isNotEmpty &&
+            storedPublic.isNotEmpty) {
+          final privateBytes = base64.decode(storedPrivate);
+          final publicBytes = base64.decode(storedPublic);
+          _identityKeyPair = SimpleKeyPairData(
+            privateBytes,
+            publicKey: SimplePublicKey(publicBytes, type: KeyPairType.ed25519),
+            type: KeyPairType.ed25519,
+          );
+          restoredEd = true;
+        }
+      } catch (e) {
+        debugPrint('[Crypto] Failed to restore Ed25519 keys, regenerating: $e');
+      }
     }
     if (!restoredEd) {
       _identityKeyPair = await _ed25519.newKeyPair();
@@ -118,25 +146,26 @@ class CryptoService {
     publicKeyHex = _bytesToHex(pubKey.bytes);
 
     // ── X25519 ECDH keypair ───────────────────────────────────────
-    var restoredX = false;
-    try {
-      final storedX25519Priv = await _read(_keyX25519Private);
-      final storedX25519Pub = await _read(_keyX25519Public);
-      if (storedX25519Priv != null &&
-          storedX25519Pub != null &&
-          storedX25519Priv.isNotEmpty &&
-          storedX25519Pub.isNotEmpty) {
-        final privBytes = base64.decode(storedX25519Priv);
-        final pubBytes = base64.decode(storedX25519Pub);
-        _x25519IdentityKeyPair = SimpleKeyPairData(
-          privBytes,
-          publicKey: SimplePublicKey(pubBytes, type: KeyPairType.x25519),
-          type: KeyPairType.x25519,
-        );
-        restoredX = true;
+    if (!restoredX) {
+      try {
+        final storedX25519Priv = await _read(_keyX25519Private);
+        final storedX25519Pub = await _read(_keyX25519Public);
+        if (storedX25519Priv != null &&
+            storedX25519Pub != null &&
+            storedX25519Priv.isNotEmpty &&
+            storedX25519Pub.isNotEmpty) {
+          final privBytes = base64.decode(storedX25519Priv);
+          final pubBytes = base64.decode(storedX25519Pub);
+          _x25519IdentityKeyPair = SimpleKeyPairData(
+            privBytes,
+            publicKey: SimplePublicKey(pubBytes, type: KeyPairType.x25519),
+            type: KeyPairType.x25519,
+          );
+          restoredX = true;
+        }
+      } catch (e) {
+        debugPrint('[Crypto] Failed to restore X25519 keys, regenerating: $e');
       }
-    } catch (e) {
-      debugPrint('[Crypto] Failed to restore X25519 keys, regenerating: $e');
     }
     if (!restoredX) {
       _x25519IdentityKeyPair = await _x25519.newKeyPair();
@@ -148,6 +177,24 @@ class CryptoService {
 
     final x25519PubKey = await _x25519IdentityKeyPair.extractPublicKey();
     x25519PublicKeyBase64 = base64.encode(x25519PubKey.bytes);
+
+    if (RuntimePlatform.isWeb) {
+      try {
+        final edPrivBytes = await _identityKeyPair.extractPrivateKeyBytes();
+        final edPubKey = await _identityKeyPair.extractPublicKey();
+        final xPrivBytes = await _x25519IdentityKeyPair.extractPrivateKeyBytes();
+        final xPubKey = await _x25519IdentityKeyPair.extractPublicKey();
+        await WebAccountBundle.persistBundle(
+          edPrivB64: base64.encode(edPrivBytes),
+          edPubB64: base64.encode(edPubKey.bytes),
+          xPrivB64: base64.encode(xPrivBytes),
+          xPubB64: base64.encode(xPubKey.bytes),
+          profileJson: null,
+        );
+      } catch (e) {
+        debugPrint('[Crypto] Web account bundle persist failed: $e');
+      }
+    }
   }
 
   /// Force-generates brand-new Ed25519 + X25519 keypairs and persists them.
@@ -169,6 +216,20 @@ class CryptoService {
     await _write(_keyX25519Private, base64.encode(xPriv));
     await _write(_keyX25519Public,  base64.encode(xPub.bytes));
     x25519PublicKeyBase64 = base64.encode(xPub.bytes);
+
+    if (RuntimePlatform.isWeb) {
+      try {
+        await WebAccountBundle.persistBundle(
+          edPrivB64: base64.encode(priv),
+          edPubB64: base64.encode(pub.bytes),
+          xPrivB64: base64.encode(xPriv),
+          xPubB64: base64.encode(xPub.bytes),
+          profileJson: null,
+        );
+      } catch (e) {
+        debugPrint('[Crypto] Web bundle persist after regenerate: $e');
+      }
+    }
 
     debugPrint('[Crypto] Keys regenerated → ${publicKeyHex.substring(0, 8)}…');
   }

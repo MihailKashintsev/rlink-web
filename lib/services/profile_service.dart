@@ -5,10 +5,9 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/user_profile.dart';
-import 'account_kv_store.dart';
 import 'crypto_service.dart';
 import 'runtime_platform.dart';
-import 'web_state_store.dart';
+import 'web_account_bundle.dart';
 
 class ProfileService {
   ProfileService._();
@@ -27,14 +26,7 @@ class ProfileService {
 
   Future<String?> _read() async {
     if (RuntimePlatform.isWeb) {
-      final web = await readWebState(_kProfileKey);
-      if (web != null && web.isNotEmpty) return web;
-      final durable = await AccountKvStore.read(_kProfileKey);
-      if (durable != null && durable.isNotEmpty) {
-        await writeWebState(_kProfileKey, durable);
-        return durable;
-      }
-      return null;
+      return WebAccountBundle.layeredRead(_kProfileKey);
     }
     if (_isMobile) return _secureSt.read(key: _kProfileKey);
     final prefs = await SharedPreferences.getInstance();
@@ -43,8 +35,8 @@ class ProfileService {
 
   Future<void> _write(String value) async {
     if (RuntimePlatform.isWeb) {
-      await writeWebState(_kProfileKey, value);
-      await AccountKvStore.write(_kProfileKey, value);
+      await WebAccountBundle.layeredWrite(_kProfileKey, value);
+      await WebAccountBundle.mergeProfileIntoBundle(value);
       return;
     }
     if (_isMobile) {
@@ -62,7 +54,13 @@ class ProfileService {
   final profileNotifier = ValueNotifier<UserProfile?>(null);
 
   Future<void> init() async {
-    final stored = await _read();
+    var stored = await _read();
+    if (stored == null && RuntimePlatform.isWeb) {
+      stored = await WebAccountBundle.profileJsonFromBundle();
+      if (stored != null && stored.isNotEmpty) {
+        await WebAccountBundle.layeredWrite(_kProfileKey, stored);
+      }
+    }
     if (stored != null) {
       _profile = UserProfile.tryDecode(stored);
       // Sync publicKeyHex with the current CryptoService key —
