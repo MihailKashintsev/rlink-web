@@ -14,6 +14,7 @@ import 'crypto_service.dart';
 import 'gossip_router.dart';
 import 'profile_service.dart';
 import 'relay_web_warmup.dart';
+import 'diagnostics_log_service.dart';
 
 int _relayJsonInt(dynamic v) {
   if (v is int) return v;
@@ -35,6 +36,11 @@ bool? _relayJsonBool(dynamic v) {
 String _relayShort(String key) {
   if (key.isEmpty) return 'empty';
   return key.length > 8 ? key.substring(0, 8) : key;
+}
+
+void _relayTrace(String line) {
+  debugPrint(line);
+  DiagnosticsLogService.instance.add(line);
 }
 
 /// ═══════════════════════════════════════════════════════════════════
@@ -156,7 +162,8 @@ class RelayService with WidgetsBindingObserver {
       ch.sink.add(jsonEncode(payload));
     } catch (e) {
       final msg = e.toString();
-      debugPrint('[RLINK][Relay] send failed${context.isEmpty ? '' : ' ($context)'}: $msg');
+      _relayTrace(
+          '[RLINK][Relay] send failed${context.isEmpty ? '' : ' ($context)'}: $msg');
       // Browser can throw NotFoundError when underlying WS object is gone.
       // Force reconnect to restore a valid transport.
       if (!_intentionalClose && !_disposed) {
@@ -291,7 +298,7 @@ class RelayService with WidgetsBindingObserver {
         if (!isConnected) return;
         final since = DateTime.now().difference(_lastPongAt);
         if (since > const Duration(seconds: 70)) {
-          debugPrint(
+          _relayTrace(
               '[RLINK][Relay] No pong for ${since.inSeconds}s — closing socket');
           try {
             _channel?.sink.close();
@@ -309,7 +316,7 @@ class RelayService with WidgetsBindingObserver {
 
       state.value = RelayState.connected;
       lastError.value = null;
-      debugPrint('[RLINK][Relay] Connected and registered via $connectedUrl');
+      _relayTrace('[RLINK][Relay] Connected and registered via $connectedUrl');
     } catch (e) {
       debugPrint('[RLINK][Relay] Connection failed: $e');
       lastError.value = e.toString();
@@ -320,7 +327,7 @@ class RelayService with WidgetsBindingObserver {
 
   /// Force reconnect — disconnect and reconnect immediately.
   Future<void> reconnect() async {
-    debugPrint('[RLINK][Relay] Force reconnect requested');
+    _relayTrace('[RLINK][Relay] Force reconnect requested');
     _intentionalClose = true;
     _pingTimer?.cancel();
     _reconnectTimer?.cancel();
@@ -345,7 +352,7 @@ class RelayService with WidgetsBindingObserver {
     _channel = null;
     state.value = RelayState.disconnected;
     lastError.value = null;
-    debugPrint('[RLINK][Relay] Disconnected');
+    _relayTrace('[RLINK][Relay] Disconnected');
   }
 
   void _onDisconnected() {
@@ -361,7 +368,7 @@ class RelayService with WidgetsBindingObserver {
     final detail = cc == null
         ? ''
         : ' (closeCode=$cc${cr == null || cr.isEmpty ? '' : ', $cr'})';
-    debugPrint('[RLINK][Relay] Disconnected$detail');
+    _relayTrace('[RLINK][Relay] Disconnected$detail');
     lastError.value = 'Соединение закрыто$detail';
     if (!_intentionalClose && !_disposed) {
       _scheduleReconnect();
@@ -373,7 +380,7 @@ class RelayService with WidgetsBindingObserver {
     // Экспоненциальный backoff: 1, 2, 4, 8, 16, 30, 30, … секунд (cap 30).
     final delay = _retryCount >= 5 ? 30 : (1 << _retryCount);
     _retryCount++;
-    debugPrint('[RLINK][Relay] Reconnect in ${delay}s (attempt #$_retryCount)');
+    _relayTrace('[RLINK][Relay] Reconnect in ${delay}s (attempt #$_retryCount)');
     _reconnectTimer = Timer(Duration(seconds: delay), () {
       if (!_disposed &&
           !_intentionalClose &&
@@ -401,7 +408,8 @@ class RelayService with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState lifecycle) { // ignore: avoid_renaming_method_parameters
     if (lifecycle != AppLifecycleState.resumed) return;
     if (state.value != RelayState.connected) {
-      debugPrint('[RLINK][Relay] Lifecycle resumed (state=${state.value}) → reconnect');
+      _relayTrace(
+          '[RLINK][Relay] Lifecycle resumed (state=${state.value}) → reconnect');
       reconnect();
       return;
     }
@@ -409,7 +417,7 @@ class RelayService with WidgetsBindingObserver {
     // незаметно. Если pong старее 30 сек — превентивно переподключаемся.
     final since = DateTime.now().difference(_lastPongAt);
     if (since > const Duration(seconds: 30)) {
-      debugPrint(
+      _relayTrace(
           '[RLINK][Relay] Lifecycle resumed, stale pong (${since.inSeconds}s) → reconnect');
       reconnect();
     }
@@ -456,7 +464,7 @@ class RelayService with WidgetsBindingObserver {
           packet.type == 'raw' ||
           packet.type == 'pair_req' ||
           packet.type == 'pair_acc') {
-        debugPrint('[RLINK][Relay][TX] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+        _relayTrace('[RLINK][Relay][TX] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
             'to=${_relayShort(recipientKey ?? '')} rid=${_relayShort(packet.recipientId ?? '')} '
             'r8=${packet.payload['r'] ?? '-'}');
       }
@@ -493,7 +501,7 @@ class RelayService with WidgetsBindingObserver {
       _startDraining();
     } else {
       if (packet.type == 'ether') {
-        debugPrint('[RLINK][Relay][TX] type=ether id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
+        _relayTrace('[RLINK][Relay][TX] type=ether id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
             'len=${(packet.payload['text'] as String?)?.length ?? 0}');
       }
       await _safeSend(envelope, context: 'broadcastPacket:${packet.type}');
@@ -868,7 +876,7 @@ class RelayService with WidgetsBindingObserver {
                 decoded.type == 'pair_req' ||
                 decoded.type == 'pair_acc' ||
                 decoded.type == 'ether')) {
-          debugPrint('[RLINK][Relay][RX] type=${decoded.type} id=${decoded.id.substring(0, decoded.id.length.clamp(0, 8))} '
+          _relayTrace('[RLINK][Relay][RX] type=${decoded.type} id=${decoded.id.substring(0, decoded.id.length.clamp(0, 8))} '
               'from=${_relayShort(from)} rid=${_relayShort(decoded.recipientId ?? '')} r8=${decoded.payload['r'] ?? '-'}');
         }
         // Regular gossip packet — feed to GossipRouter

@@ -5,6 +5,7 @@ import 'app_settings.dart';
 import 'gossip_router.dart' show GossipPacket;
 import 'relay_service.dart';
 import 'mesh_forwarder.dart';
+import 'diagnostics_log_service.dart';
 
 /// Transport abstraction: routes gossip packets across available media.
 abstract class PacketTransport {
@@ -47,9 +48,11 @@ class DefaultPacketTransport implements PacketTransport {
           final route = (recipientKey != null && recipientKey.isNotEmpty) ? 'direct' : 'broadcast';
           // Detailed routing trace for DM/pair/ether diagnostics.
           // Helps identify wrong key/prefix resolution in web flows.
-          debugPrint('[RLINK][Transport] type=${packet.type} route=$route '
+          final line = '[RLINK][Transport] type=${packet.type} route=$route '
               'rid=${_short(packet.recipientId ?? '')} r8=${packet.payload['r'] ?? '-'} '
-              'resolved=${_short(recipientKey ?? '')} explicit=${_short(explicitRecipient ?? '')}');
+              'resolved=${_short(recipientKey ?? '')} explicit=${_short(explicitRecipient ?? '')}';
+          debugPrint(line);
+          DiagnosticsLogService.instance.add(line);
         }
         if (recipientKey != null && recipientKey.isNotEmpty) {
           await RelayService.instance.sendPacket(packet, recipientKey: recipientKey);

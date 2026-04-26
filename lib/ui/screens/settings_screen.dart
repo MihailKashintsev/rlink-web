@@ -32,6 +32,7 @@ import '../../services/story_service.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/stickers_hub_screen.dart';
 import '../screens/chat_screen.dart';
+import '../screens/diagnostics_screen.dart';
 import '../widgets/avatar_widget.dart';
 import '../screens/about_screen.dart';
 import '../../main.dart' show sendProfileToAllContacts;
@@ -942,6 +943,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SnackBar(content: Text('Диагностика скопирована')),
                 );
               },
+            ),
+          if (settings.connectionMode >= 1)
+            ListTile(
+              leading: Icon(Icons.list_alt_rounded, color: cs.primary),
+              title: const Text('Живой лог доставки'),
+              subtitle: const Text(
+                'TX/RX/DROP трассировка сообщений и запросов',
+                style: TextStyle(fontSize: 12),
+              ),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
+              ),
             ),
 
           // ── Данные ─────────────────────────────────────────────
