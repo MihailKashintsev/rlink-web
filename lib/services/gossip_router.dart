@@ -1367,12 +1367,22 @@ class GossipRouter {
 
   Future<void> _handleIncoming(GossipPacket packet, {String? sourceId}) async {
     try {
+      final currentMyKey = (myPublicKey == null || myPublicKey!.isEmpty)
+          ? CryptoService.instance.publicKeyHex
+          : myPublicKey!;
+      if ((myPublicKey == null || myPublicKey!.isEmpty) &&
+          currentMyKey.isNotEmpty) {
+        myPublicKey = currentMyKey;
+        _gossipTrace(
+            '[RLINK][Gossip] recovered_my_key=${currentMyKey.substring(0, currentMyKey.length.clamp(0, 8))}');
+      }
+
       // Point-to-point filtering for packets that include recipientId.
       final rid = packet.recipientId;
-      if (!_matchesRecipient(myPublicKey, rid)) {
+      if (!_matchesRecipient(currentMyKey, rid)) {
         _gossipTrace(
             '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
-            'reason=recipient_mismatch rid=${rid ?? '-'} my=${(myPublicKey ?? '').substring(0, (myPublicKey ?? '').length.clamp(0, 8))}');
+            'reason=recipient_mismatch rid=${rid ?? '-'} my=${currentMyKey.substring(0, currentMyKey.length.clamp(0, 8))}');
         return;
       }
 
