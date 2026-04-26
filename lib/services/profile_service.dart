@@ -91,6 +91,29 @@ class ProfileService {
       }
       profileNotifier.value = _profile;
     }
+    if (RuntimePlatform.isWeb) {
+      final postImport =
+          await WebAccountBundle.layeredRead(kRlinkPostKeyImportFlag);
+      if (postImport == '1') {
+        final keyHex = CryptoService.instance.publicKeyHex;
+        if (_profile == null && keyHex.isNotEmpty) {
+          final rng = Random();
+          _profile = UserProfile(
+            publicKeyHex: keyHex,
+            nickname: 'User',
+            avatarColor: UserProfile
+                .avatarColors[rng.nextInt(UserProfile.avatarColors.length)],
+            avatarEmoji: UserProfile
+                .avatarEmojis[rng.nextInt(UserProfile.avatarEmojis.length)],
+          );
+          await _write(_profile!.encode());
+          profileNotifier.value = _profile;
+          debugPrint(
+              '[Profile] Repaired minimal profile after import (flag fallback)');
+        }
+        await WebAccountBundle.layeredWrite(kRlinkPostKeyImportFlag, '');
+      }
+    }
   }
 
   /// Clears the in-memory profile. Called during a full app reset so that

@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:html' as html;
 import 'dart:js_interop';
 
+import 'package:flutter/foundation.dart';
 import 'package:web/web.dart' as web;
 
 const _fileName = 'rlink_identity.json';
@@ -41,7 +42,9 @@ Future<void> writeIdentityJsonToOpfs(String json) async {
     final blob = web.Blob([json.toJS].toJS);
     await writable.write(blob).toDart;
     await writable.close().toDart;
-  } catch (_) {}
+  } catch (e, st) {
+    debugPrint('[WebIdentity] OPFS write failed: $e\n$st');
+  }
 }
 
 /// Human-visible backup (Downloads). Same JSON as OPFS.

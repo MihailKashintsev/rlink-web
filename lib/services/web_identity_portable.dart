@@ -1,5 +1,9 @@
 import 'dart:convert';
+import 'dart:math';
 
+import 'package:flutter/foundation.dart';
+
+import '../models/user_profile.dart';
 import 'runtime_platform.dart';
 import 'web_account_bundle.dart';
 import 'web_identity_io_stub.dart'
@@ -8,6 +12,35 @@ import 'web_identity_io_stub.dart'
 /// Web-only: OPFS mirror + downloadable JSON identity backup.
 abstract final class WebIdentityPortable {
   WebIdentityPortable._();
+
+  static String _publicKeyHexFromEdPubB64(String edPubB64) {
+    final bytes = base64.decode(edPubB64);
+    return bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+  }
+
+  /// Returns true if a new minimal profile was written into [flat].
+  static bool _injectMinimalProfileIfNeeded(Map<String, String> flat) {
+    final prof = flat[kUserProfile];
+    if (prof != null &&
+        prof.isNotEmpty &&
+        UserProfile.tryDecode(prof) != null) {
+      return false;
+    }
+    final rng = Random();
+    final minimal = UserProfile(
+      publicKeyHex: _publicKeyHexFromEdPubB64(flat[kMeshIdentityPublic]!),
+      nickname: 'User',
+      avatarColor:
+          UserProfile.avatarColors[rng.nextInt(UserProfile.avatarColors.length)],
+      avatarEmoji:
+          UserProfile.avatarEmojis[rng.nextInt(UserProfile.avatarEmojis.length)],
+    );
+    flat[kUserProfile] = minimal.encode();
+    debugPrint('[WebIdentity] Injected minimal profile (missing/invalid prof)');
+    return true;
+  }
 
   /// If normal web storage is empty, restore keys + profile from OPFS backup.
   static Future<void> hydrateLayeredStorageFromOpfsIfMissing() async {
@@ -21,16 +54,29 @@ abstract final class WebIdentityPortable {
     final m = impl.parseIdentityExport(raw);
     if (m == null) return;
 
-    for (final e in m.entries) {
+    final flat = Map<String, String>.from(m);
+    final opfsNeedsRewrite = _injectMinimalProfileIfNeeded(flat);
+    for (final e in flat.entries) {
       await WebAccountBundle.layeredWrite(e.key, e.value);
     }
     await WebAccountBundle.persistBundle(
-      edPrivB64: m[kMeshIdentityPrivate]!,
-      edPubB64: m[kMeshIdentityPublic]!,
-      xPrivB64: m[kMeshX25519Private]!,
-      xPubB64: m[kMeshX25519Public]!,
-      profileJson: m[kUserProfile],
+      edPrivB64: flat[kMeshIdentityPrivate]!,
+      edPubB64: flat[kMeshIdentityPublic]!,
+      xPrivB64: flat[kMeshX25519Private]!,
+      xPubB64: flat[kMeshX25519Public]!,
+      profileJson: flat[kUserProfile],
     );
+    if (opfsNeedsRewrite) {
+      await impl.writeIdentityJsonToOpfs(
+        impl.buildIdentityExportJson(
+          edPrivB64: flat[kMeshIdentityPrivate]!,
+          edPubB64: flat[kMeshIdentityPublic]!,
+          xPrivB64: flat[kMeshX25519Private]!,
+          xPubB64: flat[kMeshX25519Public]!,
+          profileJson: flat[kUserProfile],
+        ),
+      );
+    }
   }
 
   /// Keep OPFS copy aligned with layered storage (survives localStorage wipes).
@@ -93,18 +139,31 @@ abstract final class WebIdentityPortable {
     if (raw == null || raw.isEmpty) return false;
     final m = impl.parseIdentityExport(raw);
     if (m == null) return false;
-    for (final e in m.entries) {
+    final flat = Map<String, String>.from(m);
+    _injectMinimalProfileIfNeeded(flat);
+    for (final e in flat.entries) {
       await WebAccountBundle.layeredWrite(e.key, e.value);
     }
     await WebAccountBundle.persistBundle(
-      edPrivB64: m[kMeshIdentityPrivate]!,
-      edPubB64: m[kMeshIdentityPublic]!,
-      xPrivB64: m[kMeshX25519Private]!,
-      xPubB64: m[kMeshX25519Public]!,
-      profileJson: m[kUserProfile],
+      edPrivB64: flat[kMeshIdentityPrivate]!,
+      edPubB64: flat[kMeshIdentityPublic]!,
+      xPrivB64: flat[kMeshX25519Private]!,
+      xPubB64: flat[kMeshX25519Public]!,
+      profileJson: flat[kUserProfile],
     );
-    await impl.writeIdentityJsonToOpfs(raw);
-    if (reloadAfter) impl.reloadWebApp();
+    final jsonOut = impl.buildIdentityExportJson(
+      edPrivB64: flat[kMeshIdentityPrivate]!,
+      edPubB64: flat[kMeshIdentityPublic]!,
+      xPrivB64: flat[kMeshX25519Private]!,
+      xPubB64: flat[kMeshX25519Public]!,
+      profileJson: flat[kUserProfile],
+    );
+    await impl.writeIdentityJsonToOpfs(jsonOut);
+    if (reloadAfter) {
+      await WebAccountBundle.layeredWrite(kRlinkPostKeyImportFlag, '1');
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      impl.reloadWebApp();
+    }
     return true;
   }
 }

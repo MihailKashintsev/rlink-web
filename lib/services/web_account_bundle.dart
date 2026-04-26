@@ -20,6 +20,9 @@ const kMeshX25519Private = 'mesh_x25519_private';
 const kMeshX25519Public = 'mesh_x25519_public';
 const kUserProfile = 'rlink_user_profile';
 
+/// Set to `'1'` after web identity file import; cleared in [ProfileService.init].
+const kRlinkPostKeyImportFlag = 'rlink_post_key_import';
+
 class WebAccountBundle {
   WebAccountBundle._();
 

@@ -81,7 +81,30 @@ class CryptoService {
     var restoredEd = false;
     var restoredX = false;
 
-    if (RuntimePlatform.isWeb) {
+    if (!restoredEd) {
+      try {
+        final storedPrivate = await _read(_keyPrivate);
+        final storedPublic = await _read(_keyPublic);
+        if (storedPrivate != null &&
+            storedPublic != null &&
+            storedPrivate.isNotEmpty &&
+            storedPublic.isNotEmpty) {
+          final privateBytes = base64.decode(storedPrivate);
+          final publicBytes = base64.decode(storedPublic);
+          _identityKeyPair = SimpleKeyPairData(
+            privateBytes,
+            publicKey: SimplePublicKey(publicBytes, type: KeyPairType.ed25519),
+            type: KeyPairType.ed25519,
+          );
+          restoredEd = true;
+        }
+      } catch (e) {
+        debugPrint('[Crypto] Failed to restore Ed25519 keys, regenerating: $e');
+      }
+    }
+    // Web: prefer discrete key slots (import) over bundle — stale bundle in one
+    // backing store must not overwrite freshly imported keys in another.
+    if (RuntimePlatform.isWeb && !restoredEd) {
       final bundle = await WebAccountBundle.loadValidatedBundleWithRetries();
       if (bundle != null) {
         try {
@@ -112,28 +135,6 @@ class CryptoService {
           restoredEd = false;
           restoredX = false;
         }
-      }
-    }
-
-    if (!restoredEd) {
-      try {
-        final storedPrivate = await _read(_keyPrivate);
-        final storedPublic = await _read(_keyPublic);
-        if (storedPrivate != null &&
-            storedPublic != null &&
-            storedPrivate.isNotEmpty &&
-            storedPublic.isNotEmpty) {
-          final privateBytes = base64.decode(storedPrivate);
-          final publicBytes = base64.decode(storedPublic);
-          _identityKeyPair = SimpleKeyPairData(
-            privateBytes,
-            publicKey: SimplePublicKey(publicBytes, type: KeyPairType.ed25519),
-            type: KeyPairType.ed25519,
-          );
-          restoredEd = true;
-        }
-      } catch (e) {
-        debugPrint('[Crypto] Failed to restore Ed25519 keys, regenerating: $e');
       }
     }
     if (!restoredEd) {
@@ -167,6 +168,31 @@ class CryptoService {
         }
       } catch (e) {
         debugPrint('[Crypto] Failed to restore X25519 keys, regenerating: $e');
+      }
+    }
+    if (RuntimePlatform.isWeb && !restoredX) {
+      final bundle = await WebAccountBundle.loadValidatedBundleWithRetries();
+      if (bundle != null) {
+        try {
+          final edPu = bundle['edPu'] as String?;
+          if (edPu != null &&
+              edPu.isNotEmpty &&
+              _bytesToHex(base64.decode(edPu)) == publicKeyHex) {
+            final xPr = bundle['xPr'] as String;
+            final xPu = bundle['xPu'] as String;
+            _x25519IdentityKeyPair = SimpleKeyPairData(
+              base64.decode(xPr),
+              publicKey:
+                  SimplePublicKey(base64.decode(xPu), type: KeyPairType.x25519),
+              type: KeyPairType.x25519,
+            );
+            restoredX = true;
+            await WebAccountBundle.layeredWrite(_keyX25519Private, xPr);
+            await WebAccountBundle.layeredWrite(_keyX25519Public, xPu);
+          }
+        } catch (e) {
+          debugPrint('[Crypto] Web bundle X25519-only restore failed: $e');
+        }
       }
     }
     if (!restoredX) {
