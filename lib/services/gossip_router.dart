@@ -318,6 +318,19 @@ class GossipRouter {
   OnDeviceDmSyncPacket? onDeviceDmSyncPacket;
   OnTypingReceived? onTypingReceived;
 
+  /// Lightweight bootstrap to guarantee forwarding path without overwriting
+  /// existing message/pair/ether handlers.
+  void ensureForward({
+    required OnForwardPacket onForward,
+    String? myKey,
+  }) {
+    onForwardPacket = onForward;
+    final key = myKey?.trim() ?? '';
+    if (key.isNotEmpty) {
+      myPublicKey = key;
+    }
+  }
+
   // Channel/Group callbacks
   void Function(Map<String, dynamic> payload)? onChannelMeta;
   void Function(Map<String, dynamic> payload)? onChannelPost;

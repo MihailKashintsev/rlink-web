@@ -437,20 +437,13 @@ Future<void> main() async {
 }
 
 Future<void> initServices() async {
-  // Bootstrap gossip forwarding early so outgoing packets never hit
-  // onForwardPacket==null even if heavy init below fails midway.
-  GossipRouter.instance.init(
-    myKey: CryptoService.instance.publicKeyHex,
-    onMessage: (fromId, encrypted, messageId, replyToMessageId,
-        {double? latitude,
-        double? longitude,
-        String? forwardFromId,
-        String? forwardFromNick,
-        String? forwardFromChannelId}) async {},
+  // Bootstrap only forwarding early; do NOT reset receive handlers here.
+  // Full GossipRouter.init with all callbacks is configured later in init.
+  GossipRouter.instance.ensureForward(
     onForward: (packet) async => packetTransport.forward(packet),
-    startCleanupTimer: false,
+    myKey: CryptoService.instance.publicKeyHex,
   );
-  debugPrint('[RLINK][Init] GossipRouter bootstrap forward installed');
+  debugPrint('[RLINK][Init] GossipRouter forward bootstrap installed');
   try {
     await initWebStorageIfNeeded();
     await BrowserCacheService.instance.init();
