@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -8,6 +9,7 @@ import '../models/user_profile.dart';
 import 'crypto_service.dart';
 import 'runtime_platform.dart';
 import 'web_account_bundle.dart';
+import 'web_identity_portable.dart';
 
 class ProfileService {
   ProfileService._();
@@ -37,6 +39,9 @@ class ProfileService {
     if (RuntimePlatform.isWeb) {
       await WebAccountBundle.layeredWrite(_kProfileKey, value);
       await WebAccountBundle.mergeProfileIntoBundle(value);
+      unawaited(WebIdentityPortable.syncIdentitySnapshotToOpfs(
+        profileJsonOverride: value,
+      ));
       return;
     }
     if (_isMobile) {

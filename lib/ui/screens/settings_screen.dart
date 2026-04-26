@@ -28,6 +28,7 @@ import '../../services/media_upload_queue.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
 import '../../services/runtime_platform.dart';
+import '../../services/web_identity_portable.dart';
 import '../../services/story_service.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/stickers_hub_screen.dart';
@@ -797,6 +798,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
               ),
             ),
+          if (RuntimePlatform.isWeb) ...[
+            ListTile(
+              leading: Icon(Icons.key_rounded, color: cs.primary),
+              title: const Text('Скачать файл ключа входа'),
+              subtitle: const Text(
+                'Сохраните JSON в надёжное место — это ваш ID и логин для web.',
+                style: TextStyle(fontSize: 12),
+              ),
+              onTap: () async {
+                await WebIdentityPortable.exportIdentityKeyDownload();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Файл скачан')),
+                  );
+                }
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.upload_file_rounded, color: cs.primary),
+              title: const Text('Восстановить из файла ключа'),
+              subtitle: const Text(
+                'Выберите ранее скачанный .rlink.json — страница перезагрузится',
+                style: TextStyle(fontSize: 12),
+              ),
+              onTap: () async {
+                final ok =
+                    await WebIdentityPortable.importIdentityKeyFromUserFile();
+                if (!context.mounted) return;
+                if (!ok) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Импорт отменён или файл не подходит'),
+                    ),
+                  );
+                }
+              },
+            ),
+          ],
           if (settings.isDeviceLinked)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),

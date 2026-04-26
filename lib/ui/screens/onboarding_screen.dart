@@ -12,6 +12,7 @@ import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
+import '../../services/web_identity_portable.dart';
 import '../widgets/avatar_widget.dart';
 import '../../main.dart' show navigatorKey;
 import '../../services/rlink_deep_link_service.dart';
@@ -106,6 +107,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         avatarEmoji: _selectedEmoji,
         avatarImagePath: _selectedImagePath,
       );
+      unawaited(WebIdentityPortable.exportIdentityKeyDownload());
       // Restart transports with new identity.
       // BLE was stopped during reset — start() restores it.
       // Relay needs to reconnect so the server registers the new public key.

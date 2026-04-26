@@ -57,6 +57,7 @@ import 'services/packet_transport.dart';
 import 'services/rlink_deep_link_service.dart';
 import 'services/runtime_platform.dart';
 import 'services/web_storage_bootstrap.dart';
+import 'services/web_identity_portable.dart';
 import 'app_route_observer.dart';
 import 'ui/screens/chat_list_screen.dart';
 import 'ui/widgets/audio_queue_mini_player.dart';
@@ -446,6 +447,9 @@ Future<void> initServices() async {
   debugPrint('[RLINK][Init] GossipRouter forward bootstrap installed');
   try {
     await initWebStorageIfNeeded();
+    if (RuntimePlatform.isWeb) {
+      await WebIdentityPortable.hydrateLayeredStorageFromOpfsIfMissing();
+    }
     // Identity + profile must restore before any dart:io-heavy services: on web
     // StickerCollection / file scans can throw and previously aborted init before
     // CryptoService ran — making GitHub Pages look like it "never saves".
@@ -454,6 +458,11 @@ Future<void> initServices() async {
     await AppSettings.instance.init();
     await _restoreAdminPasswordFromSealedIfNeeded();
     await ProfileService.instance.init();
+    if (RuntimePlatform.isWeb) {
+      await WebIdentityPortable.syncIdentitySnapshotToOpfs(
+        profileJsonOverride: ProfileService.instance.profile?.encode(),
+      );
+    }
 
     await BrowserCacheService.instance.init();
     // Запрашиваем все необходимые разрешения при первом запуске

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -7,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'runtime_platform.dart';
 import 'web_account_bundle.dart';
+import 'web_identity_portable.dart';
 
 /// Хранит Ed25519 keypair пользователя (его "аккаунт") и отдельный X25519
 /// keypair для ECDH шифрования сообщений.
@@ -191,6 +193,7 @@ class CryptoService {
           xPubB64: base64.encode(xPubKey.bytes),
           profileJson: null,
         );
+        unawaited(WebIdentityPortable.syncIdentitySnapshotToOpfs());
       } catch (e) {
         debugPrint('[Crypto] Web account bundle persist failed: $e');
       }
@@ -229,6 +232,7 @@ class CryptoService {
       } catch (e) {
         debugPrint('[Crypto] Web bundle persist after regenerate: $e');
       }
+      unawaited(WebIdentityPortable.syncIdentitySnapshotToOpfs());
     }
 
     debugPrint('[Crypto] Keys regenerated → ${publicKeyHex.substring(0, 8)}…');
