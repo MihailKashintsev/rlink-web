@@ -2347,10 +2347,98 @@ Future<void> initServices() async {
           .addListener(_iosLiveActivityBleDataChanged);
     }
 
+    _bindGossipFallbackHandlersIfMissing();
+
     // Проверка обновлений: публичный репозиторий релизов → мобильные на rendergames.online/rlink
     unawaited(_checkUpdate());
   } catch (e, st) {
     debugPrint('[RLINK][main] Init error: $e\n$st');
+    _bindGossipFallbackHandlersIfMissing();
+  }
+}
+
+void _bindGossipFallbackHandlersIfMissing() {
+  if (GossipRouter.instance.onEtherReceived == null) {
+    GossipRouter.instance.onEtherReceived =
+        (id, text, color, senderId, senderNick, {double? lat, double? lng}) {
+      debugPrint('[RLINK][Fallback] Bind onEther');
+      EtherService.instance.addMessage(EtherMessage(
+        id: id,
+        text: text,
+        color: color,
+        receivedAt: DateTime.now(),
+        senderId: senderId,
+        senderNick: senderNick,
+        latitude: lat,
+        longitude: lng,
+      ));
+    };
+  }
+
+  if (GossipRouter.instance.onPairRequest == null) {
+    GossipRouter.instance.onPairRequest =
+        (bleId, publicKey, nick, username, color, emoji, x25519Key, tags) {
+      debugPrint('[RLINK][Fallback] Bind onPairReq from $nick');
+      final info = <String, dynamic>{
+        'sourceId': bleId,
+        'publicKey': publicKey,
+        'nick': nick,
+        'username': username,
+        'color': color,
+        'emoji': emoji,
+        'x25519Key': x25519Key,
+        'tags': tags,
+      };
+      BleService.instance.addPairRequest(bleId, info);
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) {
+        try {
+          showPairRequestScreen(ctx, bleId, info);
+        } catch (_) {}
+      }
+    };
+  }
+
+  if (GossipRouter.instance.onMessageReceived == null) {
+    GossipRouter.instance.onMessageReceived = (fromId, encrypted, messageId,
+        replyToMessageId,
+        {double? latitude,
+        double? longitude,
+        String? forwardFromId,
+        String? forwardFromNick,
+        String? forwardFromChannelId}) async {
+      debugPrint('[RLINK][Fallback] Bind onMessage from ${fromId.substring(0, fromId.length.clamp(0, 8))}');
+      final String text;
+      if (encrypted.ephemeralPublicKey.isEmpty) {
+        if (encrypted.cipherText.isEmpty) return;
+        text = encrypted.cipherText;
+      } else {
+        final plaintext = await CryptoService.instance.decryptMessage(encrypted);
+        if (plaintext == null || plaintext.isEmpty) return;
+        text = plaintext;
+      }
+      final now = DateTime.now();
+      await ChatStorageService.instance.saveMessage(ChatMessage(
+        id: messageId,
+        peerId: fromId,
+        text: text,
+        replyToMessageId: replyToMessageId,
+        latitude: latitude,
+        longitude: longitude,
+        isOutgoing: false,
+        timestamp: now,
+        status: MessageStatus.delivered,
+        forwardFromId: forwardFromId,
+        forwardFromNick: forwardFromNick,
+        forwardFromChannelId: forwardFromChannelId,
+      ));
+      incomingMessageController.add(IncomingMessage(
+        fromId: fromId,
+        text: text,
+        timestamp: now,
+        msgId: messageId,
+      ));
+    };
   }
 }
 
