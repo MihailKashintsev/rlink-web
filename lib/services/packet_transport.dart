@@ -26,7 +26,20 @@ class DefaultPacketTransport implements PacketTransport {
     await _meshForwarder.forward(packet, mode);
 
     // 2) Relay transport (works for mobile and web internet mode).
-    if (RelayService.instance.isConnected && mode >= 1) {
+    if (mode < 1) {
+      if (packet.type == 'msg' ||
+          packet.type == 'raw' ||
+          packet.type == 'pair_req' ||
+          packet.type == 'pair_acc' ||
+          packet.type == 'ether') {
+        final line =
+            '[RLINK][Transport][DROP] type=${packet.type} reason=mode_${mode}_no_relay';
+        debugPrint(line);
+        DiagnosticsLogService.instance.add(line);
+      }
+      return;
+    }
+    if (RelayService.instance.isConnected) {
       try {
         // Prefer explicit full recipient id when packet carries one.
         final explicitRecipient = packet.recipientId;
@@ -60,6 +73,15 @@ class DefaultPacketTransport implements PacketTransport {
           await RelayService.instance.broadcastPacket(packet);
         }
       } catch (_) {}
+    } else if (packet.type == 'msg' ||
+        packet.type == 'raw' ||
+        packet.type == 'pair_req' ||
+        packet.type == 'pair_acc' ||
+        packet.type == 'ether') {
+      final line =
+          '[RLINK][Transport][DROP] type=${packet.type} reason=relay_not_connected';
+      debugPrint(line);
+      DiagnosticsLogService.instance.add(line);
     }
   }
 }

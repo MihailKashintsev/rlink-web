@@ -1959,7 +1959,11 @@ class GossipRouter {
   }
 
   Future<void> _forward(GossipPacket packet) async {
-    if (onForwardPacket == null) return;
+    if (onForwardPacket == null) {
+      _gossipTrace(
+          '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=onForwardPacket_null');
+      return;
+    }
     final bytes = packet.encode();
     if (bytes.length > _kMaxPayloadBytes) {
       debugPrint(
@@ -1969,13 +1973,18 @@ class GossipRouter {
     try {
       await onForwardPacket!(packet);
     } catch (e) {
-      debugPrint('[RLINK][Gossip] Forward failed: $e');
+      _gossipTrace(
+          '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=forward_failed err=$e');
     }
   }
 
   /// Для зашифрованных 'msg' пакетов используем увеличенный лимит (MTU 512).
   Future<void> _forwardEncrypted(GossipPacket packet) async {
-    if (onForwardPacket == null) return;
+    if (onForwardPacket == null) {
+      _gossipTrace(
+          '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=onForwardPacket_null');
+      return;
+    }
     final bytes = packet.encode();
     if (bytes.length > _kMaxEncPayloadBytes) {
       debugPrint(
@@ -1985,13 +1994,18 @@ class GossipRouter {
     try {
       await onForwardPacket!(packet);
     } catch (e) {
-      debugPrint('[RLINK][Gossip] Encrypted forward failed: $e');
+      _gossipTrace(
+          '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=encrypted_forward_failed err=$e');
     }
   }
 
   /// Для img_meta/img_chunk используем увеличенный лимит.
   Future<void> _forwardImg(GossipPacket packet) async {
-    if (onForwardPacket == null) return;
+    if (onForwardPacket == null) {
+      _gossipTrace(
+          '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=onForwardPacket_null');
+      return;
+    }
     final bytes = packet.encode();
     if (bytes.length > _kMaxImgPayloadBytes) {
       debugPrint(
@@ -2001,7 +2015,8 @@ class GossipRouter {
     try {
       await onForwardPacket!(packet);
     } catch (e) {
-      debugPrint('[RLINK][Gossip] Img forward failed: $e');
+      _gossipTrace(
+          '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=img_forward_failed err=$e');
     }
   }
 

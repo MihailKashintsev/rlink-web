@@ -443,7 +443,11 @@ class RelayService with WidgetsBindingObserver {
   /// img_chunk packets are throttled through an internal queue to avoid
   /// relay server rate-limiting (100+ chunks/image would be rejected instantly).
   Future<void> sendPacket(GossipPacket packet, {String? recipientKey}) async {
-    if (!isConnected) return;
+    if (!isConnected) {
+      _relayTrace(
+          '[RLINK][Relay][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=not_connected');
+      return;
+    }
     final bytes = packet.encode();
     final b64 = base64Encode(bytes);
 
@@ -491,7 +495,11 @@ class RelayService with WidgetsBindingObserver {
   /// Broadcast a gossip packet to all connected relay peers.
   /// img_chunk packets are throttled through the same queue as directed sends.
   Future<void> broadcastPacket(GossipPacket packet) async {
-    if (!isConnected) return;
+    if (!isConnected) {
+      _relayTrace(
+          '[RLINK][Relay][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=not_connected');
+      return;
+    }
     final bytes = packet.encode();
     final b64 = base64Encode(bytes);
     final envelope = <String, dynamic>{'type': 'broadcast', 'data': b64};
