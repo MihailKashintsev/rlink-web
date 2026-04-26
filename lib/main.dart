@@ -437,6 +437,20 @@ Future<void> main() async {
 }
 
 Future<void> initServices() async {
+  // Bootstrap gossip forwarding early so outgoing packets never hit
+  // onForwardPacket==null even if heavy init below fails midway.
+  GossipRouter.instance.init(
+    myKey: CryptoService.instance.publicKeyHex,
+    onMessage: (fromId, encrypted, messageId, replyToMessageId,
+        {double? latitude,
+        double? longitude,
+        String? forwardFromId,
+        String? forwardFromNick,
+        String? forwardFromChannelId}) async {},
+    onForward: (packet) async => packetTransport.forward(packet),
+    startCleanupTimer: false,
+  );
+  debugPrint('[RLINK][Init] GossipRouter bootstrap forward installed');
   try {
     await initWebStorageIfNeeded();
     await BrowserCacheService.instance.init();
@@ -2342,8 +2356,8 @@ Future<void> initServices() async {
 
     // Проверка обновлений: публичный репозиторий релизов → мобильные на rendergames.online/rlink
     unawaited(_checkUpdate());
-  } catch (e) {
-    debugPrint('[RLINK][main] Init error: $e');
+  } catch (e, st) {
+    debugPrint('[RLINK][main] Init error: $e\n$st');
   }
 }
 

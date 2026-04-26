@@ -352,7 +352,9 @@ class GossipRouter {
     OnPairRequest? onPairReq,
     OnPairAccepted? onPairAcc,
     OnTypingReceived? onTyping,
+    bool startCleanupTimer = true,
   }) {
+    _cleanupTimer?.cancel();
     myPublicKey = myKey;
     onMessageReceived = onMessage;
     onAckReceived = onAck;
@@ -368,8 +370,10 @@ class GossipRouter {
     onPairRequest = onPairReq;
     onPairAccepted = onPairAcc;
     onTypingReceived = onTyping;
-    _cleanupTimer =
-        Timer.periodic(const Duration(minutes: 10), (_) => _cleanup());
+    if (startCleanupTimer) {
+      _cleanupTimer =
+          Timer.periodic(const Duration(minutes: 10), (_) => _cleanup());
+    }
   }
 
   void dispose() {
