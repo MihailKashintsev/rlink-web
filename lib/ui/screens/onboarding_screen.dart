@@ -141,10 +141,25 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     if (!RuntimePlatform.isWeb) return;
     setState(() => _importBusy = true);
     try {
-      final ok = await WebIdentityPortable.importIdentityKeyFromUserFile();
+      final ok =
+          await WebIdentityPortable.importIdentityKeyFromUserFile(reloadAfter: false);
       if (!mounted) return;
       if (!ok) {
         _showSnack('Импорт отменён или файл не подходит', isError: true);
+        return;
+      }
+      await CryptoService.instance.init();
+      await ProfileService.instance.init();
+      final profile = ProfileService.instance.profile;
+      if (profile == null) {
+        _showSnack('Ключ импортирован, но профиль не восстановлен', isError: true);
+        return;
+      }
+      unawaited(_restartTransports(profile));
+      if (mounted) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const ChatListScreen()),
+        );
       }
     } finally {
       if (mounted) setState(() => _importBusy = false);

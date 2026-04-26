@@ -101,7 +101,7 @@ class ChatStorageService {
     final path = await _dbPath('rlink.db');
     _db = await openDatabase(
       path,
-      version: 20,
+      version: 21,
       onCreate: (db, v) async {
         try {
           await db.rawQuery('PRAGMA journal_mode = WAL');
@@ -179,6 +179,15 @@ class ChatStorageService {
             conv_key      TEXT PRIMARY KEY,
             last_read_ts  INTEGER NOT NULL,
             last_read_id  TEXT NOT NULL DEFAULT ''
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE local_profile_cache (
+            singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+            public_key_hex  TEXT NOT NULL,
+            username        TEXT NOT NULL,
+            nickname        TEXT NOT NULL,
+            updated_at      INTEGER NOT NULL
           )
         ''');
       },
@@ -351,6 +360,17 @@ class ChatStorageService {
             await db.execute(
                 'ALTER TABLE messages ADD COLUMN gigachat_attachment_ids TEXT');
           } catch (_) {}
+        }
+        if (oldVersion < 21) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS local_profile_cache (
+              singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+              public_key_hex  TEXT NOT NULL,
+              username        TEXT NOT NULL,
+              nickname        TEXT NOT NULL,
+              updated_at      INTEGER NOT NULL
+            )
+          ''');
         }
       },
     );
@@ -1095,6 +1115,26 @@ class ChatStorageService {
       whereArgs: [messageId],
     );
     _notifyMessages(msg.peerId);
+  }
+
+  /// Web cache mirror for own identity fields shown in registration/profile.
+  Future<void> upsertLocalProfileCache({
+    required String publicKeyHex,
+    required String username,
+    required String nickname,
+  }) async {
+    await _ensureDbReady();
+    await _db?.insert(
+      'local_profile_cache',
+      {
+        'singleton': 1,
+        'public_key_hex': publicKeyHex.trim(),
+        'username': username.trim(),
+        'nickname': nickname.trim(),
+        'updated_at': DateTime.now().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 }
 

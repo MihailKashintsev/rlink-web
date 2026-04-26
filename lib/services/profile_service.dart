@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/user_profile.dart';
+import 'chat_storage_service.dart';
 import 'crypto_service.dart';
 import 'runtime_platform.dart';
 import 'web_account_bundle.dart';
@@ -52,6 +53,19 @@ class ProfileService {
     }
   }
 
+  Future<void> _syncProfileMirrorToBrowserChatCache(UserProfile? p) async {
+    if (!RuntimePlatform.isWeb || p == null) return;
+    try {
+      await ChatStorageService.instance.upsertLocalProfileCache(
+        publicKeyHex: p.publicKeyHex,
+        username: p.username,
+        nickname: p.nickname,
+      );
+    } catch (e) {
+      debugPrint('[Profile] Failed to sync local profile cache: $e');
+    }
+  }
+
   UserProfile? _profile;
   UserProfile? get profile => _profile;
   bool get hasProfile => _profile != null;
@@ -90,6 +104,7 @@ class ProfileService {
         }
       }
       profileNotifier.value = _profile;
+      await _syncProfileMirrorToBrowserChatCache(_profile);
     }
     if (RuntimePlatform.isWeb) {
       final postImport =
@@ -108,6 +123,7 @@ class ProfileService {
           );
           await _write(_profile!.encode());
           profileNotifier.value = _profile;
+          await _syncProfileMirrorToBrowserChatCache(_profile);
           debugPrint(
               '[Profile] Repaired minimal profile after import (flag fallback)');
         }
@@ -143,6 +159,7 @@ class ProfileService {
     await _write(profile.encode());
     _profile = profile;
     profileNotifier.value = profile;
+    unawaited(_syncProfileMirrorToBrowserChatCache(profile));
     return profile;
   }
 
@@ -178,6 +195,7 @@ class ProfileService {
     await _write(updated.encode());
     _profile = updated;
     profileNotifier.value = updated;
+    unawaited(_syncProfileMirrorToBrowserChatCache(updated));
     return updated;
   }
 }
