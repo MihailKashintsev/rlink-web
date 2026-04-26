@@ -45,6 +45,7 @@ class CryptoService {
         await writeWebState(key, durable);
         return durable;
       }
+      return null;
     }
     if (_isMobile) return _secureSt.read(key: key);
     final prefs = await SharedPreferences.getInstance();
@@ -55,6 +56,7 @@ class CryptoService {
     if (RuntimePlatform.isWeb) {
       await writeWebState(key, value);
       await AccountKvStore.write(key, value);
+      return;
     }
     if (_isMobile) {
       await _secureSt.write(key: key, value: value);

@@ -34,6 +34,7 @@ class ProfileService {
         await writeWebState(_kProfileKey, durable);
         return durable;
       }
+      return null;
     }
     if (_isMobile) return _secureSt.read(key: _kProfileKey);
     final prefs = await SharedPreferences.getInstance();
@@ -44,6 +45,7 @@ class ProfileService {
     if (RuntimePlatform.isWeb) {
       await writeWebState(_kProfileKey, value);
       await AccountKvStore.write(_kProfileKey, value);
+      return;
     }
     if (_isMobile) {
       await _secureSt.write(key: _kProfileKey, value: value);

@@ -66,7 +66,7 @@ class UserProfile {
         publicKeyHex: j['id'] as String,
         nickname: j['nick'] as String,
         username: j['u'] as String? ?? '',
-        avatarColor: j['color'] as int,
+        avatarColor: (j['color'] as num).toInt(),
         avatarEmoji: j['emoji'] as String,
         avatarImagePath: ImageService.instance.resolveStoredPath(
             j['imgPath'] as String?),
