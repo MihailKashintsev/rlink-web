@@ -218,10 +218,10 @@ class RelayService with WidgetsBindingObserver {
 
     var myKey = CryptoService.instance.publicKeyHex;
     if (myKey.isEmpty) {
-      // Web can occasionally start with stale/corrupted browser storage.
-      // Try to self-heal keys before giving up.
+      // Key may be temporarily unavailable if connect() races init.
+      // Re-read existing keys from storage, but never regenerate implicitly.
       try {
-        await CryptoService.instance.regenerateKeys();
+        await CryptoService.instance.init();
         myKey = CryptoService.instance.publicKeyHex;
         final p = ProfileService.instance.profile;
         if (p != null && p.publicKeyHex != myKey) {
