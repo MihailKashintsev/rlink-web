@@ -2625,6 +2625,11 @@ Future<void> sendProfileToAllContacts() async {
   }
 }
 
+/// Public wrapper for targeted full profile sync (profile + avatar + banner/music).
+Future<void> sendFullProfileToPeer(String peerPublicKey) async {
+  await _sendFullProfileToPeer(peerPublicKey);
+}
+
 /// Request active stories from all connected peers (called on relay connect / BLE peer connect).
 Future<void> _requestStoriesFromPeers() async {
   final myKey = CryptoService.instance.publicKeyHex;

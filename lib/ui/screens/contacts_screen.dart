@@ -6,7 +6,6 @@ import '../../models/contact.dart';
 import '../../services/ble_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
-import '../../services/gossip_router.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
 import '../widgets/avatar_widget.dart';
@@ -127,21 +126,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   void _onTapRelayPeer(RelayPeer peer) {
     final nick = peer.nick.isNotEmpty ? peer.nick : peer.shortId;
-    // Open the chat for previewing messages, but do NOT auto-create a contact.
-    // Instead, send a pair_req so the contact is only added after mutual acceptance.
-    final myProfile = ProfileService.instance.profile;
-    if (myProfile != null) {
-      GossipRouter.instance.sendPairRequest(
-        publicKey: myProfile.publicKeyHex,
-        nick: myProfile.nickname,
-        username: myProfile.username,
-        color: myProfile.avatarColor,
-        emoji: myProfile.avatarEmoji,
-        recipientId: peer.publicKey,
-        x25519Key: CryptoService.instance.x25519PublicKeyBase64,
-        tags: myProfile.tags,
-      );
-    }
+    // Open chat only. Pair request must be explicit via "Add" action.
     _openChat(context, peer.publicKey, nick, 0xFF607D8B, '', null);
   }
 

@@ -1467,19 +1467,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             unawaited(ChatStorageService.instance
                 .updateContactX25519Key(publicKey, relayX25519Key));
           }
-          final myProfile = ProfileService.instance.profile;
-          if (myProfile != null) {
-            unawaited(GossipRouter.instance.sendPairRequest(
-              publicKey: myProfile.publicKeyHex,
-              nick: myProfile.nickname,
-              username: myProfile.username,
-              color: myProfile.avatarColor,
-              emoji: myProfile.avatarEmoji,
-              recipientId: publicKey,
-              x25519Key: CryptoService.instance.x25519PublicKeyBase64,
-              tags: myProfile.tags,
-            ));
-          }
+          // Open chat only. Pair exchange is explicit from "add/pair" actions.
           var contact =
               await ChatStorageService.instance.getContact(publicKey);
           final finalNick = contact?.nickname ?? nickname;

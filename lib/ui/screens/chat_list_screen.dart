@@ -2746,7 +2746,7 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
     // Send full profile (avatar + banner) directly to the paired peer
     final pairedKey = widget.info['publicKey'] as String? ?? '';
     if (pairedKey.isNotEmpty) {
-      sendProfileToAllContacts();
+      await sendFullProfileToPeer(pairedKey);
     }
 
     BleService.instance.removePairRequest(widget.bleId);
