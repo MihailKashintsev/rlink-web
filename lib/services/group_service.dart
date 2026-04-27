@@ -52,6 +52,12 @@ class GroupService {
   final _uuid = const Uuid();
   Database? _db;
 
+  Future<String> _dbPath(String fileName) async {
+    if (kIsWeb) return fileName;
+    final dir = await getApplicationDocumentsDirectory();
+    return p.join(dir.path, fileName);
+  }
+
   /// Notifies UI when group list changes.
   final version = ValueNotifier<int>(0);
 
@@ -71,8 +77,7 @@ class GroupService {
   }
 
   Future<void> init() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final path = p.join(dir.path, 'groups.db');
+    final path = await _dbPath('groups.db');
     _db = await openDatabase(
       path,
       version: 7,

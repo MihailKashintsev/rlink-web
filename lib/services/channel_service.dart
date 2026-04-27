@@ -64,6 +64,12 @@ class ChannelService {
   final _uuid = const Uuid();
   Database? _db;
 
+  Future<String> _dbPath(String fileName) async {
+    if (kIsWeb) return fileName;
+    final dir = await getApplicationDocumentsDirectory();
+    return p.join(dir.path, fileName);
+  }
+
   /// Медиа пришло по img_chunk до пакета channel_post — временно кладём путь сюда.
   final Map<String, String> _pendingPostImagePaths = {};
   final Map<String, String> _pendingPostVideoPaths = {};
@@ -93,8 +99,7 @@ class ChannelService {
   }
 
   Future<void> init() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final path = p.join(dir.path, 'channels.db');
+    final path = await _dbPath('channels.db');
     _db = await openDatabase(
       path,
       version: 17,
