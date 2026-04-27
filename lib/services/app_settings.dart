@@ -49,6 +49,19 @@ class AppSettings extends ChangeNotifier {
   static const _keyPreLinkConnectionMode = 'pre_link_connection_mode';
 
   late SharedPreferences _prefs;
+  bool _prefsReady = false;
+
+  Future<void> _runPrefsWrite(
+    Future<void> Function(SharedPreferences prefs) action,
+  ) async {
+    try {
+      if (!_prefsReady) {
+        _prefs = await SharedPreferences.getInstance();
+        _prefsReady = true;
+      }
+      await action(_prefs);
+    } catch (_) {}
+  }
 
   ThemeMode _themeMode = ThemeMode.system;
   int _accentColorIndex = 0;
@@ -222,6 +235,7 @@ class AppSettings extends ChangeNotifier {
 
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
+    _prefsReady = true;
     final modeIdx = _prefs.getInt(_keyThemeMode) ?? 0;
     _themeMode = ThemeMode.values[modeIdx.clamp(0, 2)];
     _accentColorIndex =
@@ -291,32 +305,32 @@ class AppSettings extends ChangeNotifier {
 
   Future<void> setNotifyPersonal(bool v) async {
     _notifyPersonal = v;
-    await _prefs.setBool(_keyNotifyPersonal, v);
+    await _runPrefsWrite((p) => p.setBool(_keyNotifyPersonal, v));
     notifyListeners();
   }
 
   Future<void> setNotifyGroups(bool v) async {
     _notifyGroups = v;
-    await _prefs.setBool(_keyNotifyGroups, v);
+    await _runPrefsWrite((p) => p.setBool(_keyNotifyGroups, v));
     notifyListeners();
   }
 
   Future<void> setNotifyChannels(bool v) async {
     _notifyChannels = v;
-    await _prefs.setBool(_keyNotifyChannels, v);
+    await _runPrefsWrite((p) => p.setBool(_keyNotifyChannels, v));
     notifyListeners();
   }
 
   Future<void> setAppIconVariant(int v) async {
     _appIconVariant = v.clamp(0, 2);
-    await _prefs.setInt(_keyAppIconVariant, _appIconVariant);
+    await _runPrefsWrite((p) => p.setInt(_keyAppIconVariant, _appIconVariant));
     notifyListeners();
   }
 
   Future<void> setUseIosStyleEmoji(bool v) async {
     if (!RuntimePlatform.isAndroid) return;
     _useIosStyleEmoji = v;
-    await _prefs.setBool(_keyUseIosStyleEmoji, v);
+    await _runPrefsWrite((p) => p.setBool(_keyUseIosStyleEmoji, v));
     notifyListeners();
   }
 
@@ -324,138 +338,140 @@ class AppSettings extends ChangeNotifier {
     final e = emoji.trim();
     if (e.isEmpty) return;
     _quickReactionEmoji = e;
-    await _prefs.setString(_keyQuickReactionEmoji, _quickReactionEmoji);
+    await _runPrefsWrite(
+      (p) => p.setString(_keyQuickReactionEmoji, _quickReactionEmoji),
+    );
     notifyListeners();
   }
 
   Future<void> setBubbleStyle(int style) async {
     _bubbleStyle = style.clamp(0, 2);
-    await _prefs.setInt(_keyBubbleStyle, _bubbleStyle);
+    await _runPrefsWrite((p) => p.setInt(_keyBubbleStyle, _bubbleStyle));
     notifyListeners();
   }
 
   Future<void> setClockFormat(int fmt) async {
     _clockFormat = fmt.clamp(0, 1);
-    await _prefs.setInt(_keyClockFormat, _clockFormat);
+    await _runPrefsWrite((p) => p.setInt(_keyClockFormat, _clockFormat));
     notifyListeners();
   }
 
   Future<void> setMessageDensity(int d) async {
     _messageDensity = d.clamp(0, 2);
-    await _prefs.setInt(_keyMessageDensity, _messageDensity);
+    await _runPrefsWrite((p) => p.setInt(_keyMessageDensity, _messageDensity));
     notifyListeners();
   }
 
   Future<void> setShowReactionsQuickBar(bool value) async {
     _showReactionsQuickBar = value;
-    await _prefs.setBool(_keyShowReactionsQuickBar, value);
+    await _runPrefsWrite((p) => p.setBool(_keyShowReactionsQuickBar, value));
     notifyListeners();
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {
     _themeMode = mode;
-    await _prefs.setInt(_keyThemeMode, mode.index);
+    await _runPrefsWrite((p) => p.setInt(_keyThemeMode, mode.index));
     notifyListeners();
   }
 
   Future<void> setAccentColor(int index) async {
     _accentColorIndex = index.clamp(0, accentColors.length - 1);
-    await _prefs.setInt(_keyAccentColor, _accentColorIndex);
+    await _runPrefsWrite((p) => p.setInt(_keyAccentColor, _accentColorIndex));
     notifyListeners();
   }
 
   Future<void> setNotificationsEnabled(bool value) async {
     _notificationsEnabled = value;
-    await _prefs.setBool(_keyNotifications, value);
+    await _runPrefsWrite((p) => p.setBool(_keyNotifications, value));
     notifyListeners();
   }
 
   Future<void> setNotifSound(bool value) async {
     _notifSound = value;
-    await _prefs.setBool(_keyNotifSound, value);
+    await _runPrefsWrite((p) => p.setBool(_keyNotifSound, value));
     notifyListeners();
   }
 
   Future<void> setNotifVibration(bool value) async {
     _notifVibration = value;
-    await _prefs.setBool(_keyNotifVibration, value);
+    await _runPrefsWrite((p) => p.setBool(_keyNotifVibration, value));
     notifyListeners();
   }
 
   Future<void> setChatBgForPeer(String peerId, String? path) async {
     if (path == null) {
       _chatBgMap.remove(peerId);
-      await _prefs.remove('$_keyChatBgPrefix$peerId');
+      await _runPrefsWrite((p) => p.remove('$_keyChatBgPrefix$peerId'));
     } else {
       _chatBgMap[peerId] = path;
-      await _prefs.setString('$_keyChatBgPrefix$peerId', path);
+      await _runPrefsWrite((p) => p.setString('$_keyChatBgPrefix$peerId', path));
     }
     notifyListeners();
   }
 
   Future<void> setLocale(String locale) async {
     _locale = locale;
-    await _prefs.setString(_keyLocale, locale);
+    await _runPrefsWrite((p) => p.setString(_keyLocale, locale));
     notifyListeners();
   }
 
   Future<void> setFontSize(int size) async {
     _fontSize = size.clamp(0, 2);
-    await _prefs.setInt(_keyFontSize, _fontSize);
+    await _runPrefsWrite((p) => p.setInt(_keyFontSize, _fontSize));
     notifyListeners();
   }
 
   Future<void> setSendOnEnter(bool value) async {
     _sendOnEnter = value;
-    await _prefs.setBool(_keySendOnEnter, value);
+    await _runPrefsWrite((p) => p.setBool(_keySendOnEnter, value));
     notifyListeners();
   }
 
   Future<void> setShowReadReceipts(bool value) async {
     _showReadReceipts = value;
-    await _prefs.setBool(_keyShowReadReceipts, value);
+    await _runPrefsWrite((p) => p.setBool(_keyShowReadReceipts, value));
     notifyListeners();
   }
 
   Future<void> setShowOnlineStatus(bool value) async {
     _showOnlineStatus = value;
-    await _prefs.setBool(_keyShowOnlineStatus, value);
+    await _runPrefsWrite((p) => p.setBool(_keyShowOnlineStatus, value));
     notifyListeners();
   }
 
   Future<void> setAutoDownloadMedia(bool value) async {
     _autoDownloadMedia = value;
-    await _prefs.setBool(_keyAutoDownloadMedia, value);
+    await _runPrefsWrite((p) => p.setBool(_keyAutoDownloadMedia, value));
     notifyListeners();
   }
 
   Future<void> setCompactMode(bool value) async {
     _compactMode = value;
-    await _prefs.setBool(_keyCompactMode, value);
+    await _runPrefsWrite((p) => p.setBool(_keyCompactMode, value));
     notifyListeners();
   }
 
   Future<void> setEtherRulesAccepted(bool value) async {
     _etherRulesAccepted = value;
-    await _prefs.setBool(_keyEtherRulesAccepted, value);
+    await _runPrefsWrite((p) => p.setBool(_keyEtherRulesAccepted, value));
     notifyListeners();
   }
 
   Future<void> setOnlineStatusMode(int mode) async {
     _onlineStatusMode = mode.clamp(0, 2);
-    await _prefs.setInt(_keyOnlineStatusMode, _onlineStatusMode);
+    await _runPrefsWrite((p) => p.setInt(_keyOnlineStatusMode, _onlineStatusMode));
     notifyListeners();
   }
 
   Future<void> setRelayEnabled(bool value) async {
     _relayEnabled = (RuntimePlatform.isWeb || isDeviceLinked) ? true : value;
-    await _prefs.setBool(_keyRelayEnabled, _relayEnabled);
+    await _runPrefsWrite((p) => p.setBool(_keyRelayEnabled, _relayEnabled));
     notifyListeners();
   }
 
   Future<void> setRelayServerUrl(String url) async {
     _relayServerUrl = url;
-    await _prefs.setString(_keyRelayServerUrl, url);
+    await _runPrefsWrite((p) => p.setString(_keyRelayServerUrl, url));
     notifyListeners();
   }
 
@@ -464,14 +480,14 @@ class AppSettings extends ChangeNotifier {
         (RuntimePlatform.isWeb || isDeviceLinked) ? 1 : mode.clamp(0, 2);
     // Sync relayEnabled based on connection mode
     _relayEnabled = _connectionMode >= 1; // Internet or Both
-    await _prefs.setInt(_keyConnectionMode, _connectionMode);
-    await _prefs.setBool(_keyRelayEnabled, _relayEnabled);
+    await _runPrefsWrite((p) => p.setInt(_keyConnectionMode, _connectionMode));
+    await _runPrefsWrite((p) => p.setBool(_keyRelayEnabled, _relayEnabled));
     notifyListeners();
   }
 
   Future<void> setMediaPriority(int priority) async {
     _mediaPriority = priority.clamp(0, 1);
-    await _prefs.setInt(_keyMediaPriority, _mediaPriority);
+    await _runPrefsWrite((p) => p.setInt(_keyMediaPriority, _mediaPriority));
     notifyListeners();
   }
 

@@ -58,6 +58,7 @@ import 'services/rlink_deep_link_service.dart';
 import 'services/runtime_platform.dart';
 import 'services/web_storage_bootstrap.dart';
 import 'services/web_identity_portable.dart';
+import 'services/web_notification_bridge.dart';
 import 'app_route_observer.dart';
 import 'ui/screens/chat_list_screen.dart';
 import 'ui/widgets/audio_queue_mini_player.dart';
@@ -2337,6 +2338,17 @@ Future<void> initServices() async {
         );
     RelayService.instance.state.addListener(() {
       if (RelayService.instance.isConnected) {
+        if (RuntimePlatform.isWeb) {
+          final p = ProfileService.instance.profile;
+          unawaited(
+            syncWebPushSubscription(
+              relayServerUrl:
+                  RelayService.instance.serverUrl ?? RelayService.defaultServerUrl,
+              publicKey: CryptoService.instance.publicKeyHex,
+              nick: p?.nickname ?? '',
+            ),
+          );
+        }
         Future.delayed(const Duration(seconds: 2), _sendProfileToOnlinePeers);
         // Web: after reconnect/import, force a full profile push to contacts so
         // both sides refresh nick/username/avatar state symmetrically.

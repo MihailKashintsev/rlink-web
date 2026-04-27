@@ -10,3 +10,13 @@ Future<void> showWebNotification({
   String? tag,
 }) =>
     impl.showWebNotification(title: title, body: body, tag: tag);
+
+Future<void> syncWebPushSubscription({
+  required String relayServerUrl,
+  required String publicKey,
+  required String nick,
+}) => impl.syncWebPushSubscription(
+      relayServerUrl: relayServerUrl,
+      publicKey: publicKey,
+      nick: nick,
+    );

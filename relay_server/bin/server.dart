@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_web_socket/shelf_web_socket.dart';
@@ -87,6 +88,19 @@ final Map<String, Map<String, Map<String, dynamic>>> _mailbox = {};
 
 const _mailboxFile = 'relay_mailbox.json';
 const _mailboxMaxPerRecipient = 5000;
+
+/// Stored Web Push subscriptions by recipient public key.
+final Map<String, List<Map<String, dynamic>>> _pushSubscriptions = {};
+const _pushSubsFile = 'push_subscriptions.json';
+const _pushCooldownSeconds = 12;
+final Map<String, DateTime> _lastPushForRecipient = {};
+
+final String _vapidPublicKey =
+    (Platform.environment['VAPID_PUBLIC_KEY'] ?? '').trim();
+final String _vapidPrivateKeyPem =
+    (Platform.environment['VAPID_PRIVATE_KEY_PEM'] ?? '').trim();
+final String _vapidSubject =
+    (Platform.environment['VAPID_SUBJECT'] ?? 'mailto:admin@rlink.local').trim();
 
 // ── Публичный каталог каналов (подпись админа, персистентность) ──
 
@@ -423,6 +437,133 @@ void _sendMailboxSnapshot(_User user) {
       '[RLINK][Relay] mailbox replay → ${user.shortId}: $sent queued packets');
 }
 
+bool get _webPushConfigured =>
+    _vapidPublicKey.isNotEmpty && _vapidPrivateKeyPem.isNotEmpty;
+
+void _loadPushSubscriptions() {
+  try {
+    final f = File(_pushSubsFile);
+    if (!f.existsSync()) return;
+    final decoded = jsonDecode(f.readAsStringSync());
+    if (decoded is! Map) return;
+    decoded.forEach((k, v) {
+      if (k is! String || v is! List) return;
+      final list = <Map<String, dynamic>>[];
+      for (final item in v) {
+        if (item is Map) {
+          list.add(Map<String, dynamic>.from(item));
+        }
+      }
+      if (list.isNotEmpty) {
+        _pushSubscriptions[k.toLowerCase()] = list;
+      }
+    });
+    stdout.writeln(
+      '[RLINK][Relay] Loaded push subscriptions for ${_pushSubscriptions.length} recipients',
+    );
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] push_subscriptions load: $e');
+  }
+}
+
+void _persistPushSubscriptions() {
+  try {
+    File(_pushSubsFile).writeAsStringSync(jsonEncode(_pushSubscriptions));
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] push_subscriptions save: $e');
+  }
+}
+
+void _upsertPushSubscription(String recipientKey, Map<String, dynamic> sub) {
+  final key = recipientKey.toLowerCase();
+  final endpoint = (sub['endpoint'] as String?)?.trim() ?? '';
+  if (endpoint.isEmpty) return;
+  final list = _pushSubscriptions.putIfAbsent(
+    key,
+    () => <Map<String, dynamic>>[],
+  );
+  list.removeWhere((s) => (s['endpoint'] as String?) == endpoint);
+  list.add(sub);
+  while (list.length > 8) {
+    list.removeAt(0);
+  }
+  _persistPushSubscriptions();
+}
+
+String _normalizeB64Url(String value) {
+  final v = value.trim();
+  if (v.isEmpty) return '';
+  var normalized = v.replaceAll('-', '+').replaceAll('_', '/');
+  while (normalized.length % 4 != 0) {
+    normalized += '=';
+  }
+  return base64Url.encode(base64Decode(normalized)).replaceAll('=', '');
+}
+
+String _vapidAuthHeader(String endpoint) {
+  final aud = '${Uri.parse(endpoint).scheme}://${Uri.parse(endpoint).host}';
+  final jwt = JWT(
+    {'aud': aud, 'sub': _vapidSubject},
+  ).sign(
+    ECPrivateKey(_vapidPrivateKeyPem),
+    algorithm: JWTAlgorithm.ES256,
+    expiresIn: const Duration(hours: 12),
+  );
+  return 'vapid t=$jwt, k=$_vapidPublicKey';
+}
+
+Future<void> _notifyRecipientQueued({
+  required String recipientKey,
+  required String senderKey,
+}) async {
+  if (!_webPushConfigured) return;
+  final now = DateTime.now();
+  final prev = _lastPushForRecipient[recipientKey];
+  if (prev != null &&
+      now.difference(prev).inSeconds < _pushCooldownSeconds) {
+    return;
+  }
+  final subs = _pushSubscriptions[recipientKey];
+  if (subs == null || subs.isEmpty) return;
+
+  final payload = utf8.encode(jsonEncode({
+    'title': 'Rlink',
+    'body': 'Новое сообщение в очереди доставки',
+    'tag': 'rlink-${senderKey.substring(0, senderKey.length.clamp(0, 8))}',
+    'data': {'recipient': recipientKey},
+  }));
+  final toRemoveEndpoints = <String>{};
+  final client = HttpClient();
+  try {
+    for (final sub in subs) {
+      final endpoint = (sub['endpoint'] as String?)?.trim() ?? '';
+      if (endpoint.isEmpty) continue;
+      try {
+        final req = await client.postUrl(Uri.parse(endpoint));
+        req.headers.set('TTL', '60');
+        req.headers.set('Authorization', _vapidAuthHeader(endpoint));
+        req.headers.set('Urgency', 'high');
+        req.headers.set('Content-Type', 'application/json');
+        req.add(payload);
+        final resp = await req.close();
+        if (resp.statusCode == 404 || resp.statusCode == 410) {
+          toRemoveEndpoints.add(endpoint);
+        }
+      } catch (_) {}
+    }
+  } finally {
+    client.close(force: true);
+  }
+  if (toRemoveEndpoints.isNotEmpty) {
+    subs.removeWhere(
+      (s) => toRemoveEndpoints.contains((s['endpoint'] as String?) ?? ''),
+    );
+    if (subs.isEmpty) _pushSubscriptions.remove(recipientKey);
+    _persistPushSubscriptions();
+  }
+  _lastPushForRecipient[recipientKey] = now;
+}
+
 void _persistAccountBlobs() {
   try {
     File('account_blobs.json').writeAsStringSync(jsonEncode(_accountBlobs));
@@ -533,6 +674,7 @@ void _handlePacket(_User sender, Map<String, dynamic> msg) {
 
   final recipient = _users[to];
   if (recipient == null) {
+    unawaited(_notifyRecipientQueued(recipientKey: to, senderKey: sender.publicKey));
     sender.ws.sink.add(jsonEncode({
       'type': 'delivery_status',
       'to': to,
@@ -592,6 +734,7 @@ void _handleBlob(_User sender, Map<String, dynamic> msg) {
 
   final recipient = _users[to];
   if (recipient == null) {
+    unawaited(_notifyRecipientQueued(recipientKey: to, senderKey: sender.publicKey));
     sender.ws.sink.add(jsonEncode({
       'type': 'delivery_status',
       'to': to,
@@ -772,22 +915,88 @@ void _broadcastPresence(String publicKey, bool online) {
 
 // ── Health check / info endpoint ────────────────────────────────
 
-shelf.Response _infoHandler(shelf.Request request) {
+shelf.Response _jsonResponse(Map<String, dynamic> body, {int status = 200}) {
+  return shelf.Response(
+    status,
+    body: jsonEncode(body),
+    headers: {
+      'content-type': 'application/json',
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'GET,POST,OPTIONS',
+      'access-control-allow-headers': 'content-type',
+    },
+  );
+}
+
+Future<shelf.Response> _infoHandler(shelf.Request request) async {
+  if (request.method == 'OPTIONS') {
+    return shelf.Response(
+      204,
+      headers: {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET,POST,OPTIONS',
+        'access-control-allow-headers': 'content-type',
+      },
+    );
+  }
+  if (request.url.path == 'push/public_key') {
+    if (!_webPushConfigured) {
+      return _jsonResponse({'enabled': false, 'publicKey': ''}, status: 503);
+    }
+    return _jsonResponse({'enabled': true, 'publicKey': _vapidPublicKey});
+  }
+  if (request.url.path == 'push/subscribe' && request.method == 'POST') {
+    if (!_webPushConfigured) {
+      return _jsonResponse({'ok': false, 'error': 'push_not_configured'}, status: 503);
+    }
+    try {
+      final raw = await request.readAsString();
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return _jsonResponse({'ok': false, 'error': 'bad_json'}, status: 400);
+      }
+      final publicKey =
+          (decoded['publicKey'] as String?)?.trim().toLowerCase() ?? '';
+      final subRaw = decoded['subscription'];
+      if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(publicKey) || subRaw is! Map) {
+        return _jsonResponse({'ok': false, 'error': 'bad_request'}, status: 400);
+      }
+      final endpoint = (subRaw['endpoint'] as String?)?.trim() ?? '';
+      final keysRaw = subRaw['keys'];
+      if (endpoint.isEmpty || keysRaw is! Map) {
+        return _jsonResponse({'ok': false, 'error': 'bad_subscription'}, status: 400);
+      }
+      final p256dh = _normalizeB64Url((keysRaw['p256dh'] as String?) ?? '');
+      final auth = _normalizeB64Url((keysRaw['auth'] as String?) ?? '');
+      if (p256dh.isEmpty || auth.isEmpty) {
+        return _jsonResponse({'ok': false, 'error': 'bad_keys'}, status: 400);
+      }
+      _upsertPushSubscription(publicKey, {
+        'endpoint': endpoint,
+        'keys': {'p256dh': p256dh, 'auth': auth},
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        if ((decoded['nick'] as String?)?.trim().isNotEmpty ?? false)
+          'nick': (decoded['nick'] as String).trim(),
+      });
+      return _jsonResponse({'ok': true});
+    } catch (_) {
+      return _jsonResponse({'ok': false, 'error': 'invalid_payload'}, status: 400);
+    }
+  }
   if (request.url.path == 'health') {
     final peers = _users.values.map((u) => {
       'shortId': u.shortId,
       'nick': u.nick,
       'connectedAt': u.connectedAt.toIso8601String(),
     }).toList();
-    return shelf.Response.ok(
-      jsonEncode({
-        'status': 'ok',
-        'online': _users.length,
-        'peers': peers,
-        'uptime': DateTime.now().toIso8601String(),
-      }),
-      headers: {'content-type': 'application/json'},
-    );
+    return _jsonResponse({
+      'status': 'ok',
+      'online': _users.length,
+      'peers': peers,
+      'uptime': DateTime.now().toIso8601String(),
+      'pushConfigured': _webPushConfigured,
+      'pushRecipients': _pushSubscriptions.length,
+    });
   }
   return shelf.Response.notFound('Not found');
 }
@@ -798,6 +1007,7 @@ Future<void> main() async {
   final port = int.tryParse(Platform.environment['PORT'] ?? '') ?? 8080;
   _loadAccountBlobs();
   _loadMailbox();
+  _loadPushSubscriptions();
   _loadChannelDirectory();
 
   // Cascade: try WebSocket first, then HTTP info

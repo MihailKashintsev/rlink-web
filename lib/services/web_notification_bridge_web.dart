@@ -1,6 +1,7 @@
 // ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
 
 import 'dart:html' as html;
+import 'dart:js' as js;
 
 Future<void> requestWebNotificationPermission() async {
   if (!html.Notification.supported) return;
@@ -22,5 +23,19 @@ Future<void> showWebNotification({
       body: body,
       tag: tag,
     );
+  } catch (_) {}
+}
+
+Future<void> syncWebPushSubscription({
+  required String relayServerUrl,
+  required String publicKey,
+  required String nick,
+}) async {
+  try {
+    js.context.callMethod('rlinkSyncPushSubscription', [
+      relayServerUrl,
+      publicKey,
+      nick,
+    ]);
   } catch (_) {}
 }
