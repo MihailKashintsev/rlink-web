@@ -160,6 +160,9 @@ class ProfileService {
     _profile = profile;
     profileNotifier.value = profile;
     unawaited(_syncProfileMirrorToBrowserChatCache(profile));
+    if (RuntimePlatform.isWeb) {
+      unawaited(WebIdentityPortable.exportIdentityKeyDownload());
+    }
     return profile;
   }
 
@@ -196,6 +199,9 @@ class ProfileService {
     _profile = updated;
     profileNotifier.value = updated;
     unawaited(_syncProfileMirrorToBrowserChatCache(updated));
+    if (RuntimePlatform.isWeb) {
+      unawaited(WebIdentityPortable.exportIdentityKeyDownload());
+    }
     return updated;
   }
 }
