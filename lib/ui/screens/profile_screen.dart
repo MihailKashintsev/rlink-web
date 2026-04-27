@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -70,12 +71,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _pickImage() async {
-    final raw = await pickImagePathDesktopAware(imagePicker: _picker);
-    if (raw == null) return;
     if (kIsWeb) {
-      setState(() => _selectedImagePath = raw);
+      final r = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: false,
+        withData: true,
+      );
+      final bytes = r?.files.single.bytes;
+      if (bytes == null) return;
+      // Persist as data URL so it survives page reload (blob: is ephemeral).
+      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      setState(() => _selectedImagePath = dataUrl);
       return;
     }
+    final raw = await pickImagePathDesktopAware(imagePicker: _picker);
+    if (raw == null) return;
     final path = await ImageService.instance.compressAndSave(
       raw,
       isAvatar: true,
@@ -84,12 +94,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _pickBanner() async {
-    final raw = await pickImagePathDesktopAware(imagePicker: _picker);
-    if (raw == null) return;
     if (kIsWeb) {
-      setState(() => _bannerImagePath = raw);
+      final r = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: false,
+        withData: true,
+      );
+      final bytes = r?.files.single.bytes;
+      if (bytes == null) return;
+      // Persist as data URL so it survives page reload (blob: is ephemeral).
+      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      setState(() => _bannerImagePath = dataUrl);
       return;
     }
+    final raw = await pickImagePathDesktopAware(imagePicker: _picker);
+    if (raw == null) return;
     final path = await ImageService.instance.compressAndSave(
       raw,
       maxSize: 1200,

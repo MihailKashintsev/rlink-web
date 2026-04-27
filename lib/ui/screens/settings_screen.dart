@@ -75,7 +75,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final cs = Theme.of(context).colorScheme;
 
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    if (settings.isLinkedChildDevice) {
+    if (settings.isLinkedChildDevice && !RuntimePlatform.isWeb) {
       return _buildChildLinkedSettings(context, settings, isDark);
     }
     return Scaffold(

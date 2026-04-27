@@ -48,6 +48,15 @@ class ImageService {
   /// Handles both old absolute paths and relative paths.
   String? resolveStoredPath(String? path) {
     if (path == null || path.isEmpty) return null;
+    // Web stores image refs as blob:/data:/http(s) URLs (or plain relative app
+    // paths). Never remap them through documents directory logic.
+    if (kIsWeb ||
+        path.startsWith('blob:') ||
+        path.startsWith('data:') ||
+        path.startsWith('http://') ||
+        path.startsWith('https://')) {
+      return path;
+    }
     final docsPath = _docsPath;
     if (docsPath == null) return path; // init not called yet — return as-is
 
