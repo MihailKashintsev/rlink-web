@@ -101,7 +101,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
     setState(() => _loading = true);
     try {
-      await _ensureCoreDatabasesInitialized();
+      if (!RuntimePlatform.isWeb) {
+        await _ensureCoreDatabasesInitialized();
+      }
       await ProfileService.instance.createProfile(
         publicKeyHex: CryptoService.instance.publicKeyHex,
         nickname: nick,
@@ -154,7 +156,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       }
       await CryptoService.instance.init();
       await ProfileService.instance.init();
-      await _ensureCoreDatabasesInitialized();
+      if (!RuntimePlatform.isWeb) {
+        await _ensureCoreDatabasesInitialized();
+      }
       final profile = ProfileService.instance.profile;
       if (profile == null) {
         _showSnack('Ключ импортирован, но профиль не восстановлен', isError: true);
@@ -165,6 +169,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (_) => const ChatListScreen()),
         );
+      }
+    } catch (e) {
+      if (mounted) {
+        _showSnack('Ошибка импорта: $e', isError: true);
       }
     } finally {
       if (mounted) setState(() => _importBusy = false);

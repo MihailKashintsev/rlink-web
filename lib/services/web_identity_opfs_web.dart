@@ -66,12 +66,23 @@ void triggerIdentityDownload(String json, String shortId) {
 Map<String, String>? parseIdentityExport(String raw) {
   try {
     final j = jsonDecode(raw) as Map<String, dynamic>;
-    if ((j['v'] as num?)?.toInt() != 1) return null;
-    final edPr = j['edPr'] as String?;
-    final edPu = j['edPu'] as String?;
-    final xPr = j['xPr'] as String?;
-    final xPu = j['xPu'] as String?;
-    final prof = j['prof'] as String?;
+    String? edPr = j['edPr'] as String?;
+    String? edPu = j['edPu'] as String?;
+    String? xPr = j['xPr'] as String?;
+    String? xPu = j['xPu'] as String?;
+    String? prof = j['prof'] as String?;
+
+    // Backward compatibility: accept older flat exports.
+    if ((edPr == null || edPr.isEmpty) &&
+        (edPu == null || edPu.isEmpty) &&
+        (xPr == null || xPr.isEmpty) &&
+        (xPu == null || xPu.isEmpty)) {
+      edPr = j['mesh_identity_private'] as String?;
+      edPu = j['mesh_identity_public'] as String?;
+      xPr = j['mesh_x25519_private'] as String?;
+      xPu = j['mesh_x25519_public'] as String?;
+      prof ??= j['rlink_user_profile'] as String?;
+    }
     if (edPr == null ||
         edPu == null ||
         xPr == null ||
