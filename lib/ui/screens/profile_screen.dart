@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -54,6 +55,32 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   final _picker = ImagePicker();
 
+  Future<String?> _webCompressedDataUrl(
+    Uint8List input, {
+    required bool isBanner,
+  }) async {
+    try {
+      final decoded = img.decodeImage(input);
+      if (decoded == null) return null;
+      final maxEdge = isBanner ? 1280 : 512;
+      final resized = (decoded.width > maxEdge || decoded.height > maxEdge)
+          ? img.copyResize(
+              decoded,
+              width: decoded.width >= decoded.height ? maxEdge : null,
+              height: decoded.height > decoded.width ? maxEdge : null,
+              interpolation: img.Interpolation.average,
+            )
+          : decoded;
+      final quality = isBanner ? 72 : 68;
+      final jpg = img.encodeJpg(resized, quality: quality);
+      // Guard against localStorage quota explosions on web.
+      if (jpg.length > 500 * 1024) return null;
+      return 'data:image/jpeg;base64,${base64Encode(jpg)}';
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -79,8 +106,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
       final bytes = r?.files.single.bytes;
       if (bytes == null) return;
-      // Persist as data URL so it survives page reload (blob: is ephemeral).
-      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      final dataUrl = await _webCompressedDataUrl(bytes, isBanner: false);
+      if (dataUrl == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Аватар слишком большой. Выберите изображение меньше.'),
+            ),
+          );
+        }
+        return;
+      }
       setState(() => _selectedImagePath = dataUrl);
       return;
     }
@@ -102,8 +138,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
       final bytes = r?.files.single.bytes;
       if (bytes == null) return;
-      // Persist as data URL so it survives page reload (blob: is ephemeral).
-      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      final dataUrl = await _webCompressedDataUrl(bytes, isBanner: true);
+      if (dataUrl == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Баннер слишком большой. Выберите изображение меньше.'),
+            ),
+          );
+        }
+        return;
+      }
       setState(() => _bannerImagePath = dataUrl);
       return;
     }
