@@ -381,6 +381,11 @@ class ChannelService {
     );
   }
 
+  Future<void> _ensureDbReady() async {
+    if (_db != null) return;
+    await init();
+  }
+
   static String compactChannelId(String channelId) =>
       channelId.replaceAll('-', '');
 
@@ -402,6 +407,7 @@ class ChannelService {
     String username = '',
     bool isPublic = true,
   }) async {
+    await _ensureDbReady();
     final channel = Channel(
       id: _uuid.v4(),
       name: name,

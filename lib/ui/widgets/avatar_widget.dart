@@ -38,6 +38,13 @@ class AvatarWidget extends StatelessWidget {
     final resolvedPath = ImageService.instance.resolveStoredPath(imagePath);
     final file = !kIsWeb && resolvedPath != null ? File(resolvedPath) : null;
     final hasImage = file != null && file.existsSync();
+    final webImagePath = kIsWeb ? (imagePath ?? '') : '';
+    final hasWebImage = kIsWeb &&
+        webImagePath.isNotEmpty &&
+        (webImagePath.startsWith('blob:') ||
+            webImagePath.startsWith('data:') ||
+            webImagePath.startsWith('http://') ||
+            webImagePath.startsWith('https://'));
 
     // If story ring is shown, shrink the avatar by 6px so the ring fits within size
     final ringWidth = hasStory ? 3.0 : 0.0;
@@ -73,6 +80,27 @@ class AvatarWidget extends StatelessWidget {
                         ),
                 ),
               )
+            : hasWebImage
+                ? Image.network(
+                    webImagePath,
+                    width: innerSize,
+                    height: innerSize,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Center(
+                      child: emoji.isNotEmpty
+                          ? Text(emoji,
+                              style: TextStyle(fontSize: innerSize * 0.46))
+                          : Text(
+                              initials.isNotEmpty ? initials : '?',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: innerSize * 0.38,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                    ),
+                  )
             : Center(
                 child: emoji.isNotEmpty
                     ? Text(emoji, style: TextStyle(fontSize: innerSize * 0.46))

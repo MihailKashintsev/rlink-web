@@ -166,6 +166,11 @@ class GroupService {
     );
   }
 
+  Future<void> _ensureDbReady() async {
+    if (_db != null) return;
+    await init();
+  }
+
   // ── Groups CRUD ────────────────────────────────────────────────
 
   Future<Group> createGroup({
@@ -175,6 +180,7 @@ class GroupService {
     int avatarColor = 0xFF5C6BC0,
     String avatarEmoji = '👥',
   }) async {
+    await _ensureDbReady();
     final group = Group(
       id: _uuid.v4(),
       name: name,

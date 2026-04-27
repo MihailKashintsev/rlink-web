@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../models/user_profile.dart';
@@ -71,6 +72,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _pickImage() async {
     final raw = await pickImagePathDesktopAware(imagePicker: _picker);
     if (raw == null) return;
+    if (kIsWeb) {
+      setState(() => _selectedImagePath = raw);
+      return;
+    }
     final path = await ImageService.instance.compressAndSave(
       raw,
       isAvatar: true,
@@ -81,6 +86,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _pickBanner() async {
     final raw = await pickImagePathDesktopAware(imagePicker: _picker);
     if (raw == null) return;
+    if (kIsWeb) {
+      setState(() => _bannerImagePath = raw);
+      return;
+    }
     final path = await ImageService.instance.compressAndSave(
       raw,
       maxSize: 1200,
@@ -99,7 +108,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final dir = await getApplicationDocumentsDirectory();
     final sub = Directory(p.join(dir.path, 'profile_audio'))..createSync(recursive: true);
     final ext = p.extension(src).isEmpty ? '.m4a' : p.extension(src);
-    final dest = p.join(sub.path, 'me_profile${ext}');
+    final dest = p.join(sub.path, 'me_profile$ext');
     await File(src).copy(dest);
     setState(() => _profileMusicPath = dest);
   }
@@ -165,11 +174,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
       // Если аватар/баннер реально изменились — перешлём изображения контактам,
       // чтобы у них обновилась картинка (а не только метаданные профиля).
-      if (updated.avatarImagePath != null &&
+      if (!kIsWeb &&
+          updated.avatarImagePath != null &&
           updated.avatarImagePath != prevAvatar) {
         unawaited(broadcastMyAvatar());
       }
-      if (updated.bannerImagePath != null &&
+      if (!kIsWeb &&
+          updated.bannerImagePath != null &&
           updated.bannerImagePath != prevBanner) {
         unawaited(broadcastMyBanner());
       }
@@ -218,14 +229,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(16),
                 color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                image: _bannerImagePath != null && File(_bannerImagePath!).existsSync()
+                image: _bannerImagePath != null &&
+                        (kIsWeb || File(_bannerImagePath!).existsSync())
                     ? DecorationImage(
-                        image: FileImage(File(_bannerImagePath!)),
+                        image: kIsWeb
+                            ? NetworkImage(_bannerImagePath!)
+                            : FileImage(File(_bannerImagePath!)) as ImageProvider,
                         fit: BoxFit.cover,
                       )
                     : null,
               ),
-              child: _bannerImagePath == null || !File(_bannerImagePath!).existsSync()
+              child: _bannerImagePath == null ||
+                      (!kIsWeb && !File(_bannerImagePath!).existsSync())
                   ? Center(
                       child: _editing
                           ? Column(
