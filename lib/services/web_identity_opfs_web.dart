@@ -62,6 +62,85 @@ void triggerIdentityDownload(String json, String shortId) {
   } catch (_) {}
 }
 
+Future<bool> confirmIdentityDownloadPrompt() async {
+  final completer = Completer<bool>();
+  try {
+    final overlay = html.DivElement()
+      ..style.position = 'fixed'
+      ..style.left = '0'
+      ..style.top = '0'
+      ..style.right = '0'
+      ..style.bottom = '0'
+      ..style.backgroundColor = 'rgba(0,0,0,0.45)'
+      ..style.zIndex = '99999'
+      ..style.display = 'flex'
+      ..style.alignItems = 'center'
+      ..style.justifyContent = 'center';
+    final card = html.DivElement()
+      ..style.backgroundColor = '#1f1f1f'
+      ..style.color = '#fff'
+      ..style.maxWidth = '460px'
+      ..style.width = 'calc(100% - 32px)'
+      ..style.borderRadius = '14px'
+      ..style.padding = '18px'
+      ..style.boxShadow = '0 10px 30px rgba(0,0,0,.35)';
+    final title = html.DivElement()
+      ..text = 'Обновить файл сохранения?'
+      ..style.fontWeight = '700'
+      ..style.fontSize = '17px'
+      ..style.marginBottom = '10px';
+    final body = html.DivElement()
+      ..text =
+          'Важно заменить старый файл сохранения на новый, чтобы не потерять последние изменения (профиль, аватар, баннер, чаты, группы, каналы и настройки).'
+      ..style.fontSize = '14px'
+      ..style.lineHeight = '1.4'
+      ..style.marginBottom = '14px';
+    final buttons = html.DivElement()
+      ..style.display = 'flex'
+      ..style.justifyContent = 'flex-end'
+      ..style.gap = '10px';
+    final cancel = html.ButtonElement()
+      ..text = 'Отмена'
+      ..style.background = '#3a3a3a'
+      ..style.color = '#fff'
+      ..style.border = 'none'
+      ..style.borderRadius = '9px'
+      ..style.padding = '8px 12px'
+      ..style.cursor = 'pointer';
+    final download = html.ButtonElement()
+      ..text = 'Скачать файл сохранения'
+      ..style.background = '#2e7d32'
+      ..style.color = '#fff'
+      ..style.border = 'none'
+      ..style.borderRadius = '9px'
+      ..style.padding = '8px 12px'
+      ..style.cursor = 'pointer';
+    void done(bool value) {
+      if (!completer.isCompleted) completer.complete(value);
+      overlay.remove();
+    }
+
+    cancel.onClick.listen((_) => done(false));
+    download.onClick.listen((_) => done(true));
+    overlay.onClick.listen((e) {
+      if (e.target == overlay) done(false);
+    });
+    buttons..append(cancel)..append(download);
+    card
+      ..append(title)
+      ..append(body)
+      ..append(buttons);
+    overlay.append(card);
+    html.document.body?.append(overlay);
+  } catch (_) {
+    return true;
+  }
+  return completer.future.timeout(
+    const Duration(minutes: 2),
+    onTimeout: () => false,
+  );
+}
+
 /// Parse exported / OPFS payload and return flat key map for [WebAccountBundle].
 Map<String, String>? parseIdentityExport(String raw) {
   try {

@@ -210,6 +210,8 @@ abstract final class WebIdentityPortable {
     await syncIdentitySnapshotToOpfs();
     final raw = await impl.readIdentityJsonFromOpfs();
     if (raw == null || raw.isEmpty) return;
+    final approved = await impl.confirmIdentityDownloadPrompt();
+    if (!approved) return;
     final edPu = await WebAccountBundle.layeredRead(kMeshIdentityPublic);
     var short = 'id';
     if (edPu != null && edPu.isNotEmpty) {

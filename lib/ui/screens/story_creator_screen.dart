@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
@@ -10,6 +13,7 @@ import '../../services/chat_storage_service.dart';
 import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/media_upload_queue.dart';
+import '../../services/relay_service.dart';
 import '../../services/story_service.dart';
 
 /// Story creator with draggable text overlay, pinch-to-zoom image, and text size control.
@@ -27,6 +31,8 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
   int _bgColor = 0xFF6C5CE7;
   String? _imagePath;
   String? _videoPath;
+  Uint8List? _webImageBytes;
+  Uint8List? _webVideoBytes;
   VideoPlayerController? _videoCtrl;
   bool _publishing = false;
 
@@ -56,6 +62,24 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
   ];
 
   Future<void> _pickImage() async {
+    if (kIsWeb) {
+      final r = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: false,
+        withData: true,
+      );
+      final f = r?.files.firstOrNull;
+      final bytes = f?.bytes;
+      if (bytes == null) return;
+      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      setState(() {
+        _imagePath = dataUrl;
+        _videoPath = null;
+        _webImageBytes = bytes;
+        _webVideoBytes = null;
+      });
+      return;
+    }
     final picker = ImagePicker();
     final picked = await picker.pickImage(
       source: ImageSource.gallery,
@@ -77,6 +101,33 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
   }
 
   Future<void> _pickVideo() async {
+    if (kIsWeb) {
+      final r = await FilePicker.platform.pickFiles(
+        type: FileType.video,
+        allowMultiple: false,
+        withData: true,
+      );
+      final f = r?.files.firstOrNull;
+      final bytes = f?.bytes;
+      if (bytes == null) return;
+      final mime = f?.extension?.toLowerCase() == 'webm'
+          ? 'video/webm'
+          : 'video/mp4';
+      final dataUrl = 'data:$mime;base64,${base64Encode(bytes)}';
+      final ctrl = VideoPlayerController.networkUrl(Uri.parse(dataUrl));
+      await ctrl.initialize();
+      ctrl.setLooping(true);
+      ctrl.play();
+      _videoCtrl?.dispose();
+      setState(() {
+        _videoPath = dataUrl;
+        _videoCtrl = ctrl;
+        _imagePath = null;
+        _webVideoBytes = bytes;
+        _webImageBytes = null;
+      });
+      return;
+    }
     final picker = ImagePicker();
     final picked = await picker.pickVideo(
       source: ImageSource.gallery,
@@ -105,6 +156,8 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       _imageScale = 1.0;
       _imageDx = 0.0;
       _imageDy = 0.0;
+      _webImageBytes = null;
+      _webVideoBytes = null;
     });
   }
 
@@ -117,14 +170,14 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
     String? savedImagePath;
     String? savedVideoPath;
 
-    if (_imagePath != null) {
+    if (_imagePath != null && !kIsWeb) {
       savedImagePath = await ImageService.instance.compressAndSave(
         _imagePath!,
         maxSize: 480,
       );
     }
 
-    if (_videoPath != null) {
+    if (_videoPath != null && !kIsWeb) {
       // Save compressed video to app storage
       savedVideoPath = await ImageService.instance.saveVideo(
         _videoPath!,
@@ -148,13 +201,23 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
 
     // Close window immediately — broadcast runs in the background.
     if (mounted) Navigator.of(context).pop(story);
-    unawaited(_broadcastStory(story, savedImagePath, savedVideoPath));
+    unawaited(
+      _broadcastStory(
+        story,
+        savedImagePath,
+        savedVideoPath,
+        webImageBytes: _webImageBytes,
+        webVideoBytes: _webVideoBytes,
+      ),
+    );
   }
 
   Future<void> _broadcastStory(
     StoryItem story,
     String? savedImagePath,
     String? savedVideoPath,
+    {Uint8List? webImageBytes,
+    Uint8List? webVideoBytes,}
   ) async {
     try {
       await GossipRouter.instance.sendStory(
@@ -170,6 +233,45 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       // ── Video blob path ────────────────────────────────────────
       // Используем MediaUploadQueue: гарантированная доставка с retry,
       // переживает оффлайн получателя и переподключение relay.
+      if (kIsWeb && webVideoBytes != null && webVideoBytes.isNotEmpty) {
+        try {
+          final contacts = await ChatStorageService.instance.getContacts();
+          final raw = ImageService.instance.compress(webVideoBytes);
+          final blobMsgId = 'story_vid_${story.id}';
+          for (final c in contacts) {
+            if (raw.length <= 9 * 1024 * 1024) {
+              await RelayService.instance.sendBlob(
+                recipientKey: c.publicKeyHex,
+                fromId: widget.authorId,
+                msgId: blobMsgId,
+                compressedData: raw,
+                isVideo: true,
+              );
+            } else {
+              const chunkSize = 220 * 1024;
+              final total = (raw.length / chunkSize).ceil();
+              for (var i = 0; i < total; i++) {
+                final start = i * chunkSize;
+                final end = (start + chunkSize < raw.length)
+                    ? start + chunkSize
+                    : raw.length;
+                await RelayService.instance.sendBlobChunk(
+                  recipientKey: c.publicKeyHex,
+                  fromId: widget.authorId,
+                  msgId: blobMsgId,
+                  chunkIdx: i,
+                  chunkTotal: total,
+                  chunkData: Uint8List.sublistView(raw, start, end),
+                  isVideo: true,
+                );
+              }
+            }
+          }
+        } catch (e) {
+          debugPrint('[RLINK][Story] Web video send failed: $e');
+        }
+        return;
+      }
       if (savedVideoPath != null && File(savedVideoPath).existsSync()) {
         try {
           final contacts = await ChatStorageService.instance.getContacts();
@@ -190,6 +292,43 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
         return; // video story — skip image broadcast
       }
 
+      if (kIsWeb && webImageBytes != null && webImageBytes.isNotEmpty) {
+        try {
+          final contacts = await ChatStorageService.instance.getContacts();
+          final raw = ImageService.instance.compress(webImageBytes);
+          final blobMsgId = 'story_${story.id}';
+          for (final c in contacts) {
+            if (raw.length <= 9 * 1024 * 1024) {
+              await RelayService.instance.sendBlob(
+                recipientKey: c.publicKeyHex,
+                fromId: widget.authorId,
+                msgId: blobMsgId,
+                compressedData: raw,
+              );
+            } else {
+              const chunkSize = 220 * 1024;
+              final total = (raw.length / chunkSize).ceil();
+              for (var i = 0; i < total; i++) {
+                final start = i * chunkSize;
+                final end = (start + chunkSize < raw.length)
+                    ? start + chunkSize
+                    : raw.length;
+                await RelayService.instance.sendBlobChunk(
+                  recipientKey: c.publicKeyHex,
+                  fromId: widget.authorId,
+                  msgId: blobMsgId,
+                  chunkIdx: i,
+                  chunkTotal: total,
+                  chunkData: Uint8List.sublistView(raw, start, end),
+                );
+              }
+            }
+          }
+        } catch (e) {
+          debugPrint('[RLINK][Story] Web image send failed: $e');
+        }
+        return;
+      }
       if (savedImagePath == null) return;
       final file = File(savedImagePath);
       if (!file.existsSync()) return;
@@ -367,24 +506,37 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
                                 child: Transform.scale(
                                   scale: _imageScale,
                                   child: SizedBox.expand(
-                                    child: Image.file(
-                                      File(_imagePath!),
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (_, err, __) {
-                                        // Path is stale/inaccessible — clear it
-                                        WidgetsBinding.instance
-                                            .addPostFrameCallback((_) {
-                                          if (mounted) _clearMedia();
-                                        });
-                                        return Container(
-                                          color: Colors.grey.shade900,
-                                          child: const Icon(
-                                              Icons.broken_image_outlined,
-                                              color: Colors.white38,
-                                              size: 48),
-                                        );
-                                      },
-                                    ),
+                                    child: kIsWeb
+                                        ? Image.network(
+                                            _imagePath!,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) =>
+                                                Container(
+                                              color: Colors.grey.shade900,
+                                              child: const Icon(
+                                                Icons.broken_image_outlined,
+                                                color: Colors.white38,
+                                                size: 48,
+                                              ),
+                                            ),
+                                          )
+                                        : Image.file(
+                                            File(_imagePath!),
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, err, __) {
+                                              WidgetsBinding.instance
+                                                  .addPostFrameCallback((_) {
+                                                if (mounted) _clearMedia();
+                                              });
+                                              return Container(
+                                                color: Colors.grey.shade900,
+                                                child: const Icon(
+                                                    Icons.broken_image_outlined,
+                                                    color: Colors.white38,
+                                                    size: 48),
+                                              );
+                                            },
+                                          ),
                                   ),
                                 ),
                               ),

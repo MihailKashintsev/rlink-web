@@ -5,6 +5,8 @@ Future<void> writeIdentityJsonToOpfs(String json) async {}
 
 void triggerIdentityDownload(String json, String shortId) {}
 
+Future<bool> confirmIdentityDownloadPrompt() async => true;
+
 Map<String, String>? parseIdentityExport(String raw) => null;
 
 String buildIdentityExportJson({
