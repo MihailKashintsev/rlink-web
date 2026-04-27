@@ -1544,6 +1544,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<Database> _getDb() async {
+    if (RuntimePlatform.isWeb) {
+      return openDatabase('rlink.db');
+    }
     final dir = await getApplicationDocumentsDirectory();
     return openDatabase(p.join(dir.path, 'rlink.db'));
   }
@@ -1803,7 +1806,13 @@ class _ChatBgTile extends StatelessWidget {
 
   Future<void> _pickBg(BuildContext context) async {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
-    if (picked == null) return;
+    if (picked == null || !context.mounted) return;
+    if (RuntimePlatform.isWeb) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Фон чата на web пока не поддерживается')),
+      );
+      return;
+    }
     final appDir = await getApplicationDocumentsDirectory();
     final dest = File(p.join(
         appDir.path, 'chat_bg_${DateTime.now().millisecondsSinceEpoch}.jpg'));
@@ -1815,11 +1824,14 @@ class _ChatBgTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final bgPath = settings.chatBgForPeer('__global__');
+    final hasBg = !RuntimePlatform.isWeb &&
+        bgPath != null &&
+        File(bgPath).existsSync();
 
     return ListTile(
       leading: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: bgPath != null && File(bgPath).existsSync()
+        child: hasBg
             ? Image.file(File(bgPath), width: 44, height: 44, fit: BoxFit.cover)
             : Container(
                 width: 44,
@@ -1831,7 +1843,9 @@ class _ChatBgTile extends StatelessWidget {
       ),
       title: Text(AppL10n.t('settings_chat_bg')),
       subtitle: Text(
-        bgPath != null
+        RuntimePlatform.isWeb
+            ? 'Недоступно в web-версии'
+            : bgPath != null
             ? AppL10n.t('settings_chat_bg_custom')
             : AppL10n.t('settings_chat_bg_none'),
         style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
