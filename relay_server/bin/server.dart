@@ -81,6 +81,13 @@ const _rateMax = 300; // max 300 messages per 10 seconds (media chunks need ~250
 /// аккаунта — клиент шифрует, relay не читает содержимое).
 final Map<String, String> _accountBlobs = {};
 
+/// Offline mailbox: recipientPublicKey -> relayMsgId -> envelope
+/// Envelope is the exact JSON map we would send to recipient.
+final Map<String, Map<String, Map<String, dynamic>>> _mailbox = {};
+
+const _mailboxFile = 'relay_mailbox.json';
+const _mailboxMaxPerRecipient = 5000;
+
 // ── Публичный каталог каналов (подпись админа, персистентность) ──
 
 final Map<String, Map<String, dynamic>> _channelDirectory = {};
@@ -342,6 +349,80 @@ void _loadAccountBlobs() {
   }
 }
 
+void _loadMailbox() {
+  try {
+    final f = File(_mailboxFile);
+    if (!f.existsSync()) return;
+    final decoded = jsonDecode(f.readAsStringSync());
+    if (decoded is! Map) return;
+    decoded.forEach((recipient, value) {
+      if (recipient is! String || value is! Map) return;
+      final byId = <String, Map<String, dynamic>>{};
+      value.forEach((msgId, envelope) {
+        if (msgId is String && envelope is Map) {
+          byId[msgId] = Map<String, dynamic>.from(envelope);
+        }
+      });
+      if (byId.isNotEmpty) {
+        _mailbox[recipient] = byId;
+      }
+    });
+    stdout.writeln('[RLINK][Relay] Loaded mailbox for ${_mailbox.length} recipients');
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] mailbox load: $e');
+  }
+}
+
+void _persistMailbox() {
+  try {
+    File(_mailboxFile).writeAsStringSync(jsonEncode(_mailbox));
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] mailbox save: $e');
+  }
+}
+
+void _queueForRecipient(
+  String recipientKey,
+  String relayMsgId,
+  Map<String, dynamic> envelope,
+) {
+  final bucket = _mailbox.putIfAbsent(
+    recipientKey,
+    () => <String, Map<String, dynamic>>{},
+  );
+  bucket[relayMsgId] = envelope;
+  // Keep bounded size: drop oldest inserted entries.
+  while (bucket.length > _mailboxMaxPerRecipient) {
+    final firstKey = bucket.keys.first;
+    bucket.remove(firstKey);
+  }
+  _persistMailbox();
+}
+
+void _ackRecipientMessage(String recipientKey, String relayMsgId) {
+  final bucket = _mailbox[recipientKey];
+  if (bucket == null) return;
+  bucket.remove(relayMsgId);
+  if (bucket.isEmpty) {
+    _mailbox.remove(recipientKey);
+  }
+  _persistMailbox();
+}
+
+void _sendMailboxSnapshot(_User user) {
+  final bucket = _mailbox[user.publicKey];
+  if (bucket == null || bucket.isEmpty) return;
+  var sent = 0;
+  for (final env in bucket.values) {
+    try {
+      user.ws.sink.add(jsonEncode(env));
+      sent++;
+    } catch (_) {}
+  }
+  stdout.writeln(
+      '[RLINK][Relay] mailbox replay → ${user.shortId}: $sent queued packets');
+}
+
 void _persistAccountBlobs() {
   try {
     File('account_blobs.json').writeAsStringSync(jsonEncode(_accountBlobs));
@@ -409,7 +490,16 @@ void _handleMessage(_User user, dynamic raw) {
     case 'channel_dir_put':
       _handleChannelDirPut(user, msg);
       break;
+    case 'relay_ack':
+      _handleRelayAck(user, msg);
+      break;
   }
+}
+
+void _handleRelayAck(_User user, Map<String, dynamic> msg) {
+  final relayMsgId = msg['msgId'] as String?;
+  if (relayMsgId == null || relayMsgId.isEmpty) return;
+  _ackRecipientMessage(user.publicKey, relayMsgId);
 }
 
 /// Клиент кладёт зашифрованный JSON (n/ct/m от ChaCha20), тот же формат что admin_cfg2.
@@ -430,25 +520,28 @@ void _handlePacket(_User sender, Map<String, dynamic> msg) {
   if (toRaw == null || data == null) return;
   if (data.length > 262144) return; // 256 KB max (blob chunks double-base64 ~90 KB each)
   final to = toRaw.toLowerCase();
+  final relayMsgId =
+      (msg['msgId'] as String?) ?? 'pkt_${DateTime.now().microsecondsSinceEpoch}';
+
+  final envelope = <String, dynamic>{
+    'type': 'packet',
+    'from': sender.publicKey,
+    'data': data,
+    'relayMsgId': relayMsgId,
+  };
+  _queueForRecipient(to, relayMsgId, envelope);
 
   final recipient = _users[to];
   if (recipient == null) {
-    // Recipient offline — notify sender
     sender.ws.sink.add(jsonEncode({
       'type': 'delivery_status',
       'to': to,
-      'status': 'offline',
+      'status': 'queued_offline',
     }));
     return;
   }
-
-  // Forward opaque blob — server NEVER decrypts
   try {
-    recipient.ws.sink.add(jsonEncode({
-      'type': 'packet',
-      'from': sender.publicKey,
-      'data': data,
-    }));
+    recipient.ws.sink.add(jsonEncode(envelope));
     print('[RLINK][Relay] Packet: ${sender.shortId} → ${recipient.shortId} (${data.length} chars)');
   } catch (e) {
     print('[RLINK][Relay] Packet forward failed: $e');
@@ -486,22 +579,26 @@ void _handleBlob(_User sender, Map<String, dynamic> msg) {
   final toRaw = msg['to'] as String?;
   if (toRaw == null) return;
   final to = toRaw.toLowerCase();
-
-  final recipient = _users[to];
-  if (recipient == null) {
-    sender.ws.sink.add(jsonEncode({
-      'type': 'delivery_status',
-      'to': to,
-      'status': 'offline',
-    }));
-    return;
-  }
+  final relayMsgId = msg['msgId'] as String?;
+  if (relayMsgId == null || relayMsgId.isEmpty) return;
 
   // Forward the entire blob as-is, replacing 'to' with 'from'
   final forwarded = Map<String, dynamic>.from(msg);
   forwarded.remove('to');
   forwarded['from'] = sender.publicKey;
   forwarded['type'] = 'blob';
+  forwarded['relayMsgId'] = relayMsgId;
+  _queueForRecipient(to, relayMsgId, forwarded);
+
+  final recipient = _users[to];
+  if (recipient == null) {
+    sender.ws.sink.add(jsonEncode({
+      'type': 'delivery_status',
+      'to': to,
+      'status': 'queued_offline',
+    }));
+    return;
+  }
 
   try {
     recipient.ws.sink.add(jsonEncode(forwarded));
@@ -604,6 +701,7 @@ shelf.Handler _wsHandler() {
             }
 
             _sendChannelDirSnapshot(ws);
+            _sendMailboxSnapshot(user!);
 
             // Send currently online peers to the new user
             for (final other in _users.values) {
@@ -699,6 +797,7 @@ shelf.Response _infoHandler(shelf.Request request) {
 Future<void> main() async {
   final port = int.tryParse(Platform.environment['PORT'] ?? '') ?? 8080;
   _loadAccountBlobs();
+  _loadMailbox();
   _loadChannelDirectory();
 
   // Cascade: try WebSocket first, then HTTP info

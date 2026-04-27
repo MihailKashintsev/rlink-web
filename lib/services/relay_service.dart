@@ -459,7 +459,12 @@ class RelayService with WidgetsBindingObserver {
 
     final Map<String, dynamic> envelope;
     if (recipientKey != null && recipientKey.isNotEmpty) {
-      envelope = {'type': 'packet', 'to': recipientKey, 'data': b64};
+      envelope = {
+        'type': 'packet',
+        'to': recipientKey,
+        'msgId': packet.id,
+        'data': b64,
+      };
     } else {
       envelope = {'type': 'broadcast', 'data': b64};
     }
@@ -862,6 +867,7 @@ class RelayService with WidgetsBindingObserver {
     final from = msg['from'] as String?;
     final data = msg['data'] as String?;
     if (from == null || data == null) return;
+    final relayMsgId = msg['relayMsgId'] as String?;
 
     try {
       // Decode base64 → check if this is a blob wrapped in a packet envelope
@@ -898,6 +904,12 @@ class RelayService with WidgetsBindingObserver {
           Uint8List.fromList(bytes),
           sourceId: 'relay:$from',
         );
+      }
+      if (relayMsgId != null && relayMsgId.isNotEmpty) {
+        unawaited(_safeSend({
+          'type': 'relay_ack',
+          'msgId': relayMsgId,
+        }, context: 'relay_ack_packet'));
       }
     } catch (e) {
       debugPrint('[RLINK][Relay] Failed to decode incoming packet: $e');
@@ -1000,6 +1012,7 @@ class RelayService with WidgetsBindingObserver {
     final msgId = msg['msgId'] as String?;
     final data = msg['data'] as String?;
     if (from == null || msgId == null || data == null) return;
+    final relayMsgId = msg['relayMsgId'] as String?;
 
     try {
       final bytes = base64Decode(data);
@@ -1018,6 +1031,12 @@ class RelayService with WidgetsBindingObserver {
         debugPrint('[RLINK][Relay] Received blob ${bytes.length} bytes for $msgId');
         onBlobReceived?.call(from, msgId, Uint8List.fromList(bytes),
             isVoice, isVideo, isSquare, isFile, isSticker, fileName, viewOnce);
+        if (relayMsgId != null && relayMsgId.isNotEmpty) {
+          unawaited(_safeSend({
+            'type': 'relay_ack',
+            'msgId': relayMsgId,
+          }, context: 'relay_ack_blob_single'));
+        }
         return;
       }
 
@@ -1060,6 +1079,12 @@ class RelayService with WidgetsBindingObserver {
             assembly.isVoice, assembly.isVideo, assembly.isSquare,
             assembly.isFile, assembly.isSticker, assembly.fileName,
             assembly.viewOnce);
+        if (relayMsgId != null && relayMsgId.isNotEmpty) {
+          unawaited(_safeSend({
+            'type': 'relay_ack',
+            'msgId': relayMsgId,
+          }, context: 'relay_ack_blob_chunked'));
+        }
       }
     } catch (e) {
       debugPrint('[RLINK][Relay] Failed to decode blob: $e');
