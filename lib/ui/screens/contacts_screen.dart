@@ -109,7 +109,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 
   void _openChat(BuildContext context, String publicKey, String nick,
-      int color, String emoji, String? avatarPath) {
+      int color, String emoji, String? avatarPath,
+      [String? bannerPath]) {
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -119,6 +120,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           peerAvatarColor: color,
           peerAvatarEmoji: emoji,
           peerAvatarImagePath: avatarPath,
+          peerBannerImagePath: bannerPath,
         ),
       ),
     );
@@ -127,7 +129,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
   void _onTapRelayPeer(RelayPeer peer) {
     final nick = peer.nick.isNotEmpty ? peer.nick : peer.shortId;
     // Open chat only. Pair request must be explicit via "Add" action.
-    _openChat(context, peer.publicKey, nick, 0xFF607D8B, '', null);
+    _openChat(context, peer.publicKey, nick, 0xFF607D8B, '',
+        peer.avatarUrl, peer.bannerUrl);
   }
 
   void _openDirectByKey(BuildContext context) {

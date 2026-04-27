@@ -10,6 +10,8 @@ import '../../services/app_settings.dart';
 import '../../services/image_service.dart';
 import '../../services/runtime_platform.dart';
 
+enum AvatarPresenceTransport { bluetooth, internet, wifiDirect }
+
 class AvatarWidget extends StatelessWidget {
   final String initials;
   final int color;
@@ -17,6 +19,7 @@ class AvatarWidget extends StatelessWidget {
   final String? imagePath; // если задан — показываем фото поверх всего
   final double size;
   final bool isOnline;
+  final List<AvatarPresenceTransport> onlineTransports;
   final bool hasStory; // показывать ли кольцо сторис
   final bool hasUnviewedStory; // непросмотренная сторис — яркий градиент
 
@@ -28,6 +31,7 @@ class AvatarWidget extends StatelessWidget {
     this.imagePath,
     this.size = 48,
     this.isOnline = false,
+    this.onlineTransports = const [],
     this.hasStory = false,
     this.hasUnviewedStory = false,
   });
@@ -35,16 +39,29 @@ class AvatarWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Resolve potentially stale iOS sandbox path
-    final resolvedPath = ImageService.instance.resolveStoredPath(imagePath);
-    final file = !kIsWeb && resolvedPath != null ? File(resolvedPath) : null;
+    final raw = imagePath;
+    final resolvedPath = ImageService.instance.resolveStoredPath(raw);
+    final String networkPath = resolvedPath != null &&
+            (resolvedPath.startsWith('http://') ||
+                resolvedPath.startsWith('https://') ||
+                resolvedPath.startsWith('blob:') ||
+                resolvedPath.startsWith('data:'))
+        ? resolvedPath
+        : (raw != null &&
+                (raw.startsWith('http://') ||
+                    raw.startsWith('https://') ||
+                    raw.startsWith('blob:') ||
+                    raw.startsWith('data:'))
+            ? raw
+            : '');
+    final file = !kIsWeb &&
+            resolvedPath != null &&
+            !resolvedPath.startsWith('http://') &&
+            !resolvedPath.startsWith('https://')
+        ? File(resolvedPath)
+        : null;
     final hasImage = file != null && file.existsSync();
-    final webImagePath = kIsWeb ? (imagePath ?? '') : '';
-    final hasWebImage = kIsWeb &&
-        webImagePath.isNotEmpty &&
-        (webImagePath.startsWith('blob:') ||
-            webImagePath.startsWith('data:') ||
-            webImagePath.startsWith('http://') ||
-            webImagePath.startsWith('https://'));
+    final hasNetworkImage = networkPath.isNotEmpty;
 
     // If story ring is shown, shrink the avatar by 6px so the ring fits within size
     final ringWidth = hasStory ? 3.0 : 0.0;
@@ -80,9 +97,9 @@ class AvatarWidget extends StatelessWidget {
                         ),
                 ),
               )
-            : hasWebImage
+            : hasNetworkImage
                 ? Image.network(
-                    webImagePath,
+                    networkPath,
                     width: innerSize,
                     height: innerSize,
                     fit: BoxFit.cover,
@@ -159,21 +176,56 @@ class AvatarWidget extends StatelessWidget {
               right: 0,
               bottom: 0,
               child: Container(
-                width: size * 0.28,
+                width: size * 0.46,
                 height: size * 0.28,
+                padding: EdgeInsets.symmetric(horizontal: size * 0.03),
                 decoration: BoxDecoration(
                   color: AppSettings.instance.onlineStatusColor,
-                  shape: BoxShape.circle,
+                  borderRadius: BorderRadius.circular(size * 0.2),
                   border: Border.all(
                     color: Theme.of(context).scaffoldBackgroundColor,
                     width: 2,
                   ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: _statusIcons(size),
                 ),
               ),
             ),
         ],
       ),
     );
+  }
+
+  List<Widget> _statusIcons(double avatarSize) {
+    final iconSize = avatarSize * 0.12;
+    final icons = <IconData>[];
+    for (final t in onlineTransports) {
+      switch (t) {
+        case AvatarPresenceTransport.bluetooth:
+          icons.add(Icons.bluetooth);
+          break;
+        case AvatarPresenceTransport.internet:
+          icons.add(Icons.public);
+          break;
+        case AvatarPresenceTransport.wifiDirect:
+          icons.add(Icons.wifi);
+          break;
+      }
+    }
+    final selected = icons.take(2).toList();
+    if (selected.isEmpty) {
+      selected.add(Icons.circle);
+    }
+    final out = <Widget>[];
+    for (var i = 0; i < selected.length; i++) {
+      out.add(Icon(selected[i], size: iconSize, color: Colors.white));
+      if (i != selected.length - 1) {
+        out.add(SizedBox(width: avatarSize * 0.012));
+      }
+    }
+    return out;
   }
 }
 

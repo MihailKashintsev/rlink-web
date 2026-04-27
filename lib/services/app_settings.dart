@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'ai_bot_constants.dart';
 import 'runtime_platform.dart';
 import 'web_account_bundle.dart';
 import 'web_identity_portable.dart';
@@ -44,6 +45,7 @@ class AppSettings extends ChangeNotifier {
   static const _keyNotifyPersonal = 'notify_personal';
   static const _keyNotifyGroups = 'notify_groups';
   static const _keyNotifyChannels = 'notify_channels';
+  static const _keyCallRingtone = 'call_ringtone'; // 0=classic,1=digital,2=soft
   static const _keyAppIconVariant = 'app_icon_variant'; // 0=classic,1=mono,2=ai
   static const _keyUseIosStyleEmoji =
       'use_ios_style_emoji'; // Android: Noto Color Emoji fallback
@@ -52,6 +54,7 @@ class AppSettings extends ChangeNotifier {
   static const _keyLinkedDevicePublicKey = 'linked_device_public_key';
   static const _keyLinkedDeviceNickname = 'linked_device_nickname';
   static const _keyPreLinkConnectionMode = 'pre_link_connection_mode';
+  static const _keyEnabledBotIds = 'enabled_bot_ids';
 
   late SharedPreferences _prefs;
   bool _prefsReady = false;
@@ -106,12 +109,14 @@ class AppSettings extends ChangeNotifier {
       'notifyPersonal': _notifyPersonal,
       'notifyGroups': _notifyGroups,
       'notifyChannels': _notifyChannels,
+      'callRingtone': _callRingtone,
       'appIconVariant': _appIconVariant,
       'useIosStyleEmoji': _useIosStyleEmoji,
       'deviceLinkRole': _deviceLinkRole,
       'linkedDevicePublicKey': _linkedDevicePublicKey,
       'linkedDeviceNickname': _linkedDeviceNickname,
       'preLinkConnectionMode': _preLinkConnectionMode,
+      'enabledBotIds': _enabledBotIds,
     };
     await WebAccountBundle.layeredWrite(kAppSettingsBackup, jsonEncode(json));
   }
@@ -143,12 +148,14 @@ class AppSettings extends ChangeNotifier {
   bool _notifyPersonal = true;
   bool _notifyGroups = true;
   bool _notifyChannels = true;
+  int _callRingtone = 0;
   int _appIconVariant = 0;
   bool _useIosStyleEmoji = false;
   int _deviceLinkRole = 0;
   String _linkedDevicePublicKey = '';
   String _linkedDeviceNickname = '';
   int? _preLinkConnectionMode;
+  List<String> _enabledBotIds = const [];
 
   ThemeMode get themeMode => _themeMode;
   int get accentColorIndex => _accentColorIndex;
@@ -179,6 +186,7 @@ class AppSettings extends ChangeNotifier {
   bool get notifyPersonal => _notifyPersonal;
   bool get notifyGroups => _notifyGroups;
   bool get notifyChannels => _notifyChannels;
+  int get callRingtone => _callRingtone.clamp(0, 2);
   int get appIconVariant => _appIconVariant;
   int get deviceLinkRole => _deviceLinkRole.clamp(0, 2);
   bool get isPrimaryDevice => deviceLinkRole == 1;
@@ -187,6 +195,8 @@ class AppSettings extends ChangeNotifier {
       deviceLinkRole != 0 && _linkedDevicePublicKey.isNotEmpty;
   String get linkedDevicePublicKey => _linkedDevicePublicKey;
   String get linkedDeviceNickname => _linkedDeviceNickname;
+  List<String> get enabledBotIds => List.unmodifiable(_enabledBotIds);
+  bool isBotEnabled(String botId) => _enabledBotIds.contains(botId);
   bool get canEditOwnProfileAndSettings => !isLinkedChildDevice;
   bool get channelsEnabled => connectionMode != 0;
 
@@ -323,6 +333,17 @@ class AppSettings extends ChangeNotifier {
         (_prefs.getString(_keyLinkedDeviceNickname) ?? '').trim();
     final pre = _prefs.getInt(_keyPreLinkConnectionMode);
     _preLinkConnectionMode = pre?.clamp(0, 2).toInt();
+    final hasBotPrefs = _prefs.containsKey(_keyEnabledBotIds);
+    final rawBotIds = _prefs.getStringList(_keyEnabledBotIds) ?? const <String>[];
+    _enabledBotIds = _sanitizeBotIds(rawBotIds);
+    if (!hasBotPrefs) {
+      final defaults = kBuiltinAiBots
+          .where((b) => b.enabledByDefault)
+          .map((b) => b.id)
+          .toList();
+      _enabledBotIds = _sanitizeBotIds(defaults);
+      await _prefs.setStringList(_keyEnabledBotIds, _enabledBotIds);
+    }
     if (_deviceLinkRole != 0 && _linkedDevicePublicKey.isEmpty) {
       _deviceLinkRole = 0;
       _linkedDeviceNickname = '';
@@ -343,6 +364,7 @@ class AppSettings extends ChangeNotifier {
     _notifyPersonal = _prefs.getBool(_keyNotifyPersonal) ?? true;
     _notifyGroups = _prefs.getBool(_keyNotifyGroups) ?? true;
     _notifyChannels = _prefs.getBool(_keyNotifyChannels) ?? true;
+    _callRingtone = (_prefs.getInt(_keyCallRingtone) ?? 0).clamp(0, 2);
     var iconV = (_prefs.getInt(_keyAppIconVariant) ?? 0).clamp(0, 3);
     // Раньше: 2=mirror (теперь совпадает с классикой), 3=ai → 2.
     if (iconV == 2) iconV = 0;
@@ -360,6 +382,25 @@ class AppSettings extends ChangeNotifier {
     if (RuntimePlatform.isWeb) {
       unawaited(_persistWebBackupSnapshot());
     }
+  }
+
+  List<String> _sanitizeBotIds(List<String> ids) {
+    final known = kBuiltinAiBots.map((b) => b.id).toSet();
+    final out = <String>[];
+    for (final id in ids) {
+      if (known.contains(id) && !out.contains(id)) {
+        out.add(id);
+      }
+    }
+    return out;
+  }
+
+  Future<void> setEnabledBotIds(List<String> botIds) async {
+    _enabledBotIds = _sanitizeBotIds(botIds);
+    await _runPrefsWrite(
+      (p) => p.setStringList(_keyEnabledBotIds, _enabledBotIds),
+    );
+    _notifySettingsChanged();
   }
 
   Future<void> _applyWebSettingsBackupIfPresent() async {
@@ -409,6 +450,8 @@ class AppSettings extends ChangeNotifier {
       _notifyPersonal = m['notifyPersonal'] as bool? ?? _notifyPersonal;
       _notifyGroups = m['notifyGroups'] as bool? ?? _notifyGroups;
       _notifyChannels = m['notifyChannels'] as bool? ?? _notifyChannels;
+      _callRingtone =
+          ((m['callRingtone'] as num?)?.toInt() ?? _callRingtone).clamp(0, 2);
       _appIconVariant =
           ((m['appIconVariant'] as num?)?.toInt() ?? _appIconVariant)
               .clamp(0, 2);
@@ -422,6 +465,10 @@ class AppSettings extends ChangeNotifier {
           (m['linkedDeviceNickname'] as String?) ?? _linkedDeviceNickname;
       final pre = (m['preLinkConnectionMode'] as num?)?.toInt();
       _preLinkConnectionMode = pre?.clamp(0, 2);
+      final bots = (m['enabledBotIds'] as List?)?.cast<String>();
+      if (bots != null) {
+        _enabledBotIds = _sanitizeBotIds(bots);
+      }
       final bg = m['chatBgMap'];
       if (bg is Map) {
         for (final e in bg.entries) {
@@ -448,6 +495,12 @@ class AppSettings extends ChangeNotifier {
   Future<void> setNotifyChannels(bool v) async {
     _notifyChannels = v;
     await _runPrefsWrite((p) => p.setBool(_keyNotifyChannels, v));
+    _notifySettingsChanged();
+  }
+
+  Future<void> setCallRingtone(int v) async {
+    _callRingtone = v.clamp(0, 2);
+    await _runPrefsWrite((p) => p.setInt(_keyCallRingtone, _callRingtone));
     _notifySettingsChanged();
   }
 
@@ -695,9 +748,9 @@ class AppSettings extends ChangeNotifier {
   }
 
   // ── Admin password (SHA-256 hash) ─────────────────────────────
-  // Default password: "1234"
+  // Default password: "Misha0000ff2010"
   static const _defaultAdminHash =
-      '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4';
+      '8676c71fc75fa72489c87aa387b752ad816a4ea4476995da848c76fa06dae4fd';
   static const _keyAdminCfgRev = 'admin_cfg_rev';
   static const _keyAdminCfgSealed = 'admin_cfg_sealed_box';
 

@@ -167,6 +167,26 @@ String? _highlightLanguageForCode(String? fenceLanguage, String code) {
   return _normalizeHighlightLanguage(guessProgrammingLanguage(code));
 }
 
+/// Команды вида `/start`, `/newbot` — только если не пересекаются с email/телефоном/картой
+/// и не сразу после `://` (часть URL).
+List<_Hit> _collectSlashCommandHits(String s, List<_Hit> blocked) {
+  final out = <_Hit>[];
+  for (final m in RegExp(r'(^|\s)(/[a-zA-Z][a-zA-Z0-9_]*)').allMatches(s)) {
+    final g1 = m.group(1)!;
+    final cmd = m.group(2)!;
+    final st = m.start + g1.length;
+    final en = m.end;
+    if (st >= 2 && s[st - 1] == '/' && s[st - 2] == ':') {
+      continue;
+    }
+    if (blocked.any((h) => !(en <= h.start || st >= h.end))) {
+      continue;
+    }
+    out.add(_Hit(st, en, 'slash', cmd));
+  }
+  return out;
+}
+
 List<_Hit> _collectInteractiveHits(String s) {
   final cands = <_Hit>[];
   for (final m in RegExp(
@@ -202,10 +222,17 @@ List<InlineSpan> _spansForPlain(
   TextStyle baseStyle,
   ColorScheme cs,
   bool isOut,
-  BuildContext context,
-) {
+  BuildContext context, {
+  void Function(String command)? onSlashCommandTap,
+}) {
   if (s.isEmpty) return [];
   final hits = _collectInteractiveHits(s);
+  if (onSlashCommandTap != null) {
+    for (final sh in _collectSlashCommandHits(s, hits)) {
+      hits.add(sh);
+    }
+    hits.sort((a, b) => a.start.compareTo(b.start));
+  }
   if (hits.isEmpty) {
     return [TextSpan(text: s, style: baseStyle)];
   }
@@ -260,6 +287,22 @@ List<InlineSpan> _spansForPlain(
                   isOut ? Colors.white.withValues(alpha: 0.95) : cs.secondary,
               decoration: TextDecoration.underline,
               fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ));
+    } else if (h.kind == 'slash' && onSlashCommandTap != null) {
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.baseline,
+        baseline: TextBaseline.alphabetic,
+        child: GestureDetector(
+          onTap: () => onSlashCommandTap(h.raw),
+          child: Text(
+            h.raw,
+            style: baseStyle.copyWith(
+              color: isOut ? Colors.white.withValues(alpha: 0.95) : cs.primary,
+              decoration: TextDecoration.underline,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ),
@@ -435,6 +478,9 @@ class RichMessageText extends StatelessWidget {
   /// Тап по @упоминанию (например переход в личный чат).
   final void Function(String publicKeyHex)? onMentionTap;
 
+  /// Тап по `/команде` в чате с ботом — отправить команду в поле ввода (обработчик снаружи).
+  final void Function(String command)? onSlashCommandTap;
+
   const RichMessageText({
     super.key,
     required this.text,
@@ -442,6 +488,7 @@ class RichMessageText extends StatelessWidget {
     required this.isOut,
     this.mentionLabelFor,
     this.onMentionTap,
+    this.onSlashCommandTap,
   });
 
   static final _urlRegex = RegExp(r'https?://\S+');
@@ -536,7 +583,14 @@ class RichMessageText extends StatelessWidget {
 
     void addPlain(List<InlineSpan> spans, String s) {
       if (s.isEmpty) return;
-      spans.addAll(_spansForPlain(s, baseStyle, cs, isOut, context));
+      spans.addAll(_spansForPlain(
+        s,
+        baseStyle,
+        cs,
+        isOut,
+        context,
+        onSlashCommandTap: onSlashCommandTap,
+      ));
     }
 
     void addPlainWithMentions(List<InlineSpan> spans, String s) {
@@ -550,7 +604,13 @@ class RichMessageText extends StatelessWidget {
       for (final m in kChannelMentionToken.allMatches(s)) {
         if (m.start > pos) {
           spans.addAll(_spansForPlain(
-              s.substring(pos, m.start), baseStyle, cs, isOut, context));
+            s.substring(pos, m.start),
+            baseStyle,
+            cs,
+            isOut,
+            context,
+            onSlashCommandTap: onSlashCommandTap,
+          ));
         }
         final hex = m.group(1)!;
         final label = resolver(hex);
@@ -574,8 +634,14 @@ class RichMessageText extends StatelessWidget {
         pos = m.end;
       }
       if (pos < s.length) {
-        spans.addAll(
-            _spansForPlain(s.substring(pos), baseStyle, cs, isOut, context));
+        spans.addAll(_spansForPlain(
+          s.substring(pos),
+          baseStyle,
+          cs,
+          isOut,
+          context,
+          onSlashCommandTap: onSlashCommandTap,
+        ));
       }
     }
 

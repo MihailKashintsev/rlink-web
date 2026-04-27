@@ -1,0 +1,7 @@
+rlink_help_bot_keys.json
+rlink_help_bot_config.json
+*.pyc
+__pycache__/
+.venv/
+dist/
+*.egg-info/

@@ -4,15 +4,19 @@ import 'dart:io';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
-/// Windows: крестик окна не завершает процесс — окно в трей, relay и уведомления живы.
+/// Desktop (Windows/Linux/macOS): крестик окна не завершает процесс —
+/// окно уходит в трей, relay и уведомления продолжают работать.
 class DesktopTrayService with WindowListener, TrayListener {
   DesktopTrayService._();
   static final DesktopTrayService instance = DesktopTrayService._();
 
   bool _ready = false;
+  bool _isDesktopPlatform = false;
 
   Future<void> init() async {
-    if (!Platform.isWindows || _ready) return;
+    _isDesktopPlatform =
+        Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+    if (!_isDesktopPlatform || _ready) return;
     _ready = true;
     await windowManager.setPreventClose(true);
     windowManager.addListener(this);
@@ -38,12 +42,14 @@ class DesktopTrayService with WindowListener, TrayListener {
   }
 
   Future<void> showWindow() async {
+    if (!_isDesktopPlatform) return;
     await windowManager.show();
     await windowManager.setSkipTaskbar(false);
     await windowManager.focus();
   }
 
   Future<void> quitCompletely() async {
+    if (!_isDesktopPlatform) return;
     try {
       await trayManager.destroy();
     } catch (_) {}
@@ -54,11 +60,13 @@ class DesktopTrayService with WindowListener, TrayListener {
 
   @override
   void onWindowClose() {
+    if (!_isDesktopPlatform) return;
     unawaited(windowManager.hide());
   }
 
   @override
   void onTrayIconMouseDown() {
+    if (!_isDesktopPlatform) return;
     unawaited(showWindow());
   }
 

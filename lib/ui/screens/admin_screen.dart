@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../../models/channel.dart';
+import '../../services/ai_bot_constants.dart';
 import '../../services/app_settings.dart';
 import '../../services/channel_service.dart';
 import '../../services/crypto_service.dart';
@@ -87,7 +88,7 @@ class _AdminScreenState extends State<AdminScreen>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 2, vsync: this);
+    _tabs = TabController(length: 3, vsync: this);
     ChannelService.instance.loadVerificationRequests();
     _searchCtrl.addListener(() {
       setState(() => _query = _searchCtrl.text.trim().toLowerCase());
@@ -118,6 +119,7 @@ class _AdminScreenState extends State<AdminScreen>
           tabs: const [
             Tab(icon: Icon(Icons.verified_outlined), text: 'Заявки'),
             Tab(icon: Icon(Icons.tv_outlined), text: 'Каналы'),
+            Tab(icon: Icon(Icons.smart_toy_outlined), text: 'Боты'),
           ],
         ),
       ),
@@ -151,6 +153,7 @@ class _AdminScreenState extends State<AdminScreen>
               children: [
                 _buildRequestsTab(),
                 _buildChannelsTab(),
+                _buildBotsTab(),
               ],
             ),
           ),
@@ -249,6 +252,49 @@ class _AdminScreenState extends State<AdminScreen>
               ),
             );
           },
+        );
+      },
+    );
+  }
+
+  Widget _buildBotsTab() {
+    final cs = Theme.of(context).colorScheme;
+    final enabled = AppSettings.instance.enabledBotIds.toSet();
+    final filtered = _query.isEmpty
+        ? kBuiltinAiBots
+        : kBuiltinAiBots
+            .where((b) =>
+                b.name.toLowerCase().contains(_query) ||
+                b.description.toLowerCase().contains(_query))
+            .toList();
+    if (filtered.isEmpty) {
+      return Center(
+        child: Text(
+          'Ничего не найдено',
+          style: TextStyle(color: cs.onSurfaceVariant),
+        ),
+      );
+    }
+    return ListView.builder(
+      itemCount: filtered.length,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemBuilder: (ctx, i) {
+        final bot = filtered[i];
+        final isEnabled = enabled.contains(bot.id);
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: SwitchListTile(
+            value: isEnabled,
+            secondary: CircleAvatar(
+              backgroundColor: Color(bot.avatarColor),
+              child: Text(bot.avatarEmoji, style: const TextStyle(fontSize: 18)),
+            ),
+            title: Text(bot.name,
+                style:
+                    const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+            subtitle: Text(bot.description),
+            onChanged: (_) => _toggleBot(bot.id),
+          ),
         );
       },
     );
@@ -353,6 +399,44 @@ class _AdminScreenState extends State<AdminScreen>
     }
   }
 
+  Future<void> _toggleBot(String botId) async {
+    final current = AppSettings.instance.enabledBotIds.toSet();
+    if (current.contains(botId)) {
+      current.remove(botId);
+    } else {
+      current.add(botId);
+    }
+    await AppSettings.instance.setEnabledBotIds(current.toList());
+    await _publishAdminSync();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _publishAdminSync() async {
+    final hash = AppSettings.instance.adminPasswordHash;
+    final curRev = AppSettings.instance.adminPasswordSyncRev;
+    final rev = curRev + 1;
+    final myId = CryptoService.instance.publicKeyHex;
+    final chans = myId.isEmpty
+        ? <String>[]
+        : await ChannelService.instance.subscribedChannelIdsForAccountSync(myId);
+    final bots = AppSettings.instance.enabledBotIds;
+    final inner = jsonEncode({
+      'hash': hash,
+      'rev': rev,
+      'chans': chans,
+      'bots': bots,
+    });
+    final sealed = await CryptoService.instance.sealAdminPanelSync(inner);
+    await AppSettings.instance.bumpAccountSyncRevisionOnly(rev, sealed);
+    await GossipRouter.instance.sendAdminConfigSecure(
+      adminPasswordHash: hash,
+      revision: rev,
+      channelIds: chans,
+      botIds: bots,
+    );
+    await RelayService.instance.putAccountSyncBlob(sealed);
+  }
+
   void _changePassword() {
     final oldCtrl = TextEditingController();
     final newCtrl = TextEditingController();
@@ -428,8 +512,13 @@ class _AdminScreenState extends State<AdminScreen>
                   ? <String>[]
                   : await ChannelService.instance
                       .subscribedChannelIdsForAccountSync(myId);
-              final inner =
-                  jsonEncode({'hash': newHash, 'rev': rev, 'chans': chans});
+              final bots = AppSettings.instance.enabledBotIds;
+              final inner = jsonEncode({
+                'hash': newHash,
+                'rev': rev,
+                'chans': chans,
+                'bots': bots,
+              });
               final sealed =
                   await CryptoService.instance.sealAdminPanelSync(inner);
               await AppSettings.instance
@@ -438,6 +527,7 @@ class _AdminScreenState extends State<AdminScreen>
                 adminPasswordHash: newHash,
                 revision: rev,
                 channelIds: chans,
+                botIds: bots,
               );
               await RelayService.instance.putAccountSyncBlob(sealed);
               if (ctx.mounted) Navigator.pop(ctx);

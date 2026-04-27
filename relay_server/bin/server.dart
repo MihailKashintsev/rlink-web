@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 import 'package:shelf/shelf.dart' as shelf;
@@ -53,6 +55,14 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 ///     макс. длина подписываемого JSON (`_channelDirMaxPayloadChars`), отдельный rate limit put по adminId.
 ///   • `tombstones` в JSON растут при снятии канала с публикации — при необходимости можно
 ///     чистить старые ключи офлайн-скриптом (клиентам нужны только rev для антистейла).
+///
+/// Публичный каталог ботов (метаданные + ключи для E2E, как у presence):
+///   • `bot_register_start` — JSON-подпись владельца (Ed25519), в payload указан будущий
+///     `botPublicKey`; relay выдаёт `claimId`.
+///   • `bot_claim` — после `register` **от ключа бота** с `claimId` (32 hex) или тем же
+///     значением в поле `claimId`: короткий код `AAAA-BBBB-CCCC` (см. `claimCode` в ack);
+///     relay создаёт запись, возвращает `apiToken` один раз (хеш хранится на диске).
+///   • `bot_dir_snapshot` после register; поиск дополняется зарегистрированными ботами.
 /// ═══════════════════════════════════════════════════════════════════
 
 // ── Connected user ──────────────────────────────────────────────
@@ -192,6 +202,493 @@ void _persistChannelDirectory() {
   } catch (e) {
     stdout.writeln('[RLINK][Relay] channel_directory save: $e');
   }
+}
+
+// ── Публичный каталог ботов ─────────────────────────────────────
+
+const _botDirFile = 'bot_directory.json';
+const _botClaimTtl = Duration(minutes: 15);
+const _botHandleMax = 32;
+const _botHandleMin = 2;
+const _botRegisterStartWindow = Duration(minutes: 10);
+const _botRegisterStartMax = 60;
+
+final Map<String, Map<String, dynamic>> _botDirectory = {};
+final Map<String, Map<String, dynamic>> _botClaims = {};
+/// Канонический короткий код `AAAA-BBBB-CCCC` (верхний регистр) → 32 hex claimId.
+final Map<String, String> _botClaimCodeToClaimId = {};
+final Map<String, List<DateTime>> _botRegisterStartLimits = {};
+
+final Set<String> _reservedBotHandles = {
+  'lib',
+  'gigachat',
+  'admin',
+  'support',
+  'rlink',
+  'system',
+  'botfather',
+  'rendergames',
+};
+
+String _sha256HexUtf8(String s) {
+  final d = sha256.convert(utf8.encode(s));
+  return d.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+String _randomUrlToken() {
+  final rnd = Random.secure();
+  final bytes = List<int>.generate(32, (_) => rnd.nextInt(256));
+  return base64Url.encode(bytes).replaceAll('=', '');
+}
+
+String _randomClaimId() {
+  final rnd = Random.secure();
+  final bytes = List<int>.generate(16, (_) => rnd.nextInt(256));
+  return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// Без 0/O/1/I/L/U — удобно диктовать и вводить; 12 символов ≈ 60 бит энтропии.
+const _botClaimCodeAlphabet = '23456789ABCDEFGHJKMNPRSTWXYZ';
+
+String _formatBotClaimCode12(String flat12Upper) {
+  final s = flat12Upper.toUpperCase();
+  return '${s.substring(0, 4)}-${s.substring(4, 8)}-${s.substring(8, 12)}';
+}
+
+/// Возвращает канонический `AAAA-BBBB-CCCC` или пустую строку.
+String _normalizeBotClaimCodeInput(String raw) {
+  var t = raw.trim().toUpperCase().replaceAll(RegExp(r'[\s_-]'), '');
+  if (t.length != 12) return '';
+  for (var i = 0; i < t.length; i++) {
+    if (!_botClaimCodeAlphabet.contains(t[i])) return '';
+  }
+  return _formatBotClaimCode12(t);
+}
+
+String? _allocateUniqueBotClaimCode() {
+  final rnd = Random.secure();
+  for (var attempt = 0; attempt < 96; attempt++) {
+    final buf = StringBuffer();
+    for (var j = 0; j < 12; j++) {
+      buf.write(_botClaimCodeAlphabet[rnd.nextInt(_botClaimCodeAlphabet.length)]);
+    }
+    final canonical = _formatBotClaimCode12(buf.toString());
+    if (_botClaimCodeToClaimId.containsKey(canonical)) continue;
+    var clash = false;
+    for (final c in _botClaims.values) {
+      if ((c['claimCode'] as String?)?.toUpperCase() == canonical) {
+        clash = true;
+        break;
+      }
+    }
+    if (!clash) return canonical;
+  }
+  return null;
+}
+
+void _unlinkBotClaimCode(String? canonicalUpper) {
+  if (canonicalUpper == null || canonicalUpper.isEmpty) return;
+  _botClaimCodeToClaimId.remove(canonicalUpper.toUpperCase());
+}
+
+/// Удаляет заявку по claimId и снимает индекс короткого кода.
+void _removeBotClaim(String claimIdLower) {
+  final c = _botClaims.remove(claimIdLower);
+  if (c == null) return;
+  _unlinkBotClaimCode(c['claimCode'] as String?);
+}
+
+String? _normalizeBotHandle(String? raw) {
+  if (raw == null) return null;
+  var h = raw.trim().toLowerCase();
+  if (h.startsWith('@')) h = h.substring(1);
+  if (h.length < _botHandleMin || h.length > _botHandleMax) return null;
+  if (!RegExp(r'^[a-z0-9_]+$').hasMatch(h)) return null;
+  if (_reservedBotHandles.contains(h)) return null;
+  return h;
+}
+
+bool _checkBotRegisterStartRate(String ownerPub) {
+  final now = DateTime.now();
+  final times = _botRegisterStartLimits.putIfAbsent(ownerPub, () => []);
+  times.removeWhere((t) => now.difference(t) > _botRegisterStartWindow);
+  if (times.length >= _botRegisterStartMax) return false;
+  times.add(now);
+  return true;
+}
+
+void _pruneExpiredBotClaims() {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final toRemove = <String>[];
+  for (final e in _botClaims.entries) {
+    final ts = (e.value['createdAt'] as num?)?.toInt() ?? 0;
+    if (now - ts > _botClaimTtl.inMilliseconds) {
+      toRemove.add(e.key);
+    }
+  }
+  for (final id in toRemove) {
+    _removeBotClaim(id);
+  }
+}
+
+Future<bool> _verifyEd25519SignatureOnUtf8(
+  String payloadUtf8,
+  String signatureHex,
+  String signerPubHex64,
+) async {
+  if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(signerPubHex64)) return false;
+  if (signatureHex.length != 128) return false;
+  try {
+    final pubBytes = Uint8List(32);
+    for (var i = 0; i < 32; i++) {
+      pubBytes[i] = int.parse(signerPubHex64.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    final sigBytes = Uint8List(64);
+    for (var i = 0; i < 64; i++) {
+      sigBytes[i] = int.parse(signatureHex.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    final pubKey = SimplePublicKey(pubBytes, type: KeyPairType.ed25519);
+    return await _ed25519.verify(
+      utf8.encode(payloadUtf8),
+      signature: Signature(sigBytes, publicKey: pubKey),
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+void _loadBotDirectory() {
+  try {
+    final f = File(_botDirFile);
+    if (!f.existsSync()) return;
+    final decoded = jsonDecode(f.readAsStringSync());
+    if (decoded is! Map) return;
+    final bots = decoded['bots'];
+    if (bots is! List) return;
+    for (final item in bots) {
+      if (item is! Map) continue;
+      final m = Map<String, dynamic>.from(item);
+      final id = (m['botId'] as String?)?.toLowerCase();
+      if (id == null || !RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) continue;
+      _botDirectory[id] = m;
+    }
+    stdout.writeln(
+      '[RLINK][Relay] Loaded ${_botDirectory.length} bot directory entries',
+    );
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] bot_directory load: $e');
+  }
+}
+
+void _persistBotDirectory() {
+  try {
+    final list = _botDirectory.values.toList();
+    File(_botDirFile).writeAsStringSync(jsonEncode({'bots': list}));
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] bot_directory save: $e');
+  }
+}
+
+void _sendBotDirSnapshot(WebSocketChannel ws) {
+  if (_botDirectory.isEmpty) return;
+  final out = <Map<String, dynamic>>[];
+  for (final m in _botDirectory.values) {
+    if (m['revoked'] == true) continue;
+    final id = m['botId'] as String? ?? '';
+    final handle = m['handle'] as String? ?? '';
+    if (id.isEmpty || handle.isEmpty) continue;
+    out.add({
+      'botId': id,
+      'handle': handle,
+      'x25519Pub': m['x25519Pub'] ?? '',
+      'displayName': m['displayName'] ?? handle,
+      'description': m['description'] ?? '',
+      'createdAt': m['createdAt'] ?? 0,
+      'avatarUrl': m['avatarUrl'] ?? '',
+      'bannerUrl': m['bannerUrl'] ?? '',
+    });
+  }
+  if (out.isEmpty) return;
+  try {
+    ws.sink.add(jsonEncode({
+      'type': 'bot_dir_snapshot',
+      'bots': out,
+    }));
+    stdout.writeln('[RLINK][Relay] bot_dir_snapshot → ${out.length} bots');
+  } catch (e) {
+    stdout.writeln('[RLINK][Relay] bot_dir_snapshot send: $e');
+  }
+}
+
+void _broadcastBotDirSnapshotToAll() {
+  for (final u in _users.values) {
+    _sendBotDirSnapshot(u.ws);
+  }
+}
+
+/// Публичные URL аватара/баннера бота (https или http, длина ≤ 2048).
+bool _isAllowedBotMediaUrl(String url) {
+  if (url.isEmpty) return true;
+  if (url.length > 2048) return false;
+  final u = Uri.tryParse(url);
+  if (u == null || !u.hasScheme) return false;
+  return u.scheme == 'https' || u.scheme == 'http';
+}
+
+bool _handleTakenByActiveBot(String handleLower) {
+  for (final m in _botDirectory.values) {
+    if (m['revoked'] == true) continue;
+    if ((m['handle'] as String?)?.toLowerCase() == handleLower) return true;
+  }
+  return false;
+}
+
+void _handleBotRegisterStart(_User user, Map<String, dynamic> msg) {
+  unawaited(_handleBotRegisterStartAsync(user, msg));
+}
+
+Future<void> _handleBotRegisterStartAsync(
+  _User user,
+  Map<String, dynamic> msg,
+) async {
+  void ackOk(Map<String, dynamic> extra) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_register_ack',
+        'ok': true,
+        ...extra,
+      }));
+    } catch (_) {}
+  }
+
+  void ackFail(String err) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_register_ack',
+        'ok': false,
+        'error': err,
+      }));
+    } catch (_) {}
+  }
+
+  final payloadJson = msg['payload'] as String?;
+  final signatureHex = msg['signature'] as String?;
+  if (payloadJson == null ||
+      payloadJson.isEmpty ||
+      payloadJson.length > 8192 ||
+      signatureHex == null ||
+      signatureHex.length != 128) {
+    ackFail('bad_request');
+    return;
+  }
+
+  Map<String, dynamic> obj;
+  try {
+    obj = jsonDecode(payloadJson) as Map<String, dynamic>;
+  } catch (_) {
+    ackFail('bad_json');
+    return;
+  }
+
+  final v = obj['v'];
+  if (v != 1) {
+    ackFail('bad_version');
+    return;
+  }
+  final owner = (obj['owner'] as String?)?.toLowerCase().trim() ?? '';
+  final botPk = (obj['botPublicKey'] as String?)?.toLowerCase().trim() ?? '';
+  final displayName = (obj['displayName'] as String?)?.trim() ?? '';
+  final handleNorm = _normalizeBotHandle(obj['handle'] as String?);
+  final ts = (obj['ts'] as num?)?.toInt() ?? 0;
+
+  if (owner != user.publicKey) {
+    ackFail('owner_mismatch');
+    return;
+  }
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(botPk) || botPk == owner) {
+    ackFail('bad_bot_key');
+    return;
+  }
+  if (handleNorm == null) {
+    ackFail('bad_handle');
+    return;
+  }
+  if (displayName.isEmpty || displayName.length > 64) {
+    ackFail('bad_display_name');
+    return;
+  }
+  final now = DateTime.now().millisecondsSinceEpoch;
+  if ((now - ts).abs() > const Duration(minutes: 10).inMilliseconds) {
+    ackFail('stale_ts');
+    return;
+  }
+
+  if (!_checkBotRegisterStartRate(owner)) {
+    ackFail('rate_limited');
+    return;
+  }
+
+  final sigOk = await _verifyEd25519SignatureOnUtf8(
+    payloadJson,
+    signatureHex,
+    owner,
+  );
+  if (!sigOk) {
+    ackFail('bad_signature');
+    return;
+  }
+
+  if (_handleTakenByActiveBot(handleNorm)) {
+    ackFail('handle_taken');
+    return;
+  }
+  if (_botDirectory.containsKey(botPk) && _botDirectory[botPk]!['revoked'] != true) {
+    ackFail('bot_key_registered');
+    return;
+  }
+
+  _pruneExpiredBotClaims();
+  for (final c in _botClaims.values) {
+    if ((c['handle'] as String?)?.toLowerCase() == handleNorm) {
+      ackFail('handle_pending');
+      return;
+    }
+    if ((c['botPublicKey'] as String?)?.toLowerCase() == botPk) {
+      ackFail('bot_key_pending');
+      return;
+    }
+  }
+
+  final claimId = _randomClaimId();
+  final claimCode = _allocateUniqueBotClaimCode();
+  if (claimCode == null) {
+    ackFail('claim_code_alloc');
+    return;
+  }
+  _botClaims[claimId] = {
+    'owner': owner,
+    'handle': handleNorm,
+    'displayName': displayName,
+    'description': (obj['description'] as String?)?.trim() ?? '',
+    'botPublicKey': botPk,
+    'createdAt': now,
+    'claimCode': claimCode,
+  };
+  _botClaimCodeToClaimId[claimCode.toUpperCase()] = claimId;
+
+  stdout.writeln(
+    '[RLINK][Relay] bot_register_start handle=@$handleNorm claim=$claimId code=$claimCode',
+  );
+  ackOk({
+    'claimId': claimId,
+    'claimCode': claimCode,
+    'expiresInSec': _botClaimTtl.inSeconds,
+    'handle': handleNorm,
+    'botPublicKey': botPk,
+  });
+}
+
+void _handleBotClaim(_User user, Map<String, dynamic> msg) {
+  void ackOk(Map<String, dynamic> extra) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_claim_ack',
+        'ok': true,
+        ...extra,
+      }));
+    } catch (_) {}
+  }
+
+  void ackFail(String err) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_claim_ack',
+        'ok': false,
+        'error': err,
+      }));
+    } catch (_) {}
+  }
+
+  final rawClaim = (msg['claimId'] as String?)?.trim() ?? '';
+  if (rawClaim.isEmpty) {
+    ackFail('bad_claim');
+    return;
+  }
+
+  _pruneExpiredBotClaims();
+
+  late final String claimId;
+  if (RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(rawClaim)) {
+    claimId = rawClaim.toLowerCase();
+  } else {
+    final canon = _normalizeBotClaimCodeInput(rawClaim);
+    if (canon.isEmpty) {
+      ackFail('bad_claim');
+      return;
+    }
+    final id = _botClaimCodeToClaimId[canon];
+    if (id == null || id.isEmpty) {
+      ackFail('claim_not_found');
+      return;
+    }
+    claimId = id;
+  }
+
+  final claim = _botClaims[claimId];
+  if (claim == null) {
+    ackFail('claim_not_found');
+    return;
+  }
+
+  final botPk = (claim['botPublicKey'] as String?)?.toLowerCase() ?? '';
+  if (botPk != user.publicKey) {
+    ackFail('wrong_bot_connection');
+    return;
+  }
+  if (user.x25519Key.isEmpty) {
+    ackFail('missing_x25519');
+    return;
+  }
+
+  final handleNorm = (claim['handle'] as String?)?.toLowerCase() ?? '';
+  if (handleNorm.isEmpty) {
+    ackFail('bad_claim_data');
+    return;
+  }
+
+  if (_handleTakenByActiveBot(handleNorm)) {
+    _removeBotClaim(claimId);
+    ackFail('handle_taken');
+    return;
+  }
+
+  final apiToken = _randomUrlToken();
+  final tokenHash = _sha256HexUtf8(apiToken);
+
+  _removeBotClaim(claimId);
+  _botDirectory[botPk] = {
+    'botId': botPk,
+    'x25519Pub': user.x25519Key,
+    'handle': handleNorm,
+    'ownerEd25519Pub': claim['owner'],
+    'displayName': claim['displayName'] ?? handleNorm,
+    'description': claim['description'] ?? '',
+    'createdAt': DateTime.now().millisecondsSinceEpoch,
+    'revoked': false,
+    'apiTokenHash': tokenHash,
+    'webhookUrl': '',
+    'avatarUrl': '',
+    'bannerUrl': '',
+  };
+  _persistBotDirectory();
+
+  stdout.writeln('[RLINK][Relay] bot_claim ok @$handleNorm bot=${user.shortId}');
+  ackOk({
+    'apiToken': apiToken,
+    'handle': handleNorm,
+    'botId': botPk,
+    'displayName': claim['displayName'],
+  });
 }
 
 int _dirUpdatedAt(Map<String, dynamic> m) =>
@@ -515,6 +1012,7 @@ String _vapidAuthHeader(String endpoint) {
 Future<void> _notifyRecipientQueued({
   required String recipientKey,
   required String senderKey,
+  String kind = 'message',
 }) async {
   if (!_webPushConfigured) return;
   final now = DateTime.now();
@@ -528,9 +1026,11 @@ Future<void> _notifyRecipientQueued({
 
   final payload = utf8.encode(jsonEncode({
     'title': 'Rlink',
-    'body': 'Новое сообщение в очереди доставки',
+    'body': kind == 'call'
+        ? 'Входящий звонок'
+        : 'Новое сообщение в очереди доставки',
     'tag': 'rlink-${senderKey.substring(0, senderKey.length.clamp(0, 8))}',
-    'data': {'recipient': recipientKey},
+    'data': {'recipient': recipientKey, 'kind': kind},
   }));
   final toRemoveEndpoints = <String>{};
   final client = HttpClient();
@@ -562,6 +1062,21 @@ Future<void> _notifyRecipientQueued({
     _persistPushSubscriptions();
   }
   _lastPushForRecipient[recipientKey] = now;
+}
+
+String _queuedKindFromPacketData(String dataB64) {
+  try {
+    final decoded = utf8.decode(base64Decode(dataB64));
+    final obj = jsonDecode(decoded);
+    if (obj is! Map) return 'message';
+    final t = obj['t'];
+    if (t != 'call_sig') return 'message';
+    final p = obj['p'];
+    if (p is! Map) return 'message';
+    final st = p['st'];
+    if (st == 'invite') return 'call';
+  } catch (_) {}
+  return 'message';
 }
 
 void _persistAccountBlobs() {
@@ -601,8 +1116,10 @@ void _handleMessage(_User user, dynamic raw) {
   final type = msg['type'] as String?;
   if (type == null) return;
 
-  // Blobs и каталог каналов не считаем в общий flood лимит (отдельный лимит у put).
-  if (type != 'blob' && type != 'channel_dir_put') {
+  // Blobs и каталог каналов / боты не считаем в общий flood лимит.
+  if (type != 'blob' &&
+      type != 'channel_dir_put' &&
+      type != 'bot_register_start') {
     if (!_checkRate(user.publicKey)) {
       user.ws.sink.add(jsonEncode({'type': 'error', 'msg': 'rate_limited'}));
       return;
@@ -630,6 +1147,12 @@ void _handleMessage(_User user, dynamic raw) {
       break;
     case 'channel_dir_put':
       _handleChannelDirPut(user, msg);
+      break;
+    case 'bot_register_start':
+      _handleBotRegisterStart(user, msg);
+      break;
+    case 'bot_claim':
+      _handleBotClaim(user, msg);
       break;
     case 'relay_ack':
       _handleRelayAck(user, msg);
@@ -674,7 +1197,12 @@ void _handlePacket(_User sender, Map<String, dynamic> msg) {
 
   final recipient = _users[to];
   if (recipient == null) {
-    unawaited(_notifyRecipientQueued(recipientKey: to, senderKey: sender.publicKey));
+    final kind = _queuedKindFromPacketData(data);
+    unawaited(_notifyRecipientQueued(
+      recipientKey: to,
+      senderKey: sender.publicKey,
+      kind: kind,
+    ));
     sender.ws.sink.add(jsonEncode({
       'type': 'delivery_status',
       'to': to,
@@ -762,8 +1290,45 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
   if (query == null || query.isEmpty) return;
 
   final results = <Map<String, dynamic>>[];
+  final seenKeys = <String>{};
+
+  final qBare = query.startsWith('@') ? query.substring(1) : query;
+
+  for (final m in _botDirectory.values) {
+    if (m['revoked'] == true) continue;
+    final botId = (m['botId'] as String?) ?? '';
+    final handle = (m['handle'] as String?)?.toLowerCase() ?? '';
+    if (botId.isEmpty || handle.isEmpty) continue;
+    final nickAt = '@$handle';
+    final match = handle.contains(qBare) ||
+        nickAt.contains(query) ||
+        botId.toLowerCase().startsWith(query);
+    if (!match) continue;
+    final online = _users.containsKey(botId);
+    final u = _users[botId];
+    final x25519 = (u?.x25519Key.isNotEmpty ?? false)
+        ? u!.x25519Key
+        : (m['x25519Pub'] as String? ?? '');
+    final av = (m['avatarUrl'] as String?)?.trim() ?? '';
+    final bn = (m['bannerUrl'] as String?)?.trim() ?? '';
+    results.add({
+      'publicKey': botId,
+      'nick': nickAt,
+      'shortId': botId.substring(0, 8),
+      'online': online,
+      if (x25519.isNotEmpty) 'x25519': x25519,
+      'isBot': true,
+      if (av.isNotEmpty) 'avatarUrl': av,
+      if (bn.isNotEmpty) 'bannerUrl': bn,
+    });
+    seenKeys.add(botId);
+    if (results.length >= 20) break;
+  }
+
   for (final user in _users.values) {
+    if (results.length >= 20) break;
     if (user.publicKey == requester.publicKey) continue;
+    if (seenKeys.contains(user.publicKey)) continue;
     final nickLower = user.nick.toLowerCase();
     final shortLower = user.shortId.toLowerCase();
     if (nickLower.contains(query) ||
@@ -776,7 +1341,7 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
         'online': true,
         if (user.x25519Key.isNotEmpty) 'x25519': user.x25519Key,
       });
-      if (results.length >= 20) break; // limit results
+      seenKeys.add(user.publicKey);
     }
   }
 
@@ -844,6 +1409,7 @@ shelf.Handler _wsHandler() {
             }
 
             _sendChannelDirSnapshot(ws);
+            _sendBotDirSnapshot(ws);
             _sendMailboxSnapshot(user!);
 
             // Send currently online peers to the new user
@@ -928,6 +1494,18 @@ shelf.Response _jsonResponse(Map<String, dynamic> body, {int status = 200}) {
   );
 }
 
+String? _botIdFromBearerApiToken(String authHeader) {
+  if (!authHeader.startsWith('Bearer ')) return null;
+  final t = authHeader.substring(7).trim();
+  if (t.isEmpty) return null;
+  final h = _sha256HexUtf8(t);
+  for (final e in _botDirectory.entries) {
+    if (e.value['revoked'] == true) continue;
+    if ((e.value['apiTokenHash'] as String?) == h) return e.key;
+  }
+  return null;
+}
+
 Future<shelf.Response> _infoHandler(shelf.Request request) async {
   if (request.method == 'OPTIONS') {
     return shelf.Response(
@@ -935,7 +1513,7 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
       headers: {
         'access-control-allow-origin': '*',
         'access-control-allow-methods': 'GET,POST,OPTIONS',
-        'access-control-allow-headers': 'content-type',
+        'access-control-allow-headers': 'content-type, authorization',
       },
     );
   }
@@ -998,6 +1576,96 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
       'pushRecipients': _pushSubscriptions.length,
     });
   }
+
+  // ── HTTP Bot API (метаданные; сообщения только WS + E2E) ─────────
+  if (request.url.path.startsWith('bot-api/v1/') && request.method == 'POST') {
+    final botId = _botIdFromBearerApiToken(
+      request.headers['authorization'] ?? request.headers['Authorization'] ?? '',
+    );
+    if (botId == null) {
+      return _jsonResponse({'ok': false, 'error': 'unauthorized'}, status: 401);
+    }
+    final row = _botDirectory[botId];
+    if (row == null || row['revoked'] == true) {
+      return _jsonResponse({'ok': false, 'error': 'not_found'}, status: 404);
+    }
+    try {
+      final raw = await request.readAsString();
+      final decoded = raw.isEmpty ? <String, dynamic>{} : jsonDecode(raw);
+      if (decoded is! Map) {
+        return _jsonResponse({'ok': false, 'error': 'bad_json'}, status: 400);
+      }
+      final action = request.url.path.substring('bot-api/v1/'.length);
+      switch (action) {
+        case 'setWebhook':
+          final url = (decoded['url'] as String?)?.trim() ?? '';
+          if (url.isEmpty) {
+            row['webhookUrl'] = '';
+          } else {
+            final u = Uri.tryParse(url);
+            if (u == null || !u.hasScheme || (u.scheme != 'https' && u.scheme != 'http')) {
+              return _jsonResponse({'ok': false, 'error': 'bad_url'}, status: 400);
+            }
+            if (url.length > 2048) {
+              return _jsonResponse({'ok': false, 'error': 'url_too_long'}, status: 400);
+            }
+            row['webhookUrl'] = url;
+          }
+          _persistBotDirectory();
+          return _jsonResponse({'ok': true});
+        case 'deleteWebhook':
+          row['webhookUrl'] = '';
+          _persistBotDirectory();
+          return _jsonResponse({'ok': true});
+        case 'setMyDescription':
+          final d = (decoded['description'] as String?)?.trim() ?? '';
+          if (d.length > 512) {
+            return _jsonResponse({'ok': false, 'error': 'description_too_long'}, status: 400);
+          }
+          row['description'] = d;
+          _persistBotDirectory();
+          _broadcastBotDirSnapshotToAll();
+          return _jsonResponse({'ok': true});
+        case 'setMyName':
+          final n = (decoded['displayName'] as String?)?.trim() ?? '';
+          if (n.isEmpty || n.length > 64) {
+            return _jsonResponse({'ok': false, 'error': 'bad_display_name'}, status: 400);
+          }
+          row['displayName'] = n;
+          _persistBotDirectory();
+          _broadcastBotDirSnapshotToAll();
+          return _jsonResponse({'ok': true});
+        case 'setMyAvatarUrl':
+          final u = (decoded['url'] as String?)?.trim() ?? '';
+          if (!_isAllowedBotMediaUrl(u)) {
+            return _jsonResponse({'ok': false, 'error': 'bad_url'}, status: 400);
+          }
+          row['avatarUrl'] = u;
+          _persistBotDirectory();
+          _broadcastBotDirSnapshotToAll();
+          return _jsonResponse({'ok': true});
+        case 'setMyBannerUrl':
+          final bu = (decoded['url'] as String?)?.trim() ?? '';
+          if (!_isAllowedBotMediaUrl(bu)) {
+            return _jsonResponse({'ok': false, 'error': 'bad_url'}, status: 400);
+          }
+          row['bannerUrl'] = bu;
+          _persistBotDirectory();
+          _broadcastBotDirSnapshotToAll();
+          return _jsonResponse({'ok': true});
+        case 'revokeToken':
+          final apiToken = _randomUrlToken();
+          row['apiTokenHash'] = _sha256HexUtf8(apiToken);
+          _persistBotDirectory();
+          return _jsonResponse({'ok': true, 'apiToken': apiToken});
+        default:
+          return _jsonResponse({'ok': false, 'error': 'unknown_action'}, status: 404);
+      }
+    } catch (_) {
+      return _jsonResponse({'ok': false, 'error': 'invalid_payload'}, status: 400);
+    }
+  }
+
   return shelf.Response.notFound('Not found');
 }
 
@@ -1009,6 +1677,7 @@ Future<void> main() async {
   _loadMailbox();
   _loadPushSubscriptions();
   _loadChannelDirectory();
+  _loadBotDirectory();
 
   // Cascade: try WebSocket first, then HTTP info
   final handler = shelf.Cascade()

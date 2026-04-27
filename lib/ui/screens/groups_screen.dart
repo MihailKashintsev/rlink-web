@@ -29,6 +29,7 @@ import '../../services/voice_service.dart';
 import '../../services/image_service.dart';
 import '../../services/sticker_collection_service.dart';
 import '../../services/invite_dm_service.dart';
+import '../../services/outbound_dm_text.dart';
 import '../../services/profile_service.dart';
 import 'location_map_screen.dart';
 import '../../utils/external_message_share.dart';
@@ -292,12 +293,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   double? _pendingLat;
   double? _pendingLng;
   bool _showFormatStrip = false;
-  int _length = 0;
-  static const _kMaxGroupMsgLen = 12000;
 
   String get _myId => CryptoService.instance.publicKeyHex;
   bool get _composeHasText => _controller.text.trim().isNotEmpty;
-  bool get _composeOver => _length > _kMaxGroupMsgLen;
   bool get _isCreator => _group.creatorId == _myId;
 
   void _onAppSettingsChanged() {
@@ -321,7 +319,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (!mounted) return;
     final sel = _controller.selection;
     setState(() {
-      _length = _controller.text.length;
       if (!sel.isValid || sel.isCollapsed) {
         _showFormatStrip = false;
       }
@@ -514,7 +511,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   Future<void> _send() async {
     final text = _controller.text.trim();
-    if (text.isEmpty || _isSending || _composeOver) return;
+    if (text.isEmpty || _isSending) return;
 
     setState(() => _isSending = true);
     _controller.clear();
@@ -527,15 +524,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
     try {
       final myId = CryptoService.instance.publicKeyHex;
-      const chunkLen = 600;
-      final parts = <String>[];
-      final t = text.trim();
-      for (var i = 0; i < t.length; i += chunkLen) {
-        final end = (i + chunkLen) > t.length ? t.length : i + chunkLen;
-        parts.add(t.substring(i, end));
-      }
+      final parts = OutboundDmText.splitChunks(text);
 
-      for (final partText in parts) {
+      for (var i = 0; i < parts.length; i++) {
+        final partText = parts[i];
+        final isFirst = i == 0;
         final msgId = const Uuid().v4();
         final now = DateTime.now().millisecondsSinceEpoch;
 
@@ -544,8 +537,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           groupId: widget.group.id,
           senderId: myId,
           text: partText,
-          latitude: lat,
-          longitude: lng,
+          latitude: isFirst ? lat : null,
+          longitude: isFirst ? lng : null,
           isOutgoing: true,
           timestamp: now,
         );
@@ -557,8 +550,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           text: partText,
           messageId: msgId,
           timestamp: now,
-          latitude: lat,
-          longitude: lng,
+          latitude: isFirst ? lat : null,
+          longitude: isFirst ? lng : null,
         );
       }
 
@@ -2008,8 +2001,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final cs = Theme.of(context).colorScheme;
     final sel = _controller.selection;
     final hasSelection = sel.isValid && sel.baseOffset != sel.extentOffset;
-    final near = _length > _kMaxGroupMsgLen * 0.8;
-    final over = _composeOver;
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -2351,26 +2342,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                               border: InputBorder.none,
                               contentPadding: const EdgeInsets.symmetric(
                                   horizontal: 16, vertical: 10),
-                              suffix: near
-                                  ? Text(
-                                      '${_kMaxGroupMsgLen - _length}',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: over
-                                            ? Colors.red
-                                            : cs.onSurfaceVariant,
-                                      ),
-                                    )
-                                  : null,
                             ),
                             style: TextStyle(fontSize: 15, color: cs.onSurface),
                             textInputAction: AppSettings.instance.sendOnEnter
                                 ? TextInputAction.send
                                 : TextInputAction.newline,
                             onSubmitted: AppSettings.instance.sendOnEnter
-                                ? (_) {
-                                    if (!_composeOver) _send();
-                                  }
+                                ? (_) => _send()
                                 : null,
                           ),
                         ),
@@ -2378,14 +2356,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       const SizedBox(width: 8),
                       if (_composeHasText || _isSending)
                         GestureDetector(
-                          onTap: _isSending || over || !_composeHasText
+                          onTap: _isSending || !_composeHasText
                               ? null
                               : _send,
                           child: Container(
                             width: 44,
                             height: 44,
                             decoration: BoxDecoration(
-                              color: _isSending || over || !_composeHasText
+                              color: _isSending || !_composeHasText
                                   ? Theme.of(context)
                                       .colorScheme
                                       .onSurface

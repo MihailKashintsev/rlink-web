@@ -1232,6 +1232,69 @@ class ChatStorageService {
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
+
+  static const _messageMediaColumns = {
+    'image_path',
+    'video_path',
+    'voice_path',
+    'file_path',
+  };
+
+  /// Сумма размеров уникальных локальных файлов в колонке медиа (личные чаты).
+  Future<int> sumDistinctMessageMediaBytes(String column) async {
+    await _ensureDbReady();
+    if (_db == null || !_messageMediaColumns.contains(column)) return 0;
+    final rows = await _db!.rawQuery(
+      'SELECT DISTINCT $column AS p FROM messages '
+      'WHERE $column IS NOT NULL AND TRIM($column) != ""',
+    );
+    final seen = <String>{};
+    var sum = 0;
+    for (final r in rows) {
+      final raw = r['p'] as String?;
+      if (raw == null || raw.isEmpty) continue;
+      if (raw.startsWith('data:')) continue;
+      final resolved = ImageService.instance.resolveStoredPath(raw) ?? raw;
+      if (seen.contains(resolved)) continue;
+      seen.add(resolved);
+      sum += await _lengthIfFile(resolved);
+    }
+    return sum;
+  }
+
+  /// Удаляет файлы и обнуляет колонку медиа во всех личных сообщениях.
+  Future<void> clearAllMessageMediaColumn(String column) async {
+    await _ensureDbReady();
+    if (_db == null || !_messageMediaColumns.contains(column)) return;
+    final rows = await _db!.query('messages', columns: [column, 'peer_id']);
+    for (final r in rows) {
+      await _tryDeleteLocalMediaFile(r[column] as String?);
+    }
+    if (column == 'file_path') {
+      await _db!.execute(
+        'UPDATE messages SET file_path=NULL, file_name=NULL, file_size=NULL '
+        'WHERE file_path IS NOT NULL',
+      );
+    } else {
+      await _db!.rawUpdate(
+        'UPDATE messages SET $column=NULL WHERE $column IS NOT NULL '
+        'AND TRIM($column) != ""',
+      );
+    }
+    final peers = await getChatPeerIds();
+    for (final pid in peers) {
+      _notifyMessages(pid);
+    }
+  }
+}
+
+Future<int> _lengthIfFile(String path) async {
+  if (kIsWeb) return 0;
+  try {
+    final f = File(path);
+    if (await f.exists()) return await f.length();
+  } catch (_) {}
+  return 0;
 }
 
 /// Строка из `scheduled_dm` для отложенной отправки в личный чат.

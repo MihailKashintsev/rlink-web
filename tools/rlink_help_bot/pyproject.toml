@@ -1,0 +1,19 @@
+[project]
+name = "rlink-help-bot"
+version = "0.1.0"
+description = "Rlink DM help bot (FAQ menu, Python + rlink_bot SDK)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "rlink-bot @ file:../rlink_bot",
+]
+
+[project.scripts]
+rlink-help-bot = "rlink_help_bot.app:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]

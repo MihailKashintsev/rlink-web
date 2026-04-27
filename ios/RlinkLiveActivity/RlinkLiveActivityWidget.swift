@@ -9,110 +9,42 @@ struct RlinkLiveActivityWidget: Widget {
         ActivityConfiguration(for: RlinkActivityAttributes.self) { context in
             // Lock Screen / banner presentation
             lockScreenView(context: context)
+                .activityBackgroundTint(Color.black.opacity(0.18))
+                .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
             DynamicIsland {
-                if context.state.uiMode == 1 {
-                    DynamicIslandExpandedRegion(.leading) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(.cyan)
-                    }
-                    DynamicIslandExpandedRegion(.trailing) {
-                        Text("\(Int((context.state.mediaProgress * 100).rounded()))%")
-                            .font(.system(size: 18, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                    }
-                    DynamicIslandExpandedRegion(.center) {
-                        VStack(spacing: 4) {
-                            Text(context.state.mediaLabel.isEmpty ? "Отправка" : context.state.mediaLabel)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.white)
-                            ProgressView(value: min(1, max(0, context.state.mediaProgress)))
-                                .tint(.cyan)
-                        }
-                    }
-                    DynamicIslandExpandedRegion(.bottom) {
-                        Text("Крупный файл — Rlink")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    DynamicIslandExpandedRegion(.leading) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "antenna.radiowaves.left.and.right")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.green)
-                            Text("\(context.state.connectedPeers)")
-                                .font(.system(size: 20, weight: .bold, design: .rounded))
-                                .foregroundStyle(.white)
-                        }
-                    }
-                    DynamicIslandExpandedRegion(.trailing) {
-                        signalBars(level: context.state.signalLevel)
-                    }
-                    DynamicIslandExpandedRegion(.center) {
-                        VStack(spacing: 2) {
-                            if context.state.connectedPeers > 0 {
-                                Text(context.state.connectedPeers == 1
-                                     ? "1 устройство рядом"
-                                     : "\(context.state.connectedPeers) устройств рядом")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.white)
-                            } else {
-                                Text("Поиск устройств…")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(.white.opacity(0.65))
-                            }
-                        }
-                    }
-                    DynamicIslandExpandedRegion(.bottom) {
-                        HStack {
-                            Image(systemName: "bluetooth")
-                                .font(.caption2)
-                                .foregroundStyle(.blue)
-                            Text("Rlink Mesh")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            signalLabel(level: context.state.signalLevel)
-                        }
-                        .padding(.horizontal, 4)
-                    }
-                }
-            } compactLeading: {
-                if context.state.uiMode == 1 {
-                    Image(systemName: "arrow.up.doc.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.cyan)
-                } else {
-                    HStack(spacing: 3) {
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.green)
-                        Text("\(context.state.connectedPeers)")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                    }
-                }
-            } compactTrailing: {
-                if context.state.uiMode == 1 {
-                    Text("\(Int((context.state.mediaProgress * 100).rounded()))%")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundStyle(.cyan)
-                } else {
-                    signalBarsCompact(level: context.state.signalLevel)
-                }
-            } minimal: {
-                if context.state.uiMode == 1 {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.cyan)
-                } else {
-                    Text("\(context.state.connectedPeers)")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                DynamicIslandExpandedRegion(.leading) {
+                    Image(systemName: "person.2.fill")
                         .foregroundStyle(.green)
                 }
+                DynamicIslandExpandedRegion(.trailing) {
+                    Text("\(context.state.connectedPeers)")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundStyle(.green)
+                }
+                DynamicIslandExpandedRegion(.center) {
+                    Text("server users online")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.green)
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    Text("\(context.state.connectedPeers) users")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(.green)
+                }
+            } compactLeading: {
+                Image(systemName: "person.2.fill")
+                    .foregroundStyle(.green)
+            } compactTrailing: {
+                Text("\(context.state.connectedPeers)")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.green)
+            } minimal: {
+                Text("\(context.state.connectedPeers)")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.green)
             }
+            .keylineTint(.green)
         }
     }
 
@@ -201,7 +133,7 @@ struct RlinkLiveActivityWidget: Widget {
                         Circle()
                             .fill(.green.opacity(0.15))
                             .frame(width: 44, height: 44)
-                        Image(systemName: "antenna.radiowaves.left.and.right")
+                        Image(systemName: "person.2.fill")
                             .font(.system(size: 20, weight: .semibold))
                             .foregroundStyle(.green)
                     }
@@ -212,20 +144,18 @@ struct RlinkLiveActivityWidget: Widget {
                                 .font(.system(size: 15, weight: .bold))
                                 .foregroundStyle(.white)
                             Spacer()
-                            signalBars(level: context.state.signalLevel)
-                            Text("\(context.state.connectedPeers) рядом")
+                            Text("\(context.state.connectedPeers) server online")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.green.opacity(0.9))
                         }
 
-                        Text(context.state.connectedPeers > 0 ? "Mesh активна" : "Поиск устройств...")
+                        Text(context.state.connectedPeers > 0 ? "Internet mode" : "Internet mode · no users")
                             .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.5))
+                            .foregroundStyle(.green.opacity(0.9))
                     }
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(.ultraThinMaterial)
+                .padding(.vertical, 10)
             }
         }
     }

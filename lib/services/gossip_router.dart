@@ -181,7 +181,9 @@ typedef OnEtherReceived = void Function(
 
 /// Вызывается при получении сторис от пира.
 typedef OnStoryReceived = void Function(String storyId, String authorId,
-    String text, int bgColor, double textX, double textY, double textSize);
+    String text, int bgColor, double textX, double textY, double textSize,
+    int textColor, bool textBold, bool textItalic, double textBgOpacity,
+    List<Map<String, dynamic>> overlays);
 
 /// Вызывается при получении запроса историй от пира.
 typedef OnStoryRequest = void Function(String fromId);
@@ -195,10 +197,17 @@ typedef OnPairRequest = void Function(
     int color,
     String emoji,
     String x25519Key,
-    List<String> tags);
+    List<String> tags,
+    String? statusEmojiPayload);
 
 /// Typing/activity indicator: 0=stopped, 1=typing, 2=recording video, 3=recording voice
 typedef OnTypingReceived = void Function(String fromId, int activity);
+typedef OnCallSignal = void Function(
+  String fromId,
+  String callId,
+  String signalType,
+  Map<String, dynamic> payload,
+);
 
 //// Pair accepted: device accepted our pair request.
 typedef OnPairAccepted = void Function(
@@ -209,7 +218,8 @@ typedef OnPairAccepted = void Function(
     int color,
     String emoji,
     String x25519Key,
-    List<String> tags);
+    List<String> tags,
+    String? statusEmojiPayload);
 
 typedef OnDeviceLinkRequest = void Function(
   String sourceId,
@@ -307,7 +317,9 @@ class GossipRouter {
 
   /// Зашифрованный admin_cfg2: только устройства с тем же Ed25519, что и [from].
   /// [channelIds] — список каналов для синхронизации подписок между устройствами.
-  void Function(String hash, int revision, List<String> channelIds)?
+  /// [botIds] — список разрешённых/включённых ботов аккаунта.
+  void Function(String hash, int revision, List<String> channelIds,
+      List<String> botIds)?
       onAdminConfigSecure;
   OnPairRequest? onPairRequest;
   OnPairAccepted? onPairAccepted;
@@ -317,6 +329,7 @@ class GossipRouter {
   OnDeviceDmSyncRequest? onDeviceDmSyncRequest;
   OnDeviceDmSyncPacket? onDeviceDmSyncPacket;
   OnTypingReceived? onTypingReceived;
+  OnCallSignal? onCallSignal;
 
   /// Lightweight bootstrap to guarantee forwarding path without overwriting
   /// existing message/pair/ether handlers.
@@ -884,6 +897,11 @@ class GossipRouter {
     double textX = 0,
     double textY = 0,
     double textSize = 26,
+    int textColor = 0xFFFFFFFF,
+    bool textBold = true,
+    bool textItalic = false,
+    double textBgOpacity = 0,
+    List<Map<String, dynamic>> overlays = const [],
   }) async {
     final packet = GossipPacket(
       id: storyId,
@@ -897,6 +915,11 @@ class GossipRouter {
         if (textX != 0) 'tx': textX,
         if (textY != 0) 'ty': textY,
         if (textSize != 26) 'ts': textSize,
+        if (textColor != 0xFFFFFFFF) 'tc': textColor,
+        if (!textBold) 'tb': false,
+        if (textItalic) 'ti': true,
+        if (textBgOpacity != 0) 'tbo': textBgOpacity,
+        if (overlays.isNotEmpty) 'ov': overlays,
       },
     );
     _markSeen(packet.id);
@@ -1041,6 +1064,7 @@ class GossipRouter {
     required String adminPasswordHash,
     required int revision,
     List<String> channelIds = const [],
+    List<String> botIds = const [],
   }) async {
     final myKey = myPublicKey ?? '';
     if (myKey.isEmpty) return;
@@ -1048,6 +1072,7 @@ class GossipRouter {
       'hash': adminPasswordHash,
       'rev': revision,
       'chans': channelIds,
+      'bots': botIds,
     });
     final sealed = await CryptoService.instance.sealAdminPanelSync(inner);
     final boxMap = jsonDecode(sealed) as Map<String, dynamic>;
@@ -1078,6 +1103,7 @@ class GossipRouter {
     required String recipientId,
     String x25519Key = '',
     List<String> tags = const [],
+    String statusEmoji = '',
   }) async {
     final rid8 = _rid8From(recipientId) ?? '';
     final packet = GossipPacket(
@@ -1095,6 +1121,7 @@ class GossipRouter {
         'r': rid8,
         if (x25519Key.isNotEmpty) 'x': x25519Key,
         if (tags.isNotEmpty) 'tags': tags,
+        'st': statusEmoji,
       },
     );
     _gossipTrace('[RLINK][Gossip][TX] type=pair_req id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
@@ -1118,6 +1145,7 @@ class GossipRouter {
     required String x25519Key,
     required String recipientId,
     List<String> tags = const [],
+    String statusEmoji = '',
   }) async {
     final rid8 = _rid8From(recipientId) ?? '';
     final packet = GossipPacket(
@@ -1135,6 +1163,7 @@ class GossipRouter {
         'r': rid8,
         if (x25519Key.isNotEmpty) 'x': x25519Key,
         if (tags.isNotEmpty) 'tags': tags,
+        'st': statusEmoji,
       },
     );
     _gossipTrace('[RLINK][Gossip][TX] type=pair_acc id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
@@ -1277,6 +1306,33 @@ class GossipRouter {
         'from': fromId,
         'a': activity,
         if (rid8 != null) 'r': rid8,
+      },
+    );
+    _markSeen(packet.id);
+    await _forward(packet);
+  }
+
+  /// Sends directed call signaling payload (offer/answer/ice/bye).
+  Future<void> sendCallSignal({
+    required String fromId,
+    required String recipientId,
+    required String callId,
+    required String signalType,
+    Map<String, dynamic> payload = const <String, dynamic>{},
+  }) async {
+    final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
+    final packet = GossipPacket(
+      id: _uuid.v4(),
+      type: 'call_sig',
+      ttl: 2,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      recipientId: recipientId,
+      payload: <String, dynamic>{
+        'from': fromId,
+        'cid': callId,
+        'st': signalType,
+        if (rid8 != null) 'r': rid8,
+        if (payload.isNotEmpty) 'd': payload,
       },
     );
     _markSeen(packet.id);
@@ -1653,12 +1709,14 @@ class GossipRouter {
           final rev = (map['rev'] as num?)?.toInt() ?? 0;
           final chans =
               (map['chans'] as List?)?.cast<String>() ?? const <String>[];
+          final bots =
+              (map['bots'] as List?)?.cast<String>() ?? const <String>[];
           if (hash == null ||
               hash.length != 64 ||
               !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hash)) {
             return;
           }
-          onAdminConfigSecure?.call(hash, rev, chans);
+          onAdminConfigSecure?.call(hash, rev, chans, bots);
         } catch (_) {}
         return;
       }
@@ -1682,8 +1740,29 @@ class GossipRouter {
           final textX = (packet.payload['tx'] as num?)?.toDouble() ?? 0.0;
           final textY = (packet.payload['ty'] as num?)?.toDouble() ?? 0.0;
           final textSize = (packet.payload['ts'] as num?)?.toDouble() ?? 26.0;
+          final textColor = _jsonIntLoose(packet.payload['tc']) ?? 0xFFFFFFFF;
+          final textBold = (packet.payload['tb'] as bool?) ?? true;
+          final textItalic = (packet.payload['ti'] as bool?) ?? false;
+          final textBgOpacity =
+              (packet.payload['tbo'] as num?)?.toDouble() ?? 0.0;
+          final overlays = ((packet.payload['ov'] as List?) ?? const [])
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
           onStoryReceived?.call(
-              packet.id, authorId, text, bgColor, textX, textY, textSize);
+            packet.id,
+            authorId,
+            text,
+            bgColor,
+            textX,
+            textY,
+            textSize,
+            textColor,
+            textBold,
+            textItalic,
+            textBgOpacity,
+            overlays,
+          );
         }
         return;
       }
@@ -1722,6 +1801,9 @@ class GossipRouter {
         final tags =
             (packet.payload['tags'] as List<dynamic>?)?.cast<String>() ??
                 const <String>[];
+        final String? statusEmojiPayload = packet.payload.containsKey('st')
+            ? (packet.payload['st'] as String? ?? '')
+            : null;
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_req not addressed to us (directed pairing)
         if (!_matchesRid8(myPublicKey, rid8)) {
@@ -1732,8 +1814,8 @@ class GossipRouter {
         if (publicKey != null && nick != null && color != null) {
           _gossipTrace(
               '[RLINK][Gossip][RX] type=pair_req from=${publicKey.substring(0, 8)} nick=$nick');
-          onPairRequest?.call(
-              bleId, publicKey, nick, username, color, emoji, x25519Key, tags);
+          onPairRequest?.call(bleId, publicKey, nick, username, color, emoji,
+              x25519Key, tags, statusEmojiPayload);
         }
         return;
       }
@@ -1749,6 +1831,9 @@ class GossipRouter {
         final tags =
             (packet.payload['tags'] as List<dynamic>?)?.cast<String>() ??
                 const <String>[];
+        final String? statusEmojiPayload = packet.payload.containsKey('st')
+            ? (packet.payload['st'] as String? ?? '')
+            : null;
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_acc not addressed to us (directed pairing)
         if (!_matchesRid8(myPublicKey, rid8)) {
@@ -1759,8 +1844,8 @@ class GossipRouter {
         if (publicKey != null && nick != null && color != null) {
           _gossipTrace(
               '[RLINK][Gossip][RX] type=pair_acc from=${publicKey.substring(0, 8)} nick=$nick');
-          onPairAccepted?.call(
-              bleId, publicKey, nick, username, color, emoji, x25519Key, tags);
+          onPairAccepted?.call(bleId, publicKey, nick, username, color, emoji,
+              x25519Key, tags, statusEmojiPayload);
         }
         return;
       }
@@ -1854,6 +1939,21 @@ class GossipRouter {
           return;
         }
         onTypingReceived?.call(from, activity);
+        return;
+      }
+
+      if (packet.type == 'call_sig') {
+        final from = packet.payload['from'] as String?;
+        final callId = packet.payload['cid'] as String?;
+        final signalType = packet.payload['st'] as String?;
+        final rid8 = packet.payload['r'] as String?;
+        if (from == null || callId == null || signalType == null) return;
+        if (!_matchesRid8(myPublicKey, rid8)) {
+          return;
+        }
+        final data = (packet.payload['d'] as Map?)?.cast<String, dynamic>() ??
+            const <String, dynamic>{};
+        onCallSignal?.call(from, callId, signalType, data);
         return;
       }
 

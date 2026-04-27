@@ -5,8 +5,10 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.os.Handler
 import android.os.Build
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 
@@ -22,8 +24,10 @@ class RlinkForegroundService : Service() {
         when (intent?.action) {
             ACTION_START -> startAsFg()
             ACTION_STOP -> stopAsFg()
+            else -> startAsFg()
         }
-        return START_NOT_STICKY
+        // Keep process alive in background: Android may recreate the service after kill.
+        return START_STICKY
     }
 
     private fun ensureChannel() {
@@ -71,6 +75,19 @@ class RlinkForegroundService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (_: Exception) { }
         stopSelf()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        // If user swipes app from recents, request service restart shortly after.
+        // This keeps relay/BLE listeners alive without touching backend.
+        Handler(Looper.getMainLooper()).postDelayed({
+            try {
+                val restartIntent = Intent(applicationContext, RlinkForegroundService::class.java)
+                    .setAction(ACTION_START)
+                startService(restartIntent)
+            } catch (_: Exception) { }
+        }, 1200)
     }
 
     companion object {

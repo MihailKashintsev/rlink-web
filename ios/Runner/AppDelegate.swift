@@ -68,6 +68,8 @@ struct RlinkActivityAttributes: ActivityAttributes {
         UNUserNotificationCenter.current().setNotificationCategories([messageCategory])
         // Настраиваем каналы после старта — retry пока не найдём FlutterViewController
         DispatchQueue.main.async { self.setupChannels() }
+        // Сбросить Live Activity с прошлых версий — Dynamic Island отключён.
+        if #available(iOS 16.2, *) { stopLiveActivity() }
         return result
     }
 
@@ -333,105 +335,27 @@ struct RlinkActivityAttributes: ActivityAttributes {
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
-    // MARK: - Live Activity (Dynamic Island)
+    // MARK: - Live Activity (Dynamic Island) — disabled
 
-    private func liveContentState(from args: [String: Any]) -> RlinkActivityAttributes.ContentState {
-        let peers = args["peers"] as? Int ?? 0
-        let sender = args["sender"] as? String ?? ""
-        let message = args["message"] as? String ?? ""
-        let signal = args["signal"] as? Int ?? 0
-        let uiMode = args["uiMode"] as? Int ?? 0
-        var mediaProgress = args["mediaProgress"] as? Double ?? 0.0
-        if mediaProgress == 0, let n = args["mediaProgress"] as? NSNumber {
-            mediaProgress = n.doubleValue
-        }
-        let mediaLabel = args["mediaLabel"] as? String ?? ""
-        return RlinkActivityAttributes.ContentState(
-            connectedPeers: peers,
-            lastSender: sender,
-            lastMessage: message,
-            timestamp: Date(),
-            signalLevel: signal,
-            uiMode: uiMode,
-            mediaProgress: mediaProgress,
-            mediaLabel: mediaLabel
-        )
-    }
-
-    private func startLiveActivity(args: [String: Any]) {
+    /// Ends every Rlink Live Activity so Dynamic Island stays off (Flutter may still call these).
+    private func stopLiveActivity() {
         guard #available(iOS 16.2, *) else { return }
-
-        // End all stale activities first to avoid conflicts
         Task {
             for activity in Activity<RlinkActivityAttributes>.activities {
                 let finalContent: ActivityContent<RlinkActivityAttributes.ContentState>? = nil
                 await activity.end(finalContent, dismissalPolicy: .immediate)
             }
+            NSLog("[LiveActivity] All dismissed (disabled)")
         }
+        currentActivity = nil
+    }
 
-        let state = liveContentState(from: args)
-        let attributes = RlinkActivityAttributes(sessionId: UUID().uuidString)
-        let content = ActivityContent(state: state, staleDate: nil)
-
-        // Slight delay to allow stale cleanup
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            do {
-                let activity = try Activity.request(
-                    attributes: attributes,
-                    content: content,
-                    pushType: nil
-                )
-                self.currentActivity = activity
-                NSLog("[LiveActivity] Started id=%@", activity.id)
-            } catch {
-                NSLog("[LiveActivity] Start failed: %@", error.localizedDescription)
-            }
-        }
+    private func startLiveActivity(args: [String: Any]) {
+        stopLiveActivity()
     }
 
     private func updateLiveActivity(args: [String: Any]) {
-        guard #available(iOS 16.2, *) else { return }
-        let state = liveContentState(from: args)
-        let uiMode = state.uiMode
-
-        if currentActivity == nil {
-            if uiMode == 1 {
-                let attributes = RlinkActivityAttributes(sessionId: UUID().uuidString)
-                let content = ActivityContent(state: state, staleDate: nil)
-                Task { @MainActor in
-                    do {
-                        let activity = try Activity.request(
-                            attributes: attributes,
-                            content: content,
-                            pushType: nil
-                        )
-                        self.currentActivity = activity
-                        NSLog("[LiveActivity] Started (media) id=%@", activity.id)
-                    } catch {
-                        NSLog("[LiveActivity] Media start failed: %@", error.localizedDescription)
-                    }
-                }
-            }
-            return
-        }
-
-        guard let activity = currentActivity as? Activity<RlinkActivityAttributes> else { return }
-        Task {
-            await activity.update(ActivityContent(state: state, staleDate: nil))
-            NSLog("[LiveActivity] Updated uiMode=%d peers=%d", uiMode, state.connectedPeers)
-        }
-    }
-
-    private func stopLiveActivity() {
-        guard #available(iOS 16.2, *) else { return }
-        guard let activity = currentActivity as? Activity<RlinkActivityAttributes> else { return }
-        Task {
-            let finalContent: ActivityContent<RlinkActivityAttributes.ContentState>? = nil
-            await activity.end(finalContent, dismissalPolicy: .immediate)
-            NSLog("[LiveActivity] Stopped")
-        }
-        currentActivity = nil
+        stopLiveActivity()
     }
 
     // MARK: - Local Notifications (improved)
@@ -553,8 +477,13 @@ struct RlinkActivityAttributes: ActivityAttributes {
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // В активном режиме Flutter сам покажет — не дублируем
-        completionHandler([])
+        // Do not suppress local notifications in foreground.
+        // Otherwise user sees "nothing comes" while app is open.
+        if #available(iOS 14.0, *) {
+            completionHandler([.banner, .list, .sound, .badge])
+        } else {
+            completionHandler([.alert, .sound, .badge])
+        }
     }
 }
 

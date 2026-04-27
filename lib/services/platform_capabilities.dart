@@ -9,4 +9,10 @@ class PlatformCapabilities {
   bool get supportsWifiDirect => RuntimePlatform.isAndroid;
   bool get supportsNativeFilePaths => !RuntimePlatform.isWeb;
   bool get isWeb => RuntimePlatform.isWeb;
+  bool get supportsBackgroundKeepAlive =>
+      RuntimePlatform.isAndroid || RuntimePlatform.isDesktop;
+  bool get supportsSystemPushInBackground =>
+      RuntimePlatform.isWeb ||
+      RuntimePlatform.isAndroid ||
+      RuntimePlatform.isIos;
 }

@@ -415,6 +415,45 @@ class GroupService {
     await updateGroup(group.copyWith(memberIds: members, moderatorIds: mods));
   }
 
+  static const _groupMediaColumns = {'image_path', 'video_path', 'voice_path'};
+
+  /// Сумма размеров уникальных файлов в колонке медиа (группы).
+  Future<int> sumDistinctGroupMediaBytes(String column) async {
+    if (_db == null || !_groupMediaColumns.contains(column)) return 0;
+    final rows = await _db!.rawQuery(
+      'SELECT DISTINCT $column AS p FROM group_messages '
+      'WHERE $column IS NOT NULL AND TRIM($column) != ""',
+    );
+    final seen = <String>{};
+    var sum = 0;
+    for (final r in rows) {
+      final raw = r['p'] as String?;
+      if (raw == null || raw.isEmpty) continue;
+      final resolved = ImageService.instance.resolveStoredPath(raw) ?? raw;
+      if (seen.contains(resolved)) continue;
+      seen.add(resolved);
+      try {
+        final f = File(resolved);
+        if (await f.exists()) sum += await f.length();
+      } catch (_) {}
+    }
+    return sum;
+  }
+
+  /// Удаляет файлы и обнуляет колонку медиа во всех сообщениях групп.
+  Future<void> clearAllGroupMessagesMediaColumn(String column) async {
+    if (_db == null || !_groupMediaColumns.contains(column)) return;
+    final rows = await _db!.query('group_messages', columns: [column]);
+    for (final r in rows) {
+      await _tryDeleteGroupMediaFile(r[column] as String?);
+    }
+    await _db!.rawUpdate(
+      'UPDATE group_messages SET $column=NULL WHERE $column IS NOT NULL '
+      'AND TRIM($column) != ""',
+    );
+    _bump();
+  }
+
   /// Wipe all local data (used on full app reset).
   Future<void> resetAll() async {
     await _db?.delete('group_messages');

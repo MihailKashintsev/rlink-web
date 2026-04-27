@@ -23,6 +23,7 @@ import '../../services/gossip_router.dart';
 import '../../services/relay_service.dart';
 import '../../services/story_service.dart';
 import '../../services/platform_capabilities.dart';
+import '../../services/wifi_direct_service.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/mesh_radar_widget.dart';
 import '../widgets/update_available_banner.dart';
@@ -32,6 +33,7 @@ import '../../utils/message_preview_formatter.dart'
         formatGroupMessagePreview,
         dmLastMessagePreview;
 import 'channels_screen.dart';
+import 'bot_catalog_screen.dart';
 import 'chat_screen.dart';
 import 'ether_screen.dart';
 import 'groups_screen.dart';
@@ -84,6 +86,13 @@ class _ChatListScreenState extends State<ChatListScreen>
           content: Text('Поиск устройств...'), duration: Duration(seconds: 2)),
     );
     setState(() => _currentTab = 1);
+  }
+
+  Future<void> _openBotsCatalog() async {
+    await Navigator.push(
+      context,
+      rlinkChatRoute(const BotCatalogScreen()),
+    );
   }
 
   void _toggleSearch() {
@@ -423,8 +432,18 @@ class _ChatListScreenState extends State<ChatListScreen>
               onSelected: (v) {
                 if (v == 'channel') _createChannel();
                 if (v == 'group') _createGroup();
+                if (v == 'bots') _openBotsCatalog();
               },
               itemBuilder: (ctx) => [
+                PopupMenuItem(
+                  value: 'bots',
+                  child: Row(children: [
+                    Icon(Icons.smart_toy_outlined,
+                        size: 20, color: Theme.of(ctx).colorScheme.primary),
+                    const SizedBox(width: 10),
+                    const Text('Боты'),
+                  ]),
+                ),
                 if (channelsEnabled)
                   PopupMenuItem(
                     value: 'channel',
@@ -794,13 +813,9 @@ class _MeTab extends StatelessWidget {
               ),
             ),
           ),
-        ListTile(
-          leading: Icon(Icons.settings_outlined, color: cs.primary),
-          title: Text(AppL10n.t('settings')),
-          onTap: () => Navigator.push(
-            context,
-            rlinkPushRoute(const SettingsScreen()),
-          ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(4, 4, 4, 28),
+          child: SettingsCategoryCards(),
         ),
       ],
     );
@@ -826,6 +841,8 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   VoidCallback? _groupListener;
   VoidCallback? _channelListener;
   VoidCallback? _bleListener; // fires on BLE peer connect/disconnect
+  VoidCallback? _relayListener;
+  VoidCallback? _wifiListener;
   VoidCallback? _contactListener; // fires when contactsNotifier updates
   VoidCallback? _readStateListener;
   VoidCallback? _settingsListener;
@@ -847,11 +864,16 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     _channelListener = () => _debouncedLoad();
     // Rebuild when BLE peers connect/disconnect so the green dot updates live.
     _bleListener = () => _debouncedLoad();
+    _relayListener = () => _debouncedLoad();
+    _wifiListener = () => _debouncedLoad();
     // Also rebuild when contacts change (avatar/banner/nickname updates).
     _contactListener = () => _debouncedLoad();
     GroupService.instance.version.addListener(_groupListener!);
     ChannelService.instance.version.addListener(_channelListener!);
     BleService.instance.peersCount.addListener(_bleListener!);
+    RelayService.instance.state.addListener(_relayListener!);
+    RelayService.instance.onlineCount.addListener(_relayListener!);
+    WifiDirectService.instance.peersCount.addListener(_wifiListener!);
     ChatStorageService.instance.contactsNotifier.addListener(_contactListener!);
     _readStateListener = () => _debouncedLoad();
     ChatStorageService.instance.readStateVersion
@@ -877,6 +899,13 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     }
     if (_bleListener != null) {
       BleService.instance.peersCount.removeListener(_bleListener!);
+    }
+    if (_relayListener != null) {
+      RelayService.instance.state.removeListener(_relayListener!);
+      RelayService.instance.onlineCount.removeListener(_relayListener!);
+    }
+    if (_wifiListener != null) {
+      WifiDirectService.instance.peersCount.removeListener(_wifiListener!);
     }
     if (_contactListener != null) {
       ChatStorageService.instance.contactsNotifier
@@ -904,6 +933,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
       if (childLinked && linkedPrimaryId.isNotEmpty) linkedPrimaryId,
     };
     final showOnline = settings.showOnlineStatus;
+    final wifiConnected = WifiDirectService.instance.peersCount.value > 0;
     final channelsEnabled = settings.channelsEnabled;
     final dmUnread = await ChatStorageService.instance.getDmUnreadCounts();
     final groupUnread = await GroupService.instance.getGroupUnreadCounts();
@@ -915,8 +945,9 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     final summaries = await ChatStorageService.instance.getChatSummaries();
     final summaryIds = <String>{};
     for (final s in summaries) {
-      if (s.peerId == kAiBotPeerId) continue;
       if (myId.isNotEmpty && s.peerId == myId) continue;
+      final transports =
+          _resolvePresenceTransports(s.peerId, wifiConnected: wifiConnected);
       summaryIds.add(s.peerId);
       items.add(_ChatItem(
         type: _ChatItemType.personal,
@@ -928,7 +959,10 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         avatarImagePath: s.avatarImagePath,
         lastMessage: s.displayText,
         lastTime: s.timestamp,
-        isOnline: showOnline && BleService.instance.isPeerConnected(s.peerId),
+        isOnline: showOnline && transports.isNotEmpty,
+        onlineTransports: transports,
+        showPresenceStatus: showOnline,
+        isAiBot: isAiBotPeerId(s.peerId),
         unreadCount: dmUnread[s.peerId] ?? 0,
       ));
     }
@@ -936,9 +970,12 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     // 1б) Контакты без переписки — добавляем с пустым lastMessage
     final contacts = await ChatStorageService.instance.getContacts();
     for (final c in contacts) {
-      if (c.publicKeyHex == kAiBotPeerId) continue;
       if (myId.isNotEmpty && c.publicKeyHex == myId) continue;
       if (summaryIds.contains(c.publicKeyHex)) continue;
+      final transports = _resolvePresenceTransports(
+        c.publicKeyHex,
+        wifiConnected: wifiConnected,
+      );
       items.add(_ChatItem(
         type: _ChatItemType.personal,
         id: c.publicKeyHex,
@@ -949,8 +986,10 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         avatarImagePath: c.avatarImagePath,
         lastMessage: '',
         lastTime: c.addedAt,
-        isOnline:
-            showOnline && BleService.instance.isPeerConnected(c.publicKeyHex),
+        isOnline: showOnline && transports.isNotEmpty,
+        onlineTransports: transports,
+        showPresenceStatus: showOnline,
+        isAiBot: isAiBotPeerId(c.publicKeyHex),
         unreadCount: 0,
       ));
     }
@@ -979,6 +1018,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
             ? DateTime.fromMillisecondsSinceEpoch(lastMsg.timestamp)
             : DateTime.fromMillisecondsSinceEpoch(g.createdAt),
         isOnline: false,
+        onlineTransports: const [],
         unreadCount: groupUnread[g.id] ?? 0,
       ));
     }
@@ -1010,6 +1050,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
               ? DateTime.fromMillisecondsSinceEpoch(lastPost.timestamp)
               : DateTime.fromMillisecondsSinceEpoch(ch.createdAt),
           isOnline: false,
+          onlineTransports: const [],
           unreadCount: channelUnread[ch.id] ?? 0,
         ));
       }
@@ -1038,33 +1079,31 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
           lastMessage: savedPreview,
           lastTime: savedTime,
           isOnline: false,
+          onlineTransports: const [],
           unreadCount: 0,
-        ),
-      );
-      final aiLast =
-          await ChatStorageService.instance.getLastMessage(kAiBotPeerId);
-      final aiPreview = aiLast != null
-          ? dmLastMessagePreview(aiLast)
-          : 'Чат с нейросетью Сбера — только текст';
-      items.insert(
-        1,
-        _ChatItem(
-          isAiBot: true,
-          id: kAiBotPeerId,
-          nickname: kAiBotNickname,
-          avatarColor: kAiBotAvatarColor,
-          avatarEmoji: kAiBotEmoji,
-          avatarImagePath: null,
-          lastMessage: aiPreview,
-          lastTime: aiLast?.timestamp ?? DateTime.fromMillisecondsSinceEpoch(0),
-          isOnline: false,
-          unreadCount: dmUnread[kAiBotPeerId] ?? 0,
         ),
       );
     }
 
     if (!mounted) return;
     setState(() => _items = items);
+  }
+
+  List<AvatarPresenceTransport> _resolvePresenceTransports(
+    String peerId, {
+    required bool wifiConnected,
+  }) {
+    final transports = <AvatarPresenceTransport>[];
+    if (BleService.instance.isPeerConnected(peerId)) {
+      transports.add(AvatarPresenceTransport.bluetooth);
+    }
+    if (RelayService.instance.isPeerOnline(peerId)) {
+      transports.add(AvatarPresenceTransport.internet);
+    }
+    if (wifiConnected && transports.isEmpty) {
+      transports.add(AvatarPresenceTransport.wifiDirect);
+    }
+    return transports;
   }
 
   Future<void> _navigate(BuildContext context, _ChatItem item) async {
@@ -1368,6 +1407,146 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     );
   }
 
+  Widget _buildPendingBanners(BuildContext context) {
+    final inbox = ChatInboxService.instance;
+    if (inbox.archiveView) return const SizedBox.shrink();
+    return ValueListenableBuilder<Map<String, Map<String, dynamic>>>(
+      valueListenable: BleService.instance.incomingPairRequests,
+      builder: (_, pairRequests, __) {
+        return ValueListenableBuilder<List<ChannelInvite>>(
+          valueListenable: ChannelService.instance.pendingChannelInvites,
+          builder: (_, channelInvites, __) {
+            return ValueListenableBuilder<List<GroupInvite>>(
+              valueListenable: GroupService.instance.pendingInvites,
+              builder: (_, groupInvites, __) {
+                final hasAnything = pairRequests.isNotEmpty ||
+                    channelInvites.isNotEmpty ||
+                    groupInvites.isNotEmpty;
+                if (!hasAnything) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+                  child: Column(
+                    children: [
+                      for (final e in pairRequests.entries)
+                        _buildPendingBannerTile(
+                          context,
+                          icon: Icons.person_add_alt_1_rounded,
+                          iconColor: Theme.of(context).colorScheme.primary,
+                          title: (e.value['nick'] as String?)?.trim().isNotEmpty ==
+                                  true
+                              ? '${e.value['nick']} хочет обменяться профилем'
+                              : 'Новый запрос на обмен профилем',
+                          subtitle: 'Нажмите, чтобы открыть запрос',
+                          onTap: () => showPairRequestScreen(
+                            context,
+                            e.key,
+                            e.value,
+                          ),
+                        ),
+                      for (final inv in channelInvites)
+                        _buildPendingBannerTile(
+                          context,
+                          icon: Icons.campaign_outlined,
+                          iconColor: const Color(0xFF42A5F5),
+                          title: 'Приглашение в канал: ${inv.channelName}',
+                          subtitle: '${inv.inviterNick} приглашает вас',
+                          onTap: () => Navigator.push(
+                            context,
+                            rlinkPushRoute(const ChannelsScreen()),
+                          ),
+                        ),
+                      for (final inv in groupInvites)
+                        _buildPendingBannerTile(
+                          context,
+                          icon: Icons.group_outlined,
+                          iconColor: const Color(0xFF5C6BC0),
+                          title: 'Приглашение в группу: ${inv.groupName}',
+                          subtitle: '${inv.inviterNick} приглашает вас',
+                          onTap: () => Navigator.push(
+                            context,
+                            rlinkPushRoute(const GroupsScreen()),
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildPendingBannerTile(
+    BuildContext context, {
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Material(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            child: Row(
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: iconColor.withValues(alpha: 0.14),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: iconColor, size: 18),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 18,
+                  color: cs.onSurfaceVariant,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final q = widget.searchQuery.toLowerCase().trim();
@@ -1377,6 +1556,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     if (_items.isEmpty && q.isEmpty) {
       return Column(children: [
         _StoriesStrip(chatItems: _storiesSource()),
+        _buildPendingBanners(context),
         const Expanded(child: _EmptyChatsState()),
       ]);
     }
@@ -1387,6 +1567,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
           children: [
             _StoriesStrip(chatItems: _storiesSource()),
             _buildFilterBar(context),
+            _buildPendingBanners(context),
             Expanded(
               child: Center(
                 child: Text(
@@ -1401,6 +1582,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
       return Column(children: [
         _StoriesStrip(chatItems: _storiesSource()),
         _buildFilterBar(context),
+        _buildPendingBanners(context),
         Expanded(
             child: ListView.separated(
           itemCount: visible.length,
@@ -1501,6 +1683,7 @@ class _TelegramChatRow extends StatelessWidget {
                   imagePath: item.avatarImagePath,
                   size: avatarSize,
                   isOnline: item.isOnline,
+                  onlineTransports: item.onlineTransports,
                   hasStory: item.type == _ChatItemType.personal &&
                       !item.isSavedMessages &&
                       !item.isAiBot &&
@@ -1547,7 +1730,7 @@ class _TelegramChatRow extends StatelessWidget {
                                 ),
                               ),
                               child: Text(
-                                'ИИ',
+                                item.id == kLibBotPeerId ? 'Lib' : 'ИИ',
                                 style: TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w700,
@@ -1582,6 +1765,22 @@ class _TelegramChatRow extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
+                        if (item.showPresenceStatus &&
+                            item.type == _ChatItemType.personal &&
+                            !item.isSavedMessages &&
+                            !item.isAiBot) ...[
+                          const SizedBox(width: 6),
+                          Text(
+                            item.isOnline ? 'В сети' : 'Не в сети',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                              color: item.isOnline
+                                  ? const Color(0xFF1DB954)
+                                  : subColor,
+                            ),
+                          ),
+                        ],
                         if (item.unreadCount > 0) ...[
                           const SizedBox(width: 6),
                           Container(
@@ -1702,6 +1901,8 @@ class _ChatItem {
   final String? avatarImagePath;
   final DateTime lastTime;
   final bool isOnline;
+  final List<AvatarPresenceTransport> onlineTransports;
+  final bool showPresenceStatus;
   final int unreadCount;
 
   /// Чат «Избранное» (сохранённые сообщения у себя).
@@ -1710,7 +1911,7 @@ class _ChatItem {
   /// Есть ли уже сообщения в избранном (для подписи времени в списке).
   final bool savedHasMessages;
 
-  /// Чат с встроенным ИИ (GigaChat), не настоящий контакт.
+  /// Чат со встроенным ботом (Lib, GigaChat и т.д.), не обычный контакт.
   final bool isAiBot;
   _ChatItem({
     this.type = _ChatItemType.personal,
@@ -1722,6 +1923,8 @@ class _ChatItem {
     required this.lastMessage,
     required this.lastTime,
     required this.isOnline,
+    this.onlineTransports = const [],
+    this.showPresenceStatus = false,
     this.unreadCount = 0,
     this.isSavedMessages = false,
     this.savedHasMessages = true,
@@ -2002,6 +2205,7 @@ class _UnifiedSearchResultsState extends State<_UnifiedSearchResults> {
                             x25519Key:
                                 CryptoService.instance.x25519PublicKeyBase64,
                             tags: myProfile.tags,
+                            statusEmoji: myProfile.statusEmoji,
                           );
                         }
                         final nick = p.nick.isNotEmpty ? p.nick : p.shortId;
@@ -2112,6 +2316,15 @@ class _StoriesStrip extends StatelessWidget {
                                   authorId: story.authorId,
                                   text: story.text,
                                   bgColor: story.bgColor,
+                                  textX: story.textX,
+                                  textY: story.textY,
+                                  textSize: story.textSize,
+                                  textColor: story.textColor,
+                                  textBold: story.textBold,
+                                  textItalic: story.textItalic,
+                                  textBgOpacity: story.textBgOpacity,
+                                  overlays:
+                                      story.overlays.map((e) => e.toJson()).toList(),
                                 );
                               }
                             });
@@ -2503,6 +2716,7 @@ class _PendingDeviceTile extends StatelessWidget {
         recipientId: resolvedKey,
         x25519Key: CryptoService.instance.x25519PublicKeyBase64,
         tags: profile.tags,
+        statusEmoji: profile.statusEmoji,
       );
     } else {
       // Public key not yet known (BLE UUID only) — broadcast our profile
@@ -2687,6 +2901,7 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
       x25519Key: CryptoService.instance.x25519PublicKeyBase64,
       recipientId: requesterKey,
       tags: profile.tags,
+      statusEmoji: profile.statusEmoji,
     );
 
     // Save their contact (with their tags from the pair_req)
@@ -2697,6 +2912,9 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
     final publicKey = widget.info['publicKey'] as String? ?? '';
     final theirTags = (widget.info['tags'] as List<dynamic>?)?.cast<String>() ??
         const <String>[];
+    final theirStatusEmoji = UserProfile.normalizeStatusEmoji(
+      widget.info['statusEmoji'] as String? ?? '',
+    );
 
     if (publicKey.isNotEmpty) {
       // Always register — pair_req only arrives from direct peers (TTL=1)
@@ -2727,7 +2945,9 @@ class _PairRequestScreenState extends State<_PairRequestScreen>
           tags: theirTags.isNotEmpty ? theirTags : (existing?.tags ?? const []),
           bannerImagePath: existing?.bannerImagePath,
           profileMusicPath: existing?.profileMusicPath,
-          statusEmoji: existing?.statusEmoji ?? '',
+          statusEmoji: theirStatusEmoji.isNotEmpty
+              ? theirStatusEmoji
+              : (existing?.statusEmoji ?? ''),
         ));
       } catch (_) {}
     }
@@ -3334,6 +3554,7 @@ class _NearbyDeviceTile extends StatelessWidget {
       recipientId: resolvedKey,
       x25519Key: CryptoService.instance.x25519PublicKeyBase64,
       tags: profile.tags,
+      statusEmoji: profile.statusEmoji,
     );
     BleService.instance.setExchangeState(peerId, 1); // invite sent
     ScaffoldMessenger.of(context).showSnackBar(

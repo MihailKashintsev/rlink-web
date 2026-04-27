@@ -158,7 +158,7 @@ class DeviceLinkSyncService {
       var sent = 0;
       final peerIds = await ChatStorageService.instance.getChatPeerIds();
       for (final peerId in peerIds) {
-        if (peerId == kAiBotPeerId) continue;
+        if (isAiBotPeerId(peerId)) continue;
         if (_normalizeKey(peerId) == _normalizeKey(recipientId)) continue;
         final messages =
             await ChatStorageService.instance.getAllMessages(peerId);
@@ -199,7 +199,7 @@ class DeviceLinkSyncService {
     final myKey = CryptoService.instance.publicKeyHex;
     if (linkedPeer == null || myKey.isEmpty) return;
 
-    if (msg.peerId == kAiBotPeerId) return;
+    if (isAiBotPeerId(msg.peerId)) return;
     if (_normalizeKey(msg.peerId) == _normalizeKey(linkedPeer)) return;
 
     try {

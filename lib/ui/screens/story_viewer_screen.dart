@@ -40,6 +40,42 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
 
   static const _storyDuration = Duration(seconds: 5);
 
+  Future<void> _showStoryReactionLimitHint() async {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.showSnackBar(
+      const SnackBar(
+        content: Text('Лимит реакций на историю достигнут'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _trySendStoryReaction(String emoji) async {
+    final story = _stories[_index];
+    final myId = CryptoService.instance.publicKeyHex;
+    final hadBefore = story.hasReaction(emoji, myId);
+    final totalBefore = story.totalReactions;
+    final mineBefore = story.reactionsBy(myId);
+    final updated = StoryService.instance.toggleReaction(story.id, emoji, myId);
+    if (updated == null) return;
+    final hasAfter = updated.hasReaction(emoji, myId);
+    final blockedAdd = !hadBefore &&
+        !hasAfter &&
+        (totalBefore >= kMaxStoryReactionsTotal ||
+            mineBefore >= kMaxStoryDistinctReactionsPerUser);
+    if (blockedAdd) {
+      await _showStoryReactionLimitHint();
+      return;
+    }
+    await GossipRouter.instance.sendReactionExt(
+      kind: 'story',
+      targetId: story.id,
+      emoji: emoji,
+      fromId: myId,
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -86,15 +122,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
     _pauseStory();
     final emoji = await showReactionPickerSheet(context);
     if (emoji != null) {
-      final story = widget.stories[_index];
-      final myId = CryptoService.instance.publicKeyHex;
-      StoryService.instance.toggleReaction(story.id, emoji, myId);
-      await GossipRouter.instance.sendReactionExt(
-        kind: 'story',
-        targetId: story.id,
-        emoji: emoji,
-        fromId: myId,
-      );
+      await _trySendStoryReaction(emoji);
     }
     if (mounted) _resumeStory();
   }
@@ -373,9 +401,13 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                     constraints: const BoxConstraints(maxWidth: 320),
                     padding:
                         const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: story.imagePath != null
+                    decoration: (story.imagePath != null || story.videoPath != null)
                         ? BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.35),
+                            color: Colors.black.withValues(
+                              alpha: story.textBgOpacity > 0
+                                  ? story.textBgOpacity.clamp(0.0, 0.7).toDouble()
+                                  : 0.35,
+                            ),
                             borderRadius: BorderRadius.circular(10),
                           )
                         : null,
@@ -383,9 +415,12 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                       story.text,
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        color: Colors.white,
+                        color: Color(story.textColor),
                         fontSize: story.textSize.clamp(14.0, 60.0),
-                        fontWeight: FontWeight.w600,
+                        fontWeight:
+                            story.textBold ? FontWeight.w700 : FontWeight.w500,
+                        fontStyle:
+                            story.textItalic ? FontStyle.italic : FontStyle.normal,
                         shadows: const [
                           Shadow(
                             blurRadius: 8,
@@ -393,6 +428,26 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                           ),
                         ],
                       ),
+                    ),
+                  ),
+                ),
+              ),
+
+            for (final ov in story.overlays)
+              Align(
+                alignment: Alignment(
+                  ov.x.clamp(-1.0, 1.0),
+                  ov.y.clamp(-1.0, 1.0),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Text(
+                    ov.value,
+                    style: TextStyle(
+                      fontSize: ov.size.clamp(20.0, 64.0),
+                      shadows: const [
+                        Shadow(blurRadius: 8, color: Colors.black54),
+                      ],
                     ),
                   ),
                 ),
@@ -582,16 +637,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
                                       GestureDetector(
                                         onTap: () async {
                                           _pauseStory();
-                                          final story2 = widget.stories[_index];
-                                          StoryService.instance.toggleReaction(
-                                              story2.id, e, myId);
-                                          await GossipRouter.instance
-                                              .sendReactionExt(
-                                            kind: 'story',
-                                            targetId: story2.id,
-                                            emoji: e,
-                                            fromId: myId,
-                                          );
+                                          await _trySendStoryReaction(e);
                                           if (mounted) _resumeStory();
                                         },
                                         child: Container(

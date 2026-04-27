@@ -14,4 +14,13 @@ class RuntimePlatform {
 
   static bool get isDesktopWindows =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
+  static bool get isDesktopLinux =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+
+  static bool get isDesktopMacos =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+
+  static bool get isDesktop =>
+      isDesktopWindows || isDesktopLinux || isDesktopMacos;
 }

@@ -690,6 +690,65 @@ class ChannelService {
     } catch (_) {}
   }
 
+  static const _channelMediaColumns = {
+    'image_path',
+    'video_path',
+    'voice_path',
+    'file_path',
+  };
+
+  Future<int> _sumDistinctColumnFromTable(String table, String column) async {
+    if (_db == null || !_channelMediaColumns.contains(column)) return 0;
+    final rows = await _db!.rawQuery(
+      'SELECT DISTINCT $column AS p FROM $table '
+      'WHERE $column IS NOT NULL AND TRIM($column) != ""',
+    );
+    final seen = <String>{};
+    var sum = 0;
+    for (final r in rows) {
+      final raw = r['p'] as String?;
+      if (raw == null || raw.isEmpty) continue;
+      final resolved = ImageService.instance.resolveStoredPath(raw) ?? raw;
+      if (seen.contains(resolved)) continue;
+      seen.add(resolved);
+      try {
+        final f = File(resolved);
+        if (await f.exists()) sum += await f.length();
+      } catch (_) {}
+    }
+    return sum;
+  }
+
+  /// Сумма размеров медиа в постах и комментариях каналов для колонки.
+  Future<int> sumDistinctChannelMediaBytes(String column) async {
+    final a = await _sumDistinctColumnFromTable('channel_posts', column);
+    final b = await _sumDistinctColumnFromTable('channel_comments', column);
+    return a + b;
+  }
+
+  /// Удаляет файлы и обнуляет колонку во всех постах и комментариях.
+  Future<void> clearAllChannelMediaColumn(String column) async {
+    if (_db == null || !_channelMediaColumns.contains(column)) return;
+    for (final table in ['channel_posts', 'channel_comments']) {
+      final rows = await _db!.query(table, columns: [column]);
+      for (final r in rows) {
+        await _tryDeleteChannelMediaFile(r[column] as String?);
+      }
+      if (column == 'file_path') {
+        await _db!.execute(
+          'UPDATE $table SET file_path=NULL, file_name=NULL, file_size=NULL '
+          'WHERE file_path IS NOT NULL',
+        );
+      } else {
+        await _db!.rawUpdate(
+          'UPDATE $table SET $column=NULL WHERE $column IS NOT NULL '
+          'AND TRIM($column) != ""',
+        );
+      }
+    }
+    _bump();
+  }
+
   Channel _channelFromRow(Map<String, dynamic> r) => Channel(
         id: r['id'] as String,
         name: r['name'] as String,

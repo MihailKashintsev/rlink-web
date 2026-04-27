@@ -135,8 +135,15 @@ class RelayService with WidgetsBindingObserver {
   /// Подписанные записи публичного каталога каналов (`channel_dir_snapshot` после register).
   void Function(List<dynamic> entries)? onChannelDirectorySnapshot;
 
+  /// Ответ relay на `bot_register_start` (Lib / регистрация бота).
+  void Function(Map<String, dynamic> msg)? onBotRegisterAck;
+
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
+
+  /// Публичные URL аватар/баннер ботов (каталог relay).
+  final Map<String, String> _relayBotAvatarUrl = {};
+  final Map<String, String> _relayBotBannerUrl = {};
 
   /// Online presence of known peers
   final Map<String, bool> _peerOnline = {};
@@ -145,6 +152,9 @@ class RelayService with WidgetsBindingObserver {
   /// Peer usernames discovered via relay presence
   final Map<String, String> _peerUsernames = {};
   final ValueNotifier<int> presenceVersion = ValueNotifier(0);
+
+  /// Обновление снимка каталога ботов (URL, описание и т.д.).
+  final ValueNotifier<int> botDirectoryVersion = ValueNotifier(0);
 
   bool get isConnected => state.value == RelayState.connected;
   /// URL сервера всегда захардкожен в defaultServerUrl.
@@ -182,6 +192,38 @@ class RelayService with WidgetsBindingObserver {
 
   /// Get X25519 key for a peer discovered via relay
   String? getPeerX25519Key(String publicKey) => _peerX25519Keys[publicKey];
+
+  String? relayBotAvatarUrl(String publicKey) {
+    if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(publicKey)) return null;
+    return _relayBotAvatarUrl[publicKey.toLowerCase()];
+  }
+
+  String? relayBotBannerUrl(String publicKey) {
+    if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(publicKey)) return null;
+    return _relayBotBannerUrl[publicKey.toLowerCase()];
+  }
+
+  void _applyRelayBotVisualFromSnapshot(String idLower, String avatarUrl, String bannerUrl) {
+    final a = avatarUrl.trim();
+    final b = bannerUrl.trim();
+    if (a.isNotEmpty) {
+      _relayBotAvatarUrl[idLower] = a;
+    } else {
+      _relayBotAvatarUrl.remove(idLower);
+    }
+    if (b.isNotEmpty) {
+      _relayBotBannerUrl[idLower] = b;
+    } else {
+      _relayBotBannerUrl.remove(idLower);
+    }
+  }
+
+  void _mergeRelayBotVisualFromSearch(String idLower, String? avatarUrl, String? bannerUrl) {
+    final a = avatarUrl?.trim() ?? '';
+    final b = bannerUrl?.trim() ?? '';
+    if (a.isNotEmpty) _relayBotAvatarUrl[idLower] = a;
+    if (b.isNotEmpty) _relayBotBannerUrl[idLower] = b;
+  }
 
   /// Find full public key by 8-char prefix (for directed relay sends).
   /// Checks online peers first, then contacts cache.
@@ -814,6 +856,14 @@ class RelayService with WidgetsBindingObserver {
         case 'channel_dir_ack':
           break;
 
+        case 'bot_register_ack':
+          onBotRegisterAck?.call(msg);
+          break;
+
+        case 'bot_dir_snapshot':
+          _applyBotDirectorySnapshot(msg['bots'] as List<dynamic>?);
+          break;
+
         case 'account_sync_ack':
           break;
 
@@ -861,6 +911,44 @@ class RelayService with WidgetsBindingObserver {
     } catch (e) {
       debugPrint('[RLINK][Relay] account_sync_put failed: $e');
     }
+  }
+
+  /// Регистрация нового бота на relay (подписанный JSON владельца + публичный ключ будущего бота).
+  Future<void> sendBotRegisterStart({
+    required String payloadJson,
+    required String signatureHex,
+  }) async {
+    if (!isConnected) return;
+    if (payloadJson.isEmpty || payloadJson.length > 8192) return;
+    if (signatureHex.length != 128) return;
+    try {
+      await _safeSend({
+        'type': 'bot_register_start',
+        'payload': payloadJson,
+        'signature': signatureHex,
+      }, context: 'bot_register_start');
+    } catch (e) {
+      debugPrint('[RLINK][Relay] bot_register_start failed: $e');
+    }
+  }
+
+  void _applyBotDirectorySnapshot(List<dynamic>? bots) {
+    if (bots == null || bots.isEmpty) return;
+    for (final raw in bots) {
+      if (raw is! Map) continue;
+      final m = Map<String, dynamic>.from(raw);
+      final id = (m['botId'] as String?)?.toLowerCase().trim() ?? '';
+      final x = (m['x25519Pub'] as String?)?.trim() ?? '';
+      if (id.length != 64 || x.isEmpty) continue;
+      _peerX25519Keys[id] = x;
+      BleService.instance.registerPeerX25519Key(id, x);
+      unawaited(ChatStorageService.instance.updateContactX25519Key(id, x));
+      final av = (m['avatarUrl'] as String?)?.trim() ?? '';
+      final bn = (m['bannerUrl'] as String?)?.trim() ?? '';
+      _applyRelayBotVisualFromSnapshot(id, av, bn);
+    }
+    botDirectoryVersion.value++;
+    debugPrint('[RLINK][Relay] bot_dir_snapshot applied (${bots.length} rows)');
   }
 
   void _handleIncomingPacket(Map<String, dynamic> msg) {
@@ -927,7 +1015,17 @@ class RelayService with WidgetsBindingObserver {
         shortId: m['shortId'] as String? ?? '',
         online: _relayJsonBool(m['online']) ?? false,
         x25519Key: m['x25519'] as String? ?? '',
+        isBot: m['isBot'] == true,
+        avatarUrl: (m['avatarUrl'] as String?)?.trim(),
+        bannerUrl: (m['bannerUrl'] as String?)?.trim(),
       );
+      if (peer.isBot && peer.publicKey.length == 64) {
+        _mergeRelayBotVisualFromSearch(
+          peer.publicKey.toLowerCase(),
+          peer.avatarUrl,
+          peer.bannerUrl,
+        );
+      }
       if (peer.x25519Key.isNotEmpty && peer.publicKey.isNotEmpty) {
         _peerX25519Keys[peer.publicKey] = peer.x25519Key;
         BleService.instance.registerPeerX25519Key(peer.publicKey, peer.x25519Key);
@@ -963,6 +1061,10 @@ class RelayService with WidgetsBindingObserver {
       }
     } else {
       searchResults.value = serverPeers;
+    }
+
+    if (results.isNotEmpty) {
+      botDirectoryVersion.value++;
     }
 
     for (final p in searchResults.value) {
@@ -1120,6 +1222,9 @@ class RelayPeer {
   final String shortId;
   final bool online;
   final String x25519Key;
+  final bool isBot;
+  final String? avatarUrl;
+  final String? bannerUrl;
 
   const RelayPeer({
     required this.publicKey,
@@ -1128,6 +1233,9 @@ class RelayPeer {
     required this.shortId,
     required this.online,
     this.x25519Key = '',
+    this.isBot = false,
+    this.avatarUrl,
+    this.bannerUrl,
   });
 }
 

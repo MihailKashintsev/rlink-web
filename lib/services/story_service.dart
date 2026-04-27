@@ -6,6 +6,40 @@ import 'package:path_provider/path_provider.dart';
 
 import '../utils/reaction_limit.dart';
 
+class StoryOverlayItem {
+  final String value;
+  final double x;
+  final double y;
+  final double size;
+  final bool isSticker;
+
+  const StoryOverlayItem({
+    required this.value,
+    required this.x,
+    required this.y,
+    this.size = 36,
+    this.isSticker = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'v': value,
+        if (x != 0) 'x': x,
+        if (y != 0) 'y': y,
+        if (size != 36) 's': size,
+        if (isSticker) 'stk': true,
+      };
+
+  factory StoryOverlayItem.fromJson(Map<String, dynamic> j) {
+    return StoryOverlayItem(
+      value: (j['v'] as String? ?? '').trim(),
+      x: (j['x'] as num?)?.toDouble() ?? 0,
+      y: (j['y'] as num?)?.toDouble() ?? 0,
+      size: (j['s'] as num?)?.toDouble() ?? 36,
+      isSticker: j['stk'] == true,
+    );
+  }
+}
+
 class StoryItem {
   final String id;
   final String authorId; // Ed25519 public key
@@ -19,6 +53,11 @@ class StoryItem {
   double textX;
   double textY;
   double textSize;
+  int textColor;
+  bool textBold;
+  bool textItalic;
+  double textBgOpacity;
+  List<StoryOverlayItem> overlays;
   // Emoji → list of reactor public keys. Хранится локально.
   Map<String, List<String>> reactions;
   // Viewer public key hexes (reported back from each viewer to the author).
@@ -36,9 +75,15 @@ class StoryItem {
     this.textX = 0,
     this.textY = 0,
     this.textSize = 26,
+    this.textColor = 0xFFFFFFFF,
+    this.textBold = true,
+    this.textItalic = false,
+    this.textBgOpacity = 0,
+    List<StoryOverlayItem>? overlays,
     Map<String, List<String>>? reactions,
     List<String>? viewers,
-  })  : reactions = reactions ?? <String, List<String>>{},
+  })  : overlays = overlays ?? <StoryOverlayItem>[],
+        reactions = reactions ?? <String, List<String>>{},
         viewers = viewers ?? <String>[];
 
   bool get isExpired =>
@@ -53,6 +98,19 @@ class StoryItem {
     return n;
   }
 
+  int reactionsBy(String reactorId) {
+    var n = 0;
+    for (final list in reactions.values) {
+      if (list.contains(reactorId)) n++;
+    }
+    return n;
+  }
+
+  bool hasReaction(String emoji, String reactorId) {
+    final list = reactions[emoji];
+    return list != null && list.contains(reactorId);
+  }
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'authorId': authorId,
@@ -65,6 +123,11 @@ class StoryItem {
         if (textX != 0) 'textX': textX,
         if (textY != 0) 'textY': textY,
         if (textSize != 26) 'textSize': textSize,
+        if (textColor != 0xFFFFFFFF) 'textColor': textColor,
+        if (!textBold) 'textBold': false,
+        if (textItalic) 'textItalic': true,
+        if (textBgOpacity != 0) 'textBgOpacity': textBgOpacity,
+        if (overlays.isNotEmpty) 'overlays': overlays.map((e) => e.toJson()).toList(),
         if (reactions.isNotEmpty) 'reactions': reactions,
         if (viewers.isNotEmpty) 'viewers': viewers,
       };
@@ -80,6 +143,11 @@ class StoryItem {
       });
     }
     final List<String> viewers = (j['viewers'] as List?)?.cast<String>() ?? [];
+    final overlays = ((j['overlays'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((e) => StoryOverlayItem.fromJson(Map<String, dynamic>.from(e)))
+        .where((e) => e.value.isNotEmpty)
+        .toList();
     return StoryItem(
       id: j['id'] as String,
       authorId: j['authorId'] as String,
@@ -92,11 +160,19 @@ class StoryItem {
       textX: (j['textX'] as num?)?.toDouble() ?? 0,
       textY: (j['textY'] as num?)?.toDouble() ?? 0,
       textSize: (j['textSize'] as num?)?.toDouble() ?? 26,
+      textColor: j['textColor'] as int? ?? 0xFFFFFFFF,
+      textBold: j['textBold'] as bool? ?? true,
+      textItalic: j['textItalic'] as bool? ?? false,
+      textBgOpacity: (j['textBgOpacity'] as num?)?.toDouble() ?? 0,
+      overlays: overlays,
       reactions: reactions,
       viewers: viewers,
     );
   }
 }
+
+const kMaxStoryReactionsTotal = 120;
+const kMaxStoryDistinctReactionsPerUser = 2;
 
 class StoryService {
   StoryService._();
@@ -216,6 +292,10 @@ class StoryService {
       list.remove(reactorId);
       if (list.isEmpty) s.reactions.remove(emoji);
     } else {
+      if (s.totalReactions >= kMaxStoryReactionsTotal) return s;
+      if (s.reactionsBy(reactorId) >= kMaxStoryDistinctReactionsPerUser) {
+        return s;
+      }
       if (!reactionAddAllowed(s.reactions, emoji, reactorId)) return s;
       s.reactions.putIfAbsent(emoji, () => <String>[]).add(reactorId);
     }

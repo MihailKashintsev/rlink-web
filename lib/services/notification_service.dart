@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'app_settings.dart';
+import 'sound_effects_service.dart';
 import 'web_notification_bridge.dart';
 
 /// Единая служба локальных уведомлений.
@@ -72,6 +73,7 @@ class NotificationService {
 
   /// Запрашивает разрешения на уведомления (iOS/Android 13+/macOS).
   Future<void> requestPermissions() async {
+    if (!_initialised) await init();
     if (kIsWeb) {
       await requestWebNotificationPermission();
       return;
@@ -189,11 +191,12 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         category: AndroidNotificationCategory.message,
+        playSound: false,
       );
       final darwinDetails = DarwinNotificationDetails(
         presentAlert: true,
         presentBadge: true,
-        presentSound: true,
+        presentSound: false,
         threadIdentifier: threadIdentifier,
       );
       final WindowsNotificationDetails? windowsDetails =
@@ -214,6 +217,7 @@ class NotificationService {
         ),
         payload: payload,
       );
+      await SoundEffectsService.instance.playPushNotificationSound();
     } catch (e) {
       debugPrint('[RLINK][Notif] show failed: $e');
     }

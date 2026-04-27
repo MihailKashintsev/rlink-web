@@ -15,6 +15,7 @@ import '../../services/image_service.dart';
 import '../../services/media_upload_queue.dart';
 import '../../services/relay_service.dart';
 import '../../services/story_service.dart';
+import '../widgets/reactions.dart';
 
 /// Story creator with draggable text overlay, pinch-to-zoom image, and text size control.
 class StoryCreatorScreen extends StatefulWidget {
@@ -42,6 +43,15 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
   double _textAlignY = 0;
   double _textSize = 26.0;
   bool _textSizeSliderVisible = false;
+  int _textColor = 0xFFFFFFFF;
+  bool _textBold = true;
+  bool _textItalic = false;
+  double _textBgOpacity = 0.0;
+  final List<StoryOverlayItem> _overlays = <StoryOverlayItem>[];
+  int _activeOverlay = -1;
+
+  Duration _videoTrimStart = Duration.zero;
+  Duration _videoTrimEnd = Duration.zero;
 
   // ── Image transform (pinch-to-zoom + pan) ────────────────────
   double _imageScale = 1.0;
@@ -60,6 +70,47 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
     0xFF6C5CE7, 0xFFE91E63, 0xFF2196F3, 0xFF4CAF50,
     0xFFFF9800, 0xFF009688, 0xFF9C27B0, 0xFFF44336, 0xFF212121,
   ];
+  static const _textColors = [
+    0xFFFFFFFF,
+    0xFF111111,
+    0xFFFFEB3B,
+    0xFF80D8FF,
+    0xFFFF8A80,
+    0xFFC8E6C9,
+  ];
+  static const _stickerEmojis = [
+    '✨', '🔥', '💥', '🎉', '💫', '🌈', '⚡', '🫶', '😎', '🚀', '💎', '🩵'
+  ];
+
+  void _cycleTextBgOpacity() {
+    const steps = [0.0, 0.22, 0.38, 0.54];
+    final idx = steps.indexWhere((v) => (_textBgOpacity - v).abs() < 0.01);
+    final next = steps[(idx + 1) % steps.length];
+    setState(() => _textBgOpacity = next);
+  }
+
+  String _fmtDuration(Duration d) {
+    final h = d.inHours;
+    final mm = (d.inMinutes % 60).toString().padLeft(2, '0');
+    final ss = (d.inSeconds % 60).toString().padLeft(2, '0');
+    if (h > 0) return '$h:$mm:$ss';
+    return '${d.inMinutes}:$ss';
+  }
+
+  void _addOverlay(String value, {required bool isSticker}) {
+    setState(() {
+      _overlays.add(
+        StoryOverlayItem(
+          value: value,
+          x: 0,
+          y: 0,
+          size: isSticker ? 42 : 36,
+          isSticker: isSticker,
+        ),
+      );
+      _activeOverlay = _overlays.length - 1;
+    });
+  }
 
   Future<void> _pickImage() async {
     if (kIsWeb) {
@@ -90,8 +141,13 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
     if (picked != null && picked.path.isNotEmpty) {
       // Verify the file actually exists before setting state
       if (File(picked.path).existsSync()) {
+        _videoCtrl?.dispose();
         setState(() {
           _imagePath = picked.path;
+          _videoPath = null;
+          _videoCtrl = null;
+          _webVideoBytes = null;
+          _webImageBytes = null;
           _imageScale = 1.0;
           _imageDx = 0.0;
           _imageDy = 0.0;
@@ -125,6 +181,8 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
         _imagePath = null;
         _webVideoBytes = bytes;
         _webImageBytes = null;
+        _videoTrimStart = Duration.zero;
+        _videoTrimEnd = ctrl.value.duration;
       });
       return;
     }
@@ -144,6 +202,8 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       _videoPath = picked.path;
       _videoCtrl = ctrl;
       _imagePath = null; // video replaces photo
+      _videoTrimStart = Duration.zero;
+      _videoTrimEnd = ctrl.value.duration;
     });
   }
 
@@ -158,6 +218,8 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       _imageDy = 0.0;
       _webImageBytes = null;
       _webVideoBytes = null;
+      _videoTrimStart = Duration.zero;
+      _videoTrimEnd = Duration.zero;
     });
   }
 
@@ -171,10 +233,14 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
     String? savedVideoPath;
 
     if (_imagePath != null && !kIsWeb) {
-      savedImagePath = await ImageService.instance.compressAndSave(
-        _imagePath!,
-        maxSize: 480,
-      );
+      try {
+        savedImagePath = await ImageService.instance.compressAndSave(
+          _imagePath!,
+          maxSize: 480,
+        );
+      } catch (_) {
+        savedImagePath = _imagePath!;
+      }
     }
 
     if (_videoPath != null && !kIsWeb) {
@@ -182,6 +248,8 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       savedVideoPath = await ImageService.instance.saveVideo(
         _videoPath!,
         isSquare: false,
+        trimStart: _videoTrimStart,
+        trimEnd: _videoTrimEnd,
       );
     }
 
@@ -196,6 +264,11 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
       textX: _textAlignX,
       textY: _textAlignY,
       textSize: _textSize,
+      textColor: _textColor,
+      textBold: _textBold,
+      textItalic: _textItalic,
+      textBgOpacity: _textBgOpacity,
+      overlays: List<StoryOverlayItem>.from(_overlays),
     );
     StoryService.instance.addStory(story);
 
@@ -228,6 +301,11 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
         textX: story.textX,
         textY: story.textY,
         textSize: story.textSize,
+        textColor: story.textColor,
+        textBold: story.textBold,
+        textItalic: story.textItalic,
+        textBgOpacity: story.textBgOpacity,
+        overlays: story.overlays.map((e) => e.toJson()).toList(),
       );
 
       // ── Video blob path ────────────────────────────────────────
@@ -576,22 +654,86 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 12, vertical: 6),
                                   decoration: BoxDecoration(
-                                    color: (_imagePath != null || _videoPath != null)
-                                        ? Colors.black.withValues(alpha: 0.35)
-                                        : Colors.transparent,
+                                    color: (_textBgOpacity > 0)
+                                        ? Colors.black.withValues(alpha: _textBgOpacity)
+                                        : (_imagePath != null || _videoPath != null)
+                                            ? Colors.black.withValues(alpha: 0.35)
+                                            : Colors.transparent,
                                     borderRadius: BorderRadius.circular(10),
                                   ),
                                   child: Text(
                                     _textCtrl.text,
                                     textAlign: TextAlign.center,
                                     style: TextStyle(
-                                      color: Colors.white,
+                                      color: Color(_textColor),
                                       fontSize: _textSize,
-                                      fontWeight: FontWeight.w600,
+                                      fontWeight:
+                                          _textBold ? FontWeight.w700 : FontWeight.w500,
+                                      fontStyle:
+                                          _textItalic ? FontStyle.italic : FontStyle.normal,
                                       shadows: const [
                                         Shadow(
                                             blurRadius: 6,
                                             color: Colors.black54),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+
+                          for (var i = 0; i < _overlays.length; i++)
+                            Align(
+                              alignment: Alignment(_overlays[i].x, _overlays[i].y),
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () => setState(() => _activeOverlay = i),
+                                onPanUpdate: (d) {
+                                  final w = _canvasSize.width;
+                                  final h = _canvasSize.height;
+                                  setState(() {
+                                    if (w > 0) {
+                                      final nx = (_overlays[i].x + d.delta.dx / (w / 2))
+                                          .clamp(-0.93, 0.93)
+                                          .toDouble();
+                                      _overlays[i] = StoryOverlayItem(
+                                        value: _overlays[i].value,
+                                        x: nx,
+                                        y: _overlays[i].y,
+                                        size: _overlays[i].size,
+                                        isSticker: _overlays[i].isSticker,
+                                      );
+                                    }
+                                    if (h > 0) {
+                                      final ny = (_overlays[i].y + d.delta.dy / (h / 2))
+                                          .clamp(-0.93, 0.93)
+                                          .toDouble();
+                                      _overlays[i] = StoryOverlayItem(
+                                        value: _overlays[i].value,
+                                        x: _overlays[i].x,
+                                        y: ny,
+                                        size: _overlays[i].size,
+                                        isSticker: _overlays[i].isSticker,
+                                      );
+                                    }
+                                  });
+                                },
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: _activeOverlay == i
+                                        ? Colors.white.withValues(alpha: 0.18)
+                                        : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(
+                                    _overlays[i].value,
+                                    style: TextStyle(
+                                      fontSize: _overlays[i].size,
+                                      shadows: const [
+                                        Shadow(
+                                            blurRadius: 6, color: Colors.black54)
                                       ],
                                     ),
                                   ),
@@ -752,6 +894,183 @@ class _StoryCreatorScreenState extends State<StoryCreatorScreen> {
                           tooltip: 'Убрать медиа',
                         ),
                       ],
+                    ],
+                  ),
+                  if (!kIsWeb &&
+                      _videoCtrl != null &&
+                      _videoCtrl!.value.isInitialized &&
+                      _videoCtrl!.value.duration.inSeconds > 2) ...[
+                    const SizedBox(height: 10),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.content_cut,
+                                  size: 16, color: Colors.white70),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Фрагмент: ${_fmtDuration(_videoTrimStart)} - ${_fmtDuration(_videoTrimEnd)}',
+                                style: const TextStyle(
+                                    color: Colors.white70, fontSize: 12),
+                              ),
+                            ],
+                          ),
+                          RangeSlider(
+                            values: RangeValues(
+                              _videoTrimStart.inSeconds.toDouble(),
+                              _videoTrimEnd.inSeconds.toDouble().clamp(
+                                  _videoTrimStart.inSeconds.toDouble() + 1,
+                                  _videoCtrl!.value.duration.inSeconds.toDouble()),
+                            ),
+                            min: 0,
+                            max: _videoCtrl!.value.duration.inSeconds.toDouble(),
+                            divisions: _videoCtrl!.value.duration.inSeconds
+                                .clamp(2, 240),
+                            activeColor: Colors.white,
+                            inactiveColor: Colors.white24,
+                            onChanged: (range) {
+                              final start = Duration(
+                                  seconds: range.start.floor().clamp(
+                                      0, _videoCtrl!.value.duration.inSeconds - 1));
+                              final end = Duration(
+                                  seconds: range.end
+                                      .floor()
+                                      .clamp(start.inSeconds + 1,
+                                          _videoCtrl!.value.duration.inSeconds));
+                              setState(() {
+                                _videoTrimStart = start;
+                                _videoTrimEnd = end;
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      ..._textColors.map((c) {
+                        final selected = c == _textColor;
+                        return GestureDetector(
+                          onTap: () => setState(() => _textColor = c),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 120),
+                            width: 26,
+                            height: 26,
+                            margin: const EdgeInsets.symmetric(horizontal: 4),
+                            decoration: BoxDecoration(
+                              color: Color(c),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: selected ? Colors.white : Colors.white30,
+                                width: selected ? 2.2 : 1,
+                              ),
+                            ),
+                          ),
+                        );
+                      }),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        tooltip: 'Жирный',
+                        onPressed: () => setState(() => _textBold = !_textBold),
+                        icon: Icon(
+                          Icons.format_bold,
+                          color: _textBold ? Colors.amberAccent : Colors.white70,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Курсив',
+                        onPressed: () =>
+                            setState(() => _textItalic = !_textItalic),
+                        icon: Icon(
+                          Icons.format_italic,
+                          color: _textItalic ? Colors.amberAccent : Colors.white70,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Подложка текста',
+                        onPressed: _cycleTextBgOpacity,
+                        icon: Icon(
+                          Icons.rectangle_outlined,
+                          color: _textBgOpacity > 0
+                              ? Colors.amberAccent
+                              : Colors.white70,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Добавить эмодзи',
+                        onPressed: () async {
+                          final emoji = await showReactionPickerSheet(context);
+                          if (emoji != null && emoji.isNotEmpty) {
+                            _addOverlay(emoji, isSticker: false);
+                          }
+                        },
+                        icon: const Icon(Icons.emoji_emotions_outlined,
+                            color: Colors.white70),
+                      ),
+                      IconButton(
+                        tooltip: 'Добавить стикер',
+                        onPressed: () async {
+                          if (!mounted) return;
+                          final emoji = await showModalBottomSheet<String>(
+                            context: context,
+                            backgroundColor: const Color(0xFF1C1C1E),
+                            shape: const RoundedRectangleBorder(
+                              borderRadius:
+                                  BorderRadius.vertical(top: Radius.circular(16)),
+                            ),
+                            builder: (ctx) => SafeArea(
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: _stickerEmojis
+                                      .map((e) => GestureDetector(
+                                            onTap: () =>
+                                                Navigator.of(ctx).pop(e),
+                                            child: Container(
+                                              width: 48,
+                                              height: 48,
+                                              alignment: Alignment.center,
+                                              decoration: BoxDecoration(
+                                                color: Colors.white10,
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
+                                              child: Text(e,
+                                                  style: const TextStyle(
+                                                      fontSize: 28)),
+                                            ),
+                                          ))
+                                      .toList(),
+                                ),
+                              ),
+                            ),
+                          );
+                          if (emoji != null && emoji.isNotEmpty) {
+                            _addOverlay(emoji, isSticker: true);
+                          }
+                        },
+                        icon:
+                            const Icon(Icons.auto_awesome, color: Colors.white70),
+                      ),
+                      if (_activeOverlay >= 0 && _activeOverlay < _overlays.length)
+                        IconButton(
+                          tooltip: 'Удалить стикер/эмодзи',
+                          onPressed: () {
+                            setState(() {
+                              _overlays.removeAt(_activeOverlay);
+                              _activeOverlay = -1;
+                            });
+                          },
+                          icon: const Icon(Icons.delete_outline,
+                              color: Colors.white70),
+                        ),
                     ],
                   ),
                   const SizedBox(height: 8),

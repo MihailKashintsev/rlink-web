@@ -29,10 +29,12 @@ import '../../models/contact.dart';
 import '../../services/ai_bot_constants.dart';
 import '../../services/app_settings.dart';
 import '../../services/gigachat_service.dart';
+import '../../services/lib_bot_service.dart';
 import '../../services/ble_service.dart';
 import '../../services/block_service.dart';
 import '../../services/chat_storage_service.dart';
 import '../../services/channel_service.dart';
+import '../../services/call_service.dart';
 import '../../services/connection_transport.dart';
 import '../../services/device_link_sync_service.dart';
 import '../../services/ether_service.dart';
@@ -49,6 +51,7 @@ import '../../services/story_service.dart';
 import '../../services/typing_service.dart';
 import '../../services/relay_service.dart';
 import '../../services/media_upload_queue.dart';
+import '../../services/sound_effects_service.dart';
 import '../../utils/channel_mentions.dart';
 import '../../utils/external_message_share.dart';
 import '../../utils/invite_dm_codec.dart';
@@ -60,8 +63,10 @@ import 'square_video_recorder_screen.dart';
 import 'story_viewer_screen.dart';
 import 'collab_compose_dialogs.dart';
 import 'channels_screen.dart';
+import 'call_screen.dart';
 import 'groups_screen.dart';
 import 'location_map_screen.dart';
+import 'contact_edit_screen.dart';
 import '../widgets/shared_todo_message_card.dart';
 import '../widgets/shared_calendar_message_card.dart';
 import '../widgets/missing_local_media.dart';
@@ -179,6 +184,8 @@ class ChatScreen extends StatefulWidget {
   final int peerAvatarColor;
   final String peerAvatarEmoji;
   final String? peerAvatarImagePath;
+  /// Локальный путь или https URL (например баннер бота из каталога relay).
+  final String? peerBannerImagePath;
   final DmForwardDraft? forwardDraft;
 
   const ChatScreen({
@@ -188,6 +195,7 @@ class ChatScreen extends StatefulWidget {
     required this.peerAvatarColor,
     this.peerAvatarEmoji = '',
     this.peerAvatarImagePath,
+    this.peerBannerImagePath,
     this.forwardDraft,
   });
 
@@ -235,6 +243,9 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _strangerBannerDismissed = false;
   bool _isContact = false;
   VoidCallback? _contactListener;
+  String? _headerAvatarPath;
+  String? _headerBannerPath;
+  VoidCallback? _relayBotDirectoryListener;
   List<String> _pinnedIdsChrono = [];
   final Set<String> _pinnedMsgIds = {};
   String? _pinBarHighlightId;
@@ -251,7 +262,9 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Только для GigaChat: на iOS/Android [ConnectivityResult.vpn] из connectivity_plus.
   bool _vpnProbablyActive = false;
 
-  bool get _isAiBot => widget.peerId == kAiBotPeerId;
+  bool get _isAiBot => isAiBotPeerId(widget.peerId);
+  bool get _isLibBot => widget.peerId == kLibBotPeerId;
+  bool get _isGigachatBot => widget.peerId == kGigachatBotPeerId;
 
   /// Диалог «Избранное» (peer_id = наш ключ): только локальная БД, без mesh/relay.
   bool get _savedMessagesLocalOnly {
@@ -287,7 +300,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_isAiBot) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('В чате с ИИ доступен только текст')),
+          SnackBar(
+            content: Text(_isLibBot
+                ? 'В чате с Lib доступен только текст'
+                : 'В чате с ИИ доступен только текст'),
+          ),
         );
       }
       return false;
@@ -445,10 +462,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }();
   }
 
-  // BLE ATT MTU ≈ 288 байт. Фиксированный overhead пакета ≈ 186 байт
-  // (id36 + t + ttl + ts + from64 + r8 + структура JSON).
-  // Оставляем 90 символов для текста — гарантированно уместится в MTU.
-  static const _kMaxMessageLength = 90;
   static final _publicKeyRegExp = RegExp(r'^[0-9a-fA-F]{64}$');
 
   bool _looksLikePublicKey(String id) => _publicKeyRegExp.hasMatch(id.trim());
@@ -461,7 +474,77 @@ class _ChatScreenState extends State<ChatScreen> {
     final key =
         _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : widget.peerId;
     final contact = await ChatStorageService.instance.getContact(key);
-    if (mounted) setState(() => _isContact = contact != null);
+    final relAvatar = _looksLikePublicKey(key)
+        ? RelayService.instance.relayBotAvatarUrl(key)
+        : null;
+    final relBanner = _looksLikePublicKey(key)
+        ? RelayService.instance.relayBotBannerUrl(key)
+        : null;
+    String? pickVisual(String? contactField, String? widgetField, String? relay) {
+      if (contactField != null && contactField.isNotEmpty) return contactField;
+      if (widgetField != null && widgetField.isNotEmpty) return widgetField;
+      if (relay != null && relay.isNotEmpty) return relay;
+      return contactField ?? widgetField ?? relay;
+    }
+
+    final av = pickVisual(
+        contact?.avatarImagePath, widget.peerAvatarImagePath, relAvatar);
+    final bn = pickVisual(
+        contact?.bannerImagePath, widget.peerBannerImagePath, relBanner);
+    if (!mounted) return;
+    setState(() {
+      _isContact = contact != null;
+      _headerAvatarPath = av;
+      _headerBannerPath = bn;
+    });
+  }
+
+  void _syncHeaderPathsFromWidgetAndRelay() {
+    final pk =
+        _looksLikePublicKey(_resolvedPeerId) ? _resolvedPeerId : null;
+    final wA = widget.peerAvatarImagePath;
+    final wB = widget.peerBannerImagePath;
+    _headerAvatarPath = (wA != null && wA.isNotEmpty)
+        ? wA
+        : (pk != null ? RelayService.instance.relayBotAvatarUrl(pk) : null);
+    _headerBannerPath = (wB != null && wB.isNotEmpty)
+        ? wB
+        : (pk != null ? RelayService.instance.relayBotBannerUrl(pk) : null);
+  }
+
+  bool _isDisplayableBannerPath(String? p) {
+    if (p == null || p.isEmpty) return false;
+    final r = ImageService.instance.resolveStoredPath(p) ?? p;
+    if (r.startsWith('http://') || r.startsWith('https://')) return true;
+    if (kIsWeb) return false;
+    return File(r).existsSync();
+  }
+
+  Widget _buildDmBannerStrip(BuildContext context, String path) {
+    final r = ImageService.instance.resolveStoredPath(path) ?? path;
+    Widget img;
+    if (r.startsWith('http://') || r.startsWith('https://')) {
+      img = Image.network(
+        r,
+        height: 72,
+        width: double.infinity,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+      );
+    } else {
+      final f = File(r);
+      if (!f.existsSync()) return const SizedBox.shrink();
+      img = Image.file(
+        f,
+        height: 72,
+        width: double.infinity,
+        fit: BoxFit.cover,
+      );
+    }
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      child: img,
+    );
   }
 
   Future<bool> _waitForPeerPublicKey(
@@ -499,8 +582,8 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _resolvedPeerId = widget.peerId == kAiBotPeerId
-        ? kAiBotPeerId
+    _resolvedPeerId = _isAiBot
+        ? widget.peerId
         : BleService.instance.resolvePublicKey(widget.peerId);
     // If chat was opened by short code, try resolving to full relay key.
     if (!_isAiBot && !_looksLikePublicKey(_resolvedPeerId)) {
@@ -510,6 +593,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _resolvedPeerId = byPrefix;
       }
     }
+    _syncHeaderPathsFromWidgetAndRelay();
     unawaited(_loadAndMarkRead());
     unawaited(_checkContactStatus());
     _pinsListener = () {
@@ -532,6 +616,14 @@ class _ChatScreenState extends State<ChatScreen> {
     // Следим за изменением списка контактов
     _contactListener = () => _checkContactStatus();
     ChatStorageService.instance.contactsNotifier.addListener(_contactListener!);
+    _relayBotDirectoryListener = () {
+      if (!mounted) return;
+      _syncHeaderPathsFromWidgetAndRelay();
+      setState(() {});
+      unawaited(_checkContactStatus());
+    };
+    RelayService.instance.botDirectoryVersion
+        .addListener(_relayBotDirectoryListener!);
     // Update message status + clear uploading indicator when background upload finishes
     MediaUploadQueue.instance.onTaskCompleted = (msgId) async {
       if (!mounted) return;
@@ -587,7 +679,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onPeersChanged() {
     if (!mounted) return;
-    if (widget.peerId == kAiBotPeerId) return;
+    if (_isAiBot) return;
     final resolved = BleService.instance.resolvePublicKey(widget.peerId);
     if (resolved != _resolvedPeerId && resolved != widget.peerId) {
       if (!mounted) return;
@@ -645,6 +737,10 @@ class _ChatScreenState extends State<ChatScreen> {
       ChatStorageService.instance.contactsNotifier
           .removeListener(_contactListener!);
     }
+    if (_relayBotDirectoryListener != null) {
+      RelayService.instance.botDirectoryVersion
+          .removeListener(_relayBotDirectoryListener!);
+    }
     MediaUploadQueue.instance.onTaskCompleted = null;
     _recordingTimer?.cancel();
     final vCam = _dmHoldVideoCam;
@@ -665,12 +761,50 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     _dmHoldVideoPausedNotifier.dispose();
     _recordingSecondsNotifier.dispose();
+    if (widget.peerId == kLibBotPeerId) {
+      LibBotService.instance.resetAwaitingState();
+    }
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
     scheduleMicrotask(() {
       unawaited(ChatStorageService.instance.markDmRead(peerForRead));
     });
+  }
+
+  Future<void> _startCall({required bool video}) async {
+    if (_isAiBot || _savedMessagesLocalOnly) return;
+    if (!_looksLikePublicKey(_resolvedPeerId)) {
+      final ok = await _waitForPeerPublicKey();
+      if (!ok) return;
+    }
+    try {
+      final session = await CallService.instance.startOutgoing(
+        peerId: _resolvedPeerId,
+        video: video,
+      );
+      if (!mounted) return;
+      await _openCallScreen(session);
+    } on StateError catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Звонок уже идет. Дождитесь завершения текущего.'),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _openCallScreen(CallSessionInfo session) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          session: session,
+          peerName: widget.peerNickname,
+        ),
+      ),
+    );
   }
 
   // ── Voice recording ───────────────────────────────────────────
@@ -1555,6 +1689,7 @@ class _ChatScreenState extends State<ChatScreen> {
           peerAvatarColor: c?.avatarColor ?? picked.avatarColor,
           peerAvatarEmoji: c?.avatarEmoji ?? picked.avatarEmoji,
           peerAvatarImagePath: c?.avatarImagePath ?? picked.avatarImagePath,
+          peerBannerImagePath: c?.bannerImagePath,
           forwardDraft: draft,
         ),
       ),
@@ -1621,6 +1756,9 @@ class _ChatScreenState extends State<ChatScreen> {
       await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
         msgId,
         MessageStatus.sent,
+      );
+      unawaited(
+        SoundEffectsService.instance.playAction(ActionSound.messageSent),
       );
     }
 
@@ -1781,18 +1919,32 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  static const List<(String, String)> _libQuickCommands = [
+    ('Справка', '/start'),
+    ('Помощь', '/help'),
+    ('Все команды', '/commands'),
+    ('Новый бот', '/newbot'),
+    ('Памятка', '/guide'),
+    ('Отмена', '/cancel'),
+  ];
+
+  void _onSlashCommandFromBubble(String command) {
+    if (_isSending || !mounted) return;
+    _controller.text = command;
+    setState(() {});
+    unawaited(_send());
+  }
+
+  Future<void> _sendPresetCommand(String command) async {
+    if (_isSending || !mounted) return;
+    _controller.text = command;
+    setState(() {});
+    await _send();
+  }
+
   Future<void> _send() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
-
-    final maxLen = _isAiBot ? 12000 : _kMaxMessageLength;
-    if (text.length > maxLen) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text('Сообщение слишком длинное (макс. $maxLen симв.)')),
-      );
-      return;
-    }
 
     // Проверяем что сервисы инициализированы
     final myId = CryptoService.instance.publicKeyHex;
@@ -1844,9 +1996,14 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
 
-      // 2) Normal mode: send message (encrypted if X25519 key known, else raw).
+      // 2) Normal mode: send message(s). Личные чаты: нарезка по 600 симв. на
+      // транспорт (см. OutboundDmText). ИИ — одним сообщением.
+      final parts = _isAiBot
+          ? <String>[text]
+          : OutboundDmText.splitChunks(text);
+      if (parts.isEmpty) return;
+
       _controller.clear();
-      msgId = _uuid.v4();
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
           ? _resolvedPeerId
           : widget.peerId;
@@ -1858,22 +2015,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _pendingLat = null;
         _pendingLng = null;
       });
-      final msg = ChatMessage(
-        id: msgId,
-        peerId: canonicalTargetPeerId,
-        text: text,
-        replyToMessageId: _replyToMessageId,
-        latitude: lat,
-        longitude: lng,
-        isOutgoing: true,
-        timestamp: DateTime.now(),
-        status: MessageStatus.sending,
-      );
-      await ChatStorageService.instance.saveMessage(msg);
-      await ChatStorageService.instance.loadMessages(canonicalTargetPeerId);
-      _scrollToBottom();
 
-      // Check X25519 key: BLE service first, then relay service
       var x25519Key =
           BleService.instance.getPeerX25519Key(canonicalTargetPeerId);
       if (x25519Key == null || x25519Key.isEmpty) {
@@ -1881,51 +2023,71 @@ class _ChatScreenState extends State<ChatScreen> {
             RelayService.instance.getPeerX25519Key(canonicalTargetPeerId);
       }
 
-      debugPrint('[RLINK][Chat] Sending to ${canonicalTargetPeerId.substring(0, 8)}, '
+      debugPrint(
+          '[RLINK][Chat] Sending ${parts.length} part(s) to '
+          '${canonicalTargetPeerId.substring(0, 8)}, '
           'x25519=${x25519Key != null && x25519Key.isNotEmpty ? "YES" : "NO"}, '
           'relay=${RelayService.instance.isConnected}, '
           'mode=${AppSettings.instance.connectionMode}');
 
-      if (!_savedMessagesLocalOnly && !_isAiBot) {
-        if (x25519Key != null && x25519Key.isNotEmpty) {
-          // Зашифрованная отправка — ChaCha20-Poly1305 + X25519 ECDH
-          final encrypted = await CryptoService.instance.encryptMessage(
-            plaintext: text,
-            recipientX25519KeyBase64: x25519Key,
-          );
-          await GossipRouter.instance.sendEncryptedMessage(
-            encrypted: encrypted,
-            senderId: myId,
-            recipientId: canonicalTargetPeerId,
-            messageId: msgId,
-            latitude: lat,
-            longitude: lng,
-            replyToMessageId: _replyToMessageId,
-          );
-          debugPrint('[RLINK][Chat] Sent ENCRYPTED msg $msgId');
+      for (var i = 0; i < parts.length; i++) {
+        final chunk = parts[i];
+        final isFirst = i == 0;
+        msgId = _uuid.v4();
+        final msg = ChatMessage(
+          id: msgId,
+          peerId: canonicalTargetPeerId,
+          text: chunk,
+          replyToMessageId: isFirst ? _replyToMessageId : null,
+          latitude: isFirst ? lat : null,
+          longitude: isFirst ? lng : null,
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: MessageStatus.sending,
+        );
+        await ChatStorageService.instance.saveMessage(msg);
+
+        if (!_savedMessagesLocalOnly && !_isAiBot) {
+          if (x25519Key != null && x25519Key.isNotEmpty) {
+            final encrypted = await CryptoService.instance.encryptMessage(
+              plaintext: chunk,
+              recipientX25519KeyBase64: x25519Key,
+            );
+            await GossipRouter.instance.sendEncryptedMessage(
+              encrypted: encrypted,
+              senderId: myId,
+              recipientId: canonicalTargetPeerId,
+              messageId: msgId,
+              latitude: isFirst ? lat : null,
+              longitude: isFirst ? lng : null,
+              replyToMessageId: isFirst ? _replyToMessageId : null,
+            );
+            debugPrint('[RLINK][Chat] Sent ENCRYPTED msg $msgId');
+          } else {
+            await GossipRouter.instance.sendRawMessage(
+              text: chunk,
+              senderId: myId,
+              recipientId: canonicalTargetPeerId,
+              messageId: msgId,
+              replyToMessageId: isFirst ? _replyToMessageId : null,
+              latitude: isFirst ? lat : null,
+              longitude: isFirst ? lng : null,
+            );
+            debugPrint('[RLINK][Chat] Sent RAW msg $msgId');
+          }
         } else {
-          // Fallback — plaintext если X25519 ключ ещё не получен
-          await GossipRouter.instance.sendRawMessage(
-            text: text,
-            senderId: myId,
-            recipientId: canonicalTargetPeerId,
-            messageId: msgId,
-            replyToMessageId: _replyToMessageId,
-            latitude: lat,
-            longitude: lng,
-          );
-          debugPrint('[RLINK][Chat] Sent RAW msg $msgId');
+          debugPrint('[RLINK][Chat] Saved messages / ИИ — сеть не используется');
         }
-      } else {
-        debugPrint('[RLINK][Chat] Saved messages / ИИ — сеть не используется');
+
+        await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
+          msgId,
+          MessageStatus.sent,
+        );
       }
 
-      await ChatStorageService.instance.updateMessageStatusPreserveDelivered(
-        msgId,
-        MessageStatus.sent,
-      );
+      await ChatStorageService.instance.loadMessages(canonicalTargetPeerId);
+      _scrollToBottom();
 
-      // Clear reply composer after successful send.
       if (mounted) {
         setState(() {
           _replyToMessageId = null;
@@ -1933,8 +2095,10 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       }
 
-      if (_isAiBot) {
+      if (widget.peerId == kGigachatBotPeerId) {
         unawaited(_completeGigachatReply());
+      } else if (widget.peerId == kLibBotPeerId) {
+        unawaited(_completeLibReply(text));
       }
     } catch (e) {
       if (!mounted) return;
@@ -1961,14 +2125,14 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       final botMsg = ChatMessage(
         id: _uuid.v4(),
-        peerId: kAiBotPeerId,
+        peerId: kGigachatBotPeerId,
         text: reply,
         isOutgoing: false,
         timestamp: DateTime.now(),
         status: MessageStatus.delivered,
       );
       await ChatStorageService.instance.saveMessage(botMsg);
-      await ChatStorageService.instance.loadMessages(kAiBotPeerId);
+      await ChatStorageService.instance.loadMessages(kGigachatBotPeerId);
       if (mounted) _scrollToBottom();
     } on GigachatException catch (e) {
       if (mounted) {
@@ -1983,6 +2147,37 @@ class _ChatScreenState extends State<ChatScreen> {
             content: Text('GigaChat: $e'),
             backgroundColor: Colors.red,
           ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _aiThinking = false);
+    }
+  }
+
+  Future<void> _completeLibReply(String userText) async {
+    if (!mounted) return;
+    setState(() => _aiThinking = true);
+    try {
+      final lines = await LibBotService.instance.handleUserTurn(userText);
+      if (!mounted) return;
+      final now = DateTime.now();
+      for (final line in lines) {
+        final botMsg = ChatMessage(
+          id: _uuid.v4(),
+          peerId: kLibBotPeerId,
+          text: line,
+          isOutgoing: false,
+          timestamp: now,
+          status: MessageStatus.delivered,
+        );
+        await ChatStorageService.instance.saveMessage(botMsg);
+      }
+      await ChatStorageService.instance.loadMessages(kLibBotPeerId);
+      if (mounted) _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Lib: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -2008,8 +2203,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_isAiBot) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('В чате с ИИ доступен только обычный текст')),
+          SnackBar(
+            content: Text(_isLibBot
+                ? 'В чате с Lib доступен только обычный текст'
+                : 'В чате с ИИ доступен только обычный текст'),
+          ),
         );
       }
       return;
@@ -2306,7 +2504,9 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка отправки: $e'), backgroundColor: Colors.red),
+          SnackBar(
+              content: Text('Ошибка отправки: $e'),
+              backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -2356,7 +2556,8 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
+          SnackBar(
+              content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -3364,7 +3565,8 @@ class _ChatScreenState extends State<ChatScreen> {
           nickname: widget.peerNickname,
           avatarColor: widget.peerAvatarColor,
           avatarEmoji: widget.peerAvatarEmoji,
-          avatarImagePath: widget.peerAvatarImagePath,
+          avatarImagePath: _headerAvatarPath ?? widget.peerAvatarImagePath,
+          bannerImagePath: _headerBannerPath ?? widget.peerBannerImagePath,
         ),
       ),
     );
@@ -3406,7 +3608,8 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Сохранение на web пока не поддерживается')),
+          const SnackBar(
+              content: Text('Сохранение на web пока не поддерживается')),
         );
       }
     } catch (e) {
@@ -3429,7 +3632,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 : '?',
             color: widget.peerAvatarColor,
             emoji: widget.peerAvatarEmoji,
-            imagePath: widget.peerAvatarImagePath,
+            imagePath: _headerAvatarPath ?? widget.peerAvatarImagePath,
             size: 38,
             isOnline: !_isAiBot &&
                 (BleService.instance.isPeerConnected(_resolvedPeerId) ||
@@ -3443,7 +3646,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
             if (_isAiBot)
               Text(
-                'ИИ · GigaChat (Сбер)',
+                _isLibBot
+                    ? 'Регистратор ботов'
+                    : 'ИИ · GigaChat (Сбер)',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w500,
@@ -3495,6 +3700,18 @@ class _ChatScreenState extends State<ChatScreen> {
           ]),
         ]),
         actions: [
+          if (!_isAiBot && !_savedMessagesLocalOnly)
+            IconButton(
+              tooltip: 'Аудиозвонок',
+              onPressed: () => _startCall(video: false),
+              icon: const Icon(Icons.call_outlined),
+            ),
+          if (!_isAiBot && !_savedMessagesLocalOnly)
+            IconButton(
+              tooltip: 'Видеозвонок',
+              onPressed: () => _startCall(video: true),
+              icon: const Icon(Icons.videocam_outlined),
+            ),
           PopupMenuButton<String>(
             itemBuilder: (_) {
               final hasBg =
@@ -3503,6 +3720,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       null;
               return [
                 const PopupMenuItem(value: 'profile', child: Text('Профиль')),
+                if (!_isAiBot && !_savedMessagesLocalOnly)
+                  const PopupMenuItem(
+                    value: 'edit_contact',
+                    child: Text('Изменить контакт'),
+                  ),
                 if (!_isAiBot)
                   const PopupMenuItem(
                     value: 'peer_stickers',
@@ -3525,6 +3747,17 @@ class _ChatScreenState extends State<ChatScreen> {
               switch (v) {
                 case 'profile':
                   _openPeerProfile();
+                  break;
+                case 'edit_contact':
+                  final c = await ChatStorageService.instance
+                      .getContact(_resolvedPeerId);
+                  if (c == null || !context.mounted) break;
+                  await Navigator.push<void>(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ContactEditScreen(contact: c),
+                    ),
+                  );
                   break;
                 case 'peer_stickers':
                   await Navigator.push<void>(
@@ -3600,7 +3833,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   const SizedBox(width: 10),
                   Text(
-                    'GigaChat формирует ответ…',
+                    _isLibBot ? 'Lib отвечает…' : 'GigaChat формирует ответ…',
                     style: TextStyle(
                       fontSize: 12,
                       color: Theme.of(context).colorScheme.onSecondaryContainer,
@@ -3608,7 +3841,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ]),
               ),
-            if (_isAiBot && _vpnProbablyActive)
+            if (_isGigachatBot && _vpnProbablyActive)
               Material(
                 color: Theme.of(context).colorScheme.tertiaryContainer,
                 child: Padding(
@@ -3751,6 +3984,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           x25519Key:
                               CryptoService.instance.x25519PublicKeyBase64,
                           tags: myProfile.tags,
+                          statusEmoji: myProfile.statusEmoji,
                         );
                       } else {
                         // Key not yet resolved — broadcast so the peer learns who we are
@@ -3794,6 +4028,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ]),
               ),
+            if (_isDisplayableBannerPath(_headerBannerPath))
+              _buildDmBannerStrip(context, _headerBannerPath!),
             Expanded(
               child: Stack(
                 fit: StackFit.expand,
@@ -3890,6 +4126,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                                 _onRequestMissingDmMedia,
                                             playbackThread: messages,
                                             playbackIndex: i,
+                                            highlightSlashCommands: _isAiBot,
+                                            onSlashCommandTap: _isAiBot
+                                                ? _onSlashCommandFromBubble
+                                                : null,
                                           ),
                                         ),
                                       ),
@@ -3987,14 +4227,42 @@ class _ChatScreenState extends State<ChatScreen> {
                   ]),
                 ),
               ),
+            if (widget.peerId == kLibBotPeerId &&
+                _editingMessageId == null &&
+                !_savedMessagesLocalOnly)
+              Padding(
+                padding:
+                    const EdgeInsets.fromLTRB(10, 4, 10, 2),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: [
+                      for (final e in _libQuickCommands)
+                        ActionChip(
+                          label: Text(e.$1),
+                          visualDensity: VisualDensity.compact,
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          onPressed: _isSending
+                              ? null
+                              : () => unawaited(_sendPresetCommand(e.$2)),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
             _InputBar(
               controller: _controller,
               isSending: _isSending,
               isRecording: _isRecording,
               isHoldVideoStarting: _dmHoldVideoStarting,
               recordingSecondsNotifier: _recordingSecondsNotifier,
-              maxLength: _isAiBot ? 12000 : _kMaxMessageLength,
-              hintText: _isAiBot ? 'Сообщение для GigaChat…' : null,
+              hintText: _isAiBot
+                  ? (widget.peerId == kLibBotPeerId
+                      ? 'Команда для Lib…'
+                      : 'Сообщение для GigaChat…')
+                  : null,
               aiTextOnlyComposer: _isAiBot,
               locationActive: _pendingLat != null,
               onSend: _send,
@@ -4236,7 +4504,8 @@ class _DmInviteBubbleActions extends StatelessWidget {
       );
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Связка уже активна на этом устройстве')),
+          const SnackBar(
+              content: Text('Связка уже активна на этом устройстве')),
         );
       }
       return;
@@ -4268,7 +4537,8 @@ class _DmInviteBubbleActions extends StatelessWidget {
     };
     final inviteId = data['inviteMessageId'] as String?;
     if (inviteId != null && inviteId.isNotEmpty) {
-      final existing = await ChatStorageService.instance.getMessageById(inviteId);
+      final existing =
+          await ChatStorageService.instance.getMessageById(inviteId);
       if (existing != null) {
         await ChatStorageService.instance.saveMessage(
           existing.copyWith(invitePayloadJson: jsonEncode(enriched)),
@@ -4492,6 +4762,8 @@ class _MessageBubble extends StatelessWidget {
   final void Function(ChatMessage msg)? onRequestMissingMedia;
   final List<ChatMessage>? playbackThread;
   final int? playbackIndex;
+  final bool highlightSlashCommands;
+  final void Function(String command)? onSlashCommandTap;
 
   const _MessageBubble({
     required this.msg,
@@ -4502,6 +4774,8 @@ class _MessageBubble extends StatelessWidget {
     this.onRequestMissingMedia,
     this.playbackThread,
     this.playbackIndex,
+    this.highlightSlashCommands = false,
+    this.onSlashCommandTap,
   });
 
   @override
@@ -4800,6 +5074,9 @@ class _MessageBubble extends StatelessWidget {
                         ProfileService.instance.profile,
                       ),
                       onMentionTap: (hex) => openDmFromMentionKey(context, hex),
+                      onSlashCommandTap: highlightSlashCommands
+                          ? onSlashCommandTap
+                          : null,
                     );
                   },
                 ),
@@ -5021,7 +5298,6 @@ class _InputBar extends StatefulWidget {
   final bool isRecording;
   final bool isHoldVideoStarting;
   final ValueNotifier<double> recordingSecondsNotifier;
-  final int maxLength;
   final String? hintText;
 
   /// Чат с ИИ: только текст (без медиа и вложений).
@@ -5049,7 +5325,6 @@ class _InputBar extends StatefulWidget {
     required this.isRecording,
     required this.isHoldVideoStarting,
     required this.recordingSecondsNotifier,
-    required this.maxLength,
     this.hintText,
     this.aiTextOnlyComposer = false,
     required this.locationActive,
@@ -5075,7 +5350,6 @@ class _InputBar extends StatefulWidget {
 }
 
 class _InputBarState extends State<_InputBar> {
-  int _length = 0;
   final _focusNode = FocusNode();
 
   /// Панель B/I/S… не перекрывает поле — открывается кнопкой при выделении.
@@ -5092,7 +5366,6 @@ class _InputBarState extends State<_InputBar> {
     widget.controller.addListener(() {
       if (mounted) {
         setState(() {
-          _length = widget.controller.text.length;
           final sel = widget.controller.selection;
           if (!sel.isValid || sel.isCollapsed) {
             _showFormatStrip = false;
@@ -5125,8 +5398,6 @@ class _InputBarState extends State<_InputBar> {
 
   @override
   Widget build(BuildContext context) {
-    final near = _length > widget.maxLength * 0.8;
-    final over = _length > widget.maxLength;
     final hasText = widget.controller.text.trim().isNotEmpty;
 
     final cs = Theme.of(context).colorScheme;
@@ -5318,7 +5589,6 @@ class _InputBarState extends State<_InputBar> {
                         onSubmitted: sendOnEnter
                             ? (_) {
                                 if (!widget.isSending &&
-                                    !over &&
                                     !widget.isRecording) {
                                   widget.onSend();
                                 }
@@ -5335,16 +5605,6 @@ class _InputBarState extends State<_InputBar> {
                           border: InputBorder.none,
                           contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16, vertical: 10),
-                          suffix: near
-                              ? Text(
-                                  '${widget.maxLength - _length}',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color:
-                                        over ? Colors.red : cs.onSurfaceVariant,
-                                  ),
-                                )
-                              : null,
                         ),
                       );
                     },
@@ -5370,13 +5630,12 @@ class _InputBarState extends State<_InputBar> {
               ],
               if (hasText || widget.isSending)
                 GestureDetector(
-                  onTap: widget.isSending || over || widget.isRecording
+                  onTap: widget.isSending || widget.isRecording
                       ? null
                       : widget.onSend,
                   onLongPress: (widget.onLongPressSend == null ||
                           !hasText ||
                           widget.isSending ||
-                          over ||
                           widget.isRecording)
                       ? null
                       : widget.onLongPressSend,
@@ -5385,7 +5644,7 @@ class _InputBarState extends State<_InputBar> {
                     width: 44,
                     height: 44,
                     decoration: BoxDecoration(
-                      color: (widget.isSending || over || widget.isRecording)
+                      color: (widget.isSending || widget.isRecording)
                           ? cs.onSurface.withValues(alpha: 0.3)
                           : cs.primary,
                       shape: BoxShape.circle,
@@ -6001,6 +6260,7 @@ class _PeerProfileScreen extends StatefulWidget {
   final int avatarColor;
   final String avatarEmoji;
   final String? avatarImagePath;
+  final String? bannerImagePath;
 
   const _PeerProfileScreen({
     required this.peerId,
@@ -6008,6 +6268,7 @@ class _PeerProfileScreen extends StatefulWidget {
     required this.avatarColor,
     required this.avatarEmoji,
     this.avatarImagePath,
+    this.bannerImagePath,
   });
 
   @override
@@ -6118,6 +6379,10 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
         _tags = contact.tags;
       } else {
         _musicPath = null;
+        _avatarPath =
+            ImageService.instance.resolveStoredPath(widget.avatarImagePath);
+        _bannerPath =
+            ImageService.instance.resolveStoredPath(widget.bannerImagePath);
       }
       _images = msgs.where((m) => m.imagePath != null).toList();
       _voices = msgs.where((m) => m.voicePath != null).toList();
@@ -6127,6 +6392,30 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
   }
 
   bool _hasLink(String text) => RegExp(r'https?://\S+').hasMatch(text);
+
+  bool _peerProfileBannerVisible(String? p) {
+    if (p == null || p.isEmpty) return false;
+    if (p.startsWith('http://') || p.startsWith('https://')) return true;
+    if (kIsWeb) return false;
+    return File(p).existsSync();
+  }
+
+  Widget _peerProfileBannerBackground(int color) {
+    final p = _bannerPath;
+    if (!_peerProfileBannerVisible(p)) return _bannerFallback(color);
+    if (p!.startsWith('http://') || p.startsWith('https://')) {
+      return Image.network(
+        p,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => _bannerFallback(color),
+      );
+    }
+    return Image.file(
+      File(p),
+      fit: BoxFit.cover,
+      errorBuilder: (_, __, ___) => _bannerFallback(color),
+    );
+  }
 
   Future<void> _toggleProfileMusic() async {
     final path = _musicPath;
@@ -6231,9 +6520,7 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
           // ── Collapsible header with banner + avatar ──
           SliverAppBar(
             expandedHeight:
-                _bannerPath != null && File(_bannerPath!).existsSync()
-                    ? 200
-                    : 120,
+                _peerProfileBannerVisible(_bannerPath) ? 200 : 120,
             pinned: true,
             actions: [
               ValueListenableBuilder<Set<String>>(
@@ -6285,11 +6572,7 @@ class _PeerProfileScreenState extends State<_PeerProfileScreen> {
                     const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                 overflow: TextOverflow.ellipsis,
               ),
-              background: _bannerPath != null && File(_bannerPath!).existsSync()
-                  ? Image.file(File(_bannerPath!),
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => _bannerFallback(color))
-                  : _bannerFallback(color),
+              background: _peerProfileBannerBackground(color),
             ),
           ),
           SliverToBoxAdapter(

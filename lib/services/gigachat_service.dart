@@ -282,7 +282,7 @@ class GigachatService {
   Future<List<Map<String, dynamic>>> _historyFromDb({int maxMessages = 24}) async {
     final msgs =
         await ChatStorageService.instance.getRecentMessagesAscending(
-      kAiBotPeerId,
+      kGigachatBotPeerId,
       limit: maxMessages,
     );
     final usable = msgs.where((m) {

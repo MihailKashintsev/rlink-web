@@ -25,6 +25,7 @@ import 'services/app_settings.dart';
 import 'services/chat_inbox_service.dart';
 import 'services/channel_service.dart';
 import 'services/channel_backup_service.dart';
+import 'services/call_service.dart';
 import 'services/channel_directory_relay.dart';
 import 'services/ether_service.dart';
 import 'services/ble_service.dart';
@@ -61,22 +62,17 @@ import 'services/web_identity_portable.dart';
 import 'services/web_notification_bridge.dart';
 import 'app_route_observer.dart';
 import 'ui/screens/chat_list_screen.dart';
+import 'ui/screens/call_screen.dart';
 import 'ui/widgets/audio_queue_mini_player.dart';
 import 'ui/screens/onboarding_screen.dart';
-
-const _kBleChannel = MethodChannel('com.rendergames.rlink/ble');
-
-/// iOS Dynamic Island: активен режим «отправка крупного медиа» (не затирать BLE-состояние).
-bool _iosMediaLiveActivityActive = false;
-
-/// Последний обработанный connectionMode для Live Activity (не реагировать на другие настройки).
-int _iosLiveActivityLastConnectionMode = -1;
 
 final incomingMessageController = StreamController<IncomingMessage>.broadcast();
 final navigatorKey = GlobalKey<NavigatorState>();
 final PacketTransport packetTransport = DefaultPacketTransport();
 bool _relayChannelRepublishInFlight = false;
 int _lastRelayChannelRepublishAtMs = 0;
+bool _incomingCallOverlayBound = false;
+bool _incomingCallOverlayOpen = false;
 
 /// Broadcast my avatar to all peers (callable from anywhere).
 /// Сбрасывает Flutter-кэш картинок для конкретного файла, чтобы при перезаписи
@@ -98,9 +94,95 @@ Future<void> _restoreAdminPasswordFromSealedIfNeeded() async {
     final m = jsonDecode(plain) as Map<String, dynamic>;
     final h = m['hash'] as String?;
     final r = (m['rev'] as num?)?.toInt() ?? 0;
+    final bots = (m['bots'] as List?)?.cast<String>() ?? const <String>[];
     if (h == null) return;
     await AppSettings.instance.applyAdminPasswordSyncIfNewer(h, r, sealed);
+    await AppSettings.instance.setEnabledBotIds(bots);
   } catch (_) {}
+}
+
+Future<Uint8List?> _readProfileMediaBytes(String? rawPath) async {
+  if (rawPath == null || rawPath.isEmpty) return null;
+  final resolved = ImageService.instance.resolveStoredPath(rawPath) ?? rawPath;
+  if (resolved.startsWith('data:')) {
+    try {
+      final comma = resolved.indexOf(',');
+      if (comma <= 0) return null;
+      final b64 = resolved.substring(comma + 1).trim();
+      if (b64.isEmpty) return null;
+      return Uint8List.fromList(base64Decode(b64));
+    } catch (_) {
+      return null;
+    }
+  }
+  try {
+    if (File(resolved).existsSync()) {
+      return await File(resolved).readAsBytes();
+    }
+  } catch (_) {}
+  return null;
+}
+
+String _shortPeerId(String peerId) =>
+    peerId.length > 8 ? '${peerId.substring(0, 8)}…' : peerId;
+
+Future<String> _peerDisplayName(String peerId) async {
+  final contact = await ChatStorageService.instance.getContact(peerId);
+  final nick = contact?.nickname.trim();
+  if (nick != null && nick.isNotEmpty) return nick;
+  return _shortPeerId(peerId);
+}
+
+void _bindIncomingCallOverlay() {
+  if (_incomingCallOverlayBound) return;
+  _incomingCallOverlayBound = true;
+  CallService.instance.incomingCall.addListener(() {
+    final session = CallService.instance.incomingCall.value;
+    if (session == null || _incomingCallOverlayOpen) return;
+    final nav = navigatorKey.currentState;
+    if (nav == null) return;
+    _incomingCallOverlayOpen = true;
+    unawaited(_showIncomingCallOverlay(nav, session));
+  });
+}
+
+Future<void> _showIncomingCallOverlay(
+  NavigatorState nav,
+  CallSessionInfo session,
+) async {
+  try {
+    final peerName = await _peerDisplayName(session.peerId);
+    await nav.push(PageRouteBuilder(
+      opaque: false,
+      pageBuilder: (_, __, ___) => _IncomingCallOverlayScreen(
+        session: session,
+        peerName: peerName,
+      ),
+      transitionsBuilder: (_, anim, __, child) {
+        return SlideTransition(
+          position: Tween(begin: const Offset(0, 1), end: Offset.zero).animate(
+            CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+          ),
+          child: child,
+        );
+      },
+      transitionDuration: const Duration(milliseconds: 280),
+    ));
+  } finally {
+    _incomingCallOverlayOpen = false;
+  }
+}
+
+Future<void> _notifyIncomingDirectEvent({
+  required String peerId,
+  required String body,
+}) async {
+  final title = await _peerDisplayName(peerId);
+  await NotificationService.instance.showPersonalMessage(
+    peerId: peerId,
+    title: title,
+    body: body,
+  );
 }
 
 Future<void> broadcastMyAvatar() async {
@@ -876,7 +958,8 @@ Future<void> initServices() async {
           longitude: lng,
         ));
       },
-      onStory: (storyId, authorId, text, bgColor, textX, textY, textSize) {
+      onStory: (storyId, authorId, text, bgColor, textX, textY, textSize,
+          textColor, textBold, textItalic, textBgOpacity, overlays) {
         debugPrint(
             '[RLINK][Main] onStory: author=${authorId.substring(0, 16)} text=${text.substring(0, text.length.clamp(0, 20))}');
         StoryService.instance.addStory(StoryItem(
@@ -888,10 +971,32 @@ Future<void> initServices() async {
           textX: textX,
           textY: textY,
           textSize: textSize,
+          textColor: textColor,
+          textBold: textBold,
+          textItalic: textItalic,
+          textBgOpacity: textBgOpacity,
+          overlays: overlays
+              .map((e) => StoryOverlayItem.fromJson(e))
+              .where((e) => e.value.isNotEmpty)
+              .toList(),
         ));
+        final myKey = CryptoService.instance.publicKeyHex;
+        if (authorId == myKey) return;
+        unawaited(() async {
+          // Notify only for known contacts.
+          final contact =
+              await ChatStorageService.instance.getContact(authorId);
+          final title = contact?.nickname.trim();
+          if (title == null || title.isEmpty) return;
+          await NotificationService.instance.showPersonalMessage(
+            peerId: authorId,
+            title: title,
+            body: 'Выложил(а) историю',
+          );
+        }());
       },
-      onPairReq:
-          (bleId, publicKey, nick, username, color, emoji, x25519Key, tags) {
+      onPairReq: (bleId, publicKey, nick, username, color, emoji, x25519Key,
+          tags, statusEmojiPayload) {
         // Игнорируем pair-запросы от заблокированных.
         if (BlockService.instance.isBlocked(publicKey)) {
           debugPrint(
@@ -917,6 +1022,7 @@ Future<void> initServices() async {
           'emoji': emoji,
           'x25519Key': x25519Key,
           'tags': tags,
+          'statusEmoji': statusEmojiPayload ?? '',
         };
         BleService.instance.addPairRequest(bleId, info);
         // Бумшшшш! + открываем полноэкранный баннер
@@ -946,7 +1052,7 @@ Future<void> initServices() async {
         tryShowScreen(0);
       },
       onPairAcc: (bleId, publicKey, nick, username, color, emoji, x25519Key,
-          tags) async {
+          tags, statusEmojiPayload) async {
         debugPrint('[RLINK][Main] Pair accepted by $nick ($bleId)');
         BleService.instance.removePairRequest(bleId);
         // Register peer key — always register, even if bleId isn't recognized as direct.
@@ -986,7 +1092,9 @@ Future<void> initServices() async {
             tags: tags.isNotEmpty ? tags : (existing?.tags ?? const []),
             bannerImagePath: existing?.bannerImagePath,
             profileMusicPath: existing?.profileMusicPath,
-            statusEmoji: existing?.statusEmoji ?? '',
+            statusEmoji: statusEmojiPayload != null
+                ? UserProfile.normalizeStatusEmoji(statusEmojiPayload)
+                : (existing?.statusEmoji ?? ''),
           ));
           unawaited(_updateEtherNameFilter());
         } catch (_) {}
@@ -1546,6 +1654,8 @@ Future<void> initServices() async {
         }
       },
     );
+    CallService.instance.bindSignaling();
+    _bindIncomingCallOverlay();
 
     GossipRouter.instance.onDeviceLinkRequest = (_, publicKey, nick, username) {
       if (BlockService.instance.isBlocked(publicKey)) return;
@@ -1597,8 +1707,7 @@ Future<void> initServices() async {
           ChatMessage(
             id: const Uuid().v4(),
             peerId: publicKey,
-            text:
-                '$requesterTitle хочет привязать это устройство как дочернее',
+            text: '$requesterTitle хочет привязать это устройство как дочернее',
             invitePayloadJson: invitePayload,
             isOutgoing: false,
             timestamp: DateTime.now(),
@@ -1947,6 +2056,9 @@ Future<void> initServices() async {
       if (kind == null || targetId == null || emoji == null || from == null) {
         return;
       }
+      final myKey = CryptoService.instance.publicKeyHex;
+      if (from == myKey) return;
+      final reactorName = await _peerDisplayName(from);
       switch (kind) {
         case 'story':
           StoryService.instance.applyIncomingReaction(targetId, emoji, from);
@@ -1954,14 +2066,43 @@ Future<void> initServices() async {
         case 'channel_post':
           await ChannelService.instance
               .togglePostReaction(targetId, emoji, from);
+          final post = await ChannelService.instance.getPost(targetId);
+          final reacted =
+              (post?.reactions[emoji] ?? const <String>[]).contains(from);
+          if (reacted && post != null && post.authorId == myKey) {
+            await NotificationService.instance.showChannelPost(
+              channelId: post.channelId,
+              title: 'Реакция на ваш пост',
+              body: '$reactorName: $emoji',
+            );
+          }
           break;
         case 'channel_comment':
           await ChannelService.instance
               .toggleCommentReaction(targetId, emoji, from);
+          final comment = await ChannelService.instance.getComment(targetId);
+          final reacted =
+              (comment?.reactions[emoji] ?? const <String>[]).contains(from);
+          if (reacted && comment != null && comment.authorId == myKey) {
+            await NotificationService.instance.showPersonalMessage(
+              peerId: from,
+              title: reactorName,
+              body: 'Реакция на ваш комментарий: $emoji',
+            );
+          }
           break;
         case 'group_message':
-          await GroupService.instance
+          final updated = await GroupService.instance
               .toggleMessageReaction(targetId, emoji, from);
+          final reacted =
+              (updated?.reactions[emoji] ?? const <String>[]).contains(from);
+          if (reacted && updated != null && updated.senderId == myKey) {
+            await NotificationService.instance.showPersonalMessage(
+              peerId: from,
+              title: reactorName,
+              body: 'Реакция на ваше сообщение: $emoji',
+            );
+          }
           break;
       }
     };
@@ -1997,6 +2138,11 @@ Future<void> initServices() async {
             textX: story.textX,
             textY: story.textY,
             textSize: story.textSize,
+            textColor: story.textColor,
+            textBold: story.textBold,
+            textItalic: story.textItalic,
+            textBgOpacity: story.textBgOpacity,
+            overlays: story.overlays.map((e) => e.toJson()).toList(),
           );
           // Re-send image to the requester via relay
           if (story.imagePath != null && RelayService.instance.isConnected) {
@@ -2030,10 +2176,10 @@ Future<void> initServices() async {
           .applyAdminPasswordSyncIfNewer(hash, rev, sealed);
       debugPrint('[RLINK][Admin] Admin password updated from legacy admin_cfg');
     };
-    GossipRouter.instance.onAdminConfigSecure = (hash, rev, chans) async {
-      await AccountSyncService.applyFromGossip(hash, rev, chans);
+    GossipRouter.instance.onAdminConfigSecure = (hash, rev, chans, bots) async {
+      await AccountSyncService.applyFromGossip(hash, rev, chans, bots);
       debugPrint(
-          '[RLINK][Admin] Account sync from admin_cfg2 (rev=$rev, chans=${chans.length})');
+          '[RLINK][Admin] Account sync from admin_cfg2 (rev=$rev, chans=${chans.length}, bots=${bots.length})');
     };
     GossipRouter.instance.onPollVote = (payload) async {
       final kind = payload['k'] as String?;
@@ -2344,8 +2490,8 @@ Future<void> initServices() async {
           final p = ProfileService.instance.profile;
           unawaited(
             syncWebPushSubscription(
-              relayServerUrl:
-                  RelayService.instance.serverUrl ?? RelayService.defaultServerUrl,
+              relayServerUrl: RelayService.instance.serverUrl ??
+                  RelayService.defaultServerUrl,
               publicKey: CryptoService.instance.publicKeyHex,
               nick: p?.nickname ?? '',
             ),
@@ -2366,19 +2512,6 @@ Future<void> initServices() async {
 
     await applyConnectionTransport();
     unawaited(AppIconService.setVariant(AppSettings.instance.appIconVariant));
-
-    // Dynamic Island: только BLE-счётчик (режимы 0 и 2) или крупная отправка медиа.
-    if (RuntimePlatform.isIos) {
-      MediaUploadQueue.instance.onLiveActivityMediaProgress =
-          _onLiveActivityMediaProgress;
-      _iosLiveActivityLastConnectionMode = AppSettings.instance.connectionMode;
-      AppSettings.instance.addListener(_iosOnSettingsForLiveActivity);
-      if (AppSettings.instance.connectionMode != 1) {
-        unawaited(_startLiveActivity());
-      }
-      BleService.instance.peersCount
-          .addListener(_iosLiveActivityBleDataChanged);
-    }
 
     _bindGossipFallbackHandlersIfMissing();
 
@@ -2409,8 +2542,8 @@ void _bindGossipFallbackHandlersIfMissing() {
   }
 
   if (GossipRouter.instance.onPairRequest == null) {
-    GossipRouter.instance.onPairRequest =
-        (bleId, publicKey, nick, username, color, emoji, x25519Key, tags) {
+    GossipRouter.instance.onPairRequest = (bleId, publicKey, nick, username,
+        color, emoji, x25519Key, tags, statusEmojiPayload) {
       debugPrint('[RLINK][Fallback] Bind onPairReq from $nick');
       final info = <String, dynamic>{
         'sourceId': bleId,
@@ -2421,6 +2554,7 @@ void _bindGossipFallbackHandlersIfMissing() {
         'emoji': emoji,
         'x25519Key': x25519Key,
         'tags': tags,
+        'statusEmoji': statusEmojiPayload,
       };
       BleService.instance.addPairRequest(bleId, info);
       final ctx = navigatorKey.currentContext;
@@ -2433,20 +2567,22 @@ void _bindGossipFallbackHandlersIfMissing() {
   }
 
   if (GossipRouter.instance.onMessageReceived == null) {
-    GossipRouter.instance.onMessageReceived = (fromId, encrypted, messageId,
-        replyToMessageId,
-        {double? latitude,
-        double? longitude,
-        String? forwardFromId,
-        String? forwardFromNick,
-        String? forwardFromChannelId}) async {
-      debugPrint('[RLINK][Fallback] Bind onMessage from ${fromId.substring(0, fromId.length.clamp(0, 8))}');
+    GossipRouter.instance.onMessageReceived =
+        (fromId, encrypted, messageId, replyToMessageId,
+            {double? latitude,
+            double? longitude,
+            String? forwardFromId,
+            String? forwardFromNick,
+            String? forwardFromChannelId}) async {
+      debugPrint(
+          '[RLINK][Fallback] Bind onMessage from ${fromId.substring(0, fromId.length.clamp(0, 8))}');
       final String text;
       if (encrypted.ephemeralPublicKey.isEmpty) {
         if (encrypted.cipherText.isEmpty) return;
         text = encrypted.cipherText;
       } else {
-        final plaintext = await CryptoService.instance.decryptMessage(encrypted);
+        final plaintext =
+            await CryptoService.instance.decryptMessage(encrypted);
         if (plaintext == null || plaintext.isEmpty) return;
         text = plaintext;
       }
@@ -2528,13 +2664,11 @@ Future<void> _sendFullProfileToPeer(String peerKey) async {
   if (myProfile == null) return;
 
   // Send avatar blob
-  final imagePath =
-      ImageService.instance.resolveStoredPath(myProfile.avatarImagePath);
-  if (imagePath != null && File(imagePath).existsSync()) {
+  final avatarBytes = await _readProfileMediaBytes(myProfile.avatarImagePath);
+  if (avatarBytes != null && avatarBytes.isNotEmpty) {
     try {
       await Future.delayed(const Duration(milliseconds: 500));
-      final bytes = await File(imagePath).readAsBytes();
-      final compressed = ImageService.instance.compress(bytes);
+      final compressed = ImageService.instance.compress(avatarBytes);
       // Уникальный msgId на каждую отправку (обход дедупа приёмника).
       final ts = DateTime.now().millisecondsSinceEpoch;
       final msgId = 'avatar_${myProfile.publicKeyHex.substring(0, 16)}_$ts';
@@ -2554,13 +2688,11 @@ Future<void> _sendFullProfileToPeer(String peerKey) async {
   }
 
   // Send banner blob
-  final bannerPath =
-      ImageService.instance.resolveStoredPath(myProfile.bannerImagePath);
-  if (bannerPath != null && File(bannerPath).existsSync()) {
+  final bannerBytes = await _readProfileMediaBytes(myProfile.bannerImagePath);
+  if (bannerBytes != null && bannerBytes.isNotEmpty) {
     try {
       await Future.delayed(const Duration(milliseconds: 500));
-      final bytes = await File(bannerPath).readAsBytes();
-      final compressed = ImageService.instance.compress(bytes);
+      final compressed = ImageService.instance.compress(bannerBytes);
       // Уникальный msgId на каждую отправку, иначе дедуп на приёмнике
       // (wasAlreadyCompleted) молча отбрасывает все последующие обновления баннера.
       final ts = DateTime.now().millisecondsSinceEpoch;
@@ -2737,13 +2869,11 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
   try {
     // Wait for profile packets and BLE stack to settle after pair exchange.
     await Future.delayed(const Duration(milliseconds: 1500));
-    // Resolve potentially stale iOS sandbox path
-    final resolvedPath = ImageService.instance.resolveStoredPath(imagePath);
-    if (resolvedPath == null || !File(resolvedPath).existsSync()) {
-      debugPrint('[RLINK][Avatar] File not found: $imagePath → $resolvedPath');
+    final bytes = await _readProfileMediaBytes(imagePath);
+    if (bytes == null || bytes.isEmpty) {
+      debugPrint('[RLINK][Avatar] File/data not found: $imagePath');
       return;
     }
-    final bytes = await File(resolvedPath).readAsBytes();
 
     // Relay blob path — send to all contacts (instant delivery)
     if (RelayService.instance.isConnected) {
@@ -2807,9 +2937,8 @@ Future<void> _broadcastBanner(String myPublicKey, String bannerPath) async {
   try {
     // Небольшая пауза, чтобы не забивать канал если сразу после аватара.
     await Future.delayed(const Duration(milliseconds: 800));
-    final resolvedPath = ImageService.instance.resolveStoredPath(bannerPath);
-    if (resolvedPath == null || !File(resolvedPath).existsSync()) return;
-    final bytes = await File(resolvedPath).readAsBytes();
+    final bytes = await _readProfileMediaBytes(bannerPath);
+    if (bytes == null || bytes.isEmpty) return;
     // Relay path — instant delivery
     if (RelayService.instance.isConnected) {
       final compressed = ImageService.instance.compress(bytes);
@@ -2858,21 +2987,6 @@ Future<void> _broadcastBanner(String myPublicKey, String bannerPath) async {
   } catch (e) {
     debugPrint('[RLINK][Banner] Send failed: $e');
   }
-}
-
-// ── Dynamic Island / Live Activity ───────────────────────────────
-
-/// Converts best RSSI across all peers to signal level 0-3.
-int _bestSignalLevel() {
-  int bestRssi = -100;
-  for (final peerId in BleService.instance.connectedPeerIds) {
-    final rssi = BleService.instance.getRssi(peerId);
-    if (rssi != null && rssi > bestRssi) bestRssi = rssi;
-  }
-  if (bestRssi >= -55) return 3; // strong
-  if (bestRssi >= -75) return 2; // medium
-  if (bestRssi >= -90) return 1; // weak
-  return 0; // none
 }
 
 bool _isServiceMediaByMsgId(
@@ -3207,6 +3321,7 @@ void _onBlobReceived(
       unawaited(GossipRouter.instance
           .sendAck(messageId: msgId, senderId: myKey, recipientId: fromId));
     }
+    await _notifyIncomingDirectEvent(peerId: fromId, body: '🎤 Голосовое');
     debugPrint('[RLINK][Blob] Voice saved: $path');
   } else if (isFile) {
     final origName = fileName ?? ImageService.instance.assemblyFileName(msgId);
@@ -3262,6 +3377,7 @@ void _onBlobReceived(
       unawaited(GossipRouter.instance
           .sendAck(messageId: msgId, senderId: myKey, recipientId: fromId));
     }
+    await _notifyIncomingDirectEvent(peerId: fromId, body: fileLabel);
     debugPrint('[RLINK][Blob] File saved: $path ($origName)');
   } else if (isVideo) {
     final path = await ImageService.instance
@@ -3308,6 +3424,7 @@ void _onBlobReceived(
       unawaited(GossipRouter.instance
           .sendAck(messageId: msgId, senderId: myKey, recipientId: fromId));
     }
+    await _notifyIncomingDirectEvent(peerId: fromId, body: label);
     debugPrint('[RLINK][Blob] Video saved: $path (square=$isSquare)');
   } else {
     // Image
@@ -3364,101 +3481,127 @@ void _onBlobReceived(
       unawaited(GossipRouter.instance
           .sendAck(messageId: msgId, senderId: myKey, recipientId: fromId));
     }
+    await _notifyIncomingDirectEvent(peerId: fromId, body: '📷 Фото');
     debugPrint('[RLINK][Blob] Image saved: $path');
   }
-}
-
-Future<void> _startLiveActivity() async {
-  if (!RuntimePlatform.isIos) return;
-  if (AppSettings.instance.connectionMode == 1) return;
-  try {
-    await _kBleChannel.invokeMethod('startLiveActivity', {
-      'peers': BleService.instance.peersCount.value,
-      'sender': '',
-      'message': '',
-      'signal': _bestSignalLevel(),
-      'uiMode': 0,
-      'mediaProgress': 0.0,
-      'mediaLabel': '',
-    });
-    debugPrint('[RLINK][LiveActivity] Started');
-  } catch (e) {
-    debugPrint('[RLINK][LiveActivity] Start failed: $e');
-  }
-}
-
-void _iosLiveActivityBleDataChanged() {
-  if (!RuntimePlatform.isIos) return;
-  if (_iosMediaLiveActivityActive) return;
-  if (AppSettings.instance.connectionMode == 1) return;
-  _updateLiveActivity();
-}
-
-void _iosOnSettingsForLiveActivity() {
-  if (!RuntimePlatform.isIos) return;
-  if (_iosMediaLiveActivityActive) return;
-  final mode = AppSettings.instance.connectionMode;
-  if (mode == _iosLiveActivityLastConnectionMode) return;
-  _iosLiveActivityLastConnectionMode = mode;
-  if (mode == 1) {
-    try {
-      _kBleChannel.invokeMethod('stopLiveActivity');
-    } catch (_) {}
-  } else {
-    unawaited(_startLiveActivity());
-  }
-}
-
-void _onLiveActivityMediaProgress(String label, double progress) {
-  if (!RuntimePlatform.isIos) return;
-  try {
-    if (progress >= 1.0) {
-      _iosMediaLiveActivityActive = false;
-      if (AppSettings.instance.connectionMode == 1) {
-        _kBleChannel.invokeMethod('stopLiveActivity');
-      } else {
-        _updateLiveActivity();
-      }
-      return;
-    }
-    _iosMediaLiveActivityActive = true;
-    final p = progress.clamp(0.0, 1.0);
-    _kBleChannel.invokeMethod('updateLiveActivity', {
-      'uiMode': 1,
-      'mediaProgress': p,
-      'mediaLabel': label,
-      'peers': 0,
-      'sender': 'Отправка',
-      'message': '${(p * 100).round()}%',
-      'signal': 0,
-    });
-  } catch (e) {
-    debugPrint('[RLINK][LiveActivity] media progress: $e');
-  }
-}
-
-void _updateLiveActivity() {
-  if (!RuntimePlatform.isIos) return;
-  if (_iosMediaLiveActivityActive) return;
-  if (AppSettings.instance.connectionMode == 1) return;
-  final blePeers = BleService.instance.peersCount.value;
-  try {
-    _kBleChannel.invokeMethod('updateLiveActivity', {
-      'peers': blePeers,
-      'sender': '',
-      'message': '',
-      'signal': _bestSignalLevel(),
-      'uiMode': 0,
-      'mediaProgress': 0.0,
-      'mediaLabel': '',
-    });
-  } catch (_) {}
 }
 
 Future<void> _checkUpdate() async {
   await Future.delayed(const Duration(seconds: 5));
   final update = await UpdateService.instance.checkForUpdate();
   if (update != null) pendingUpdateNotifier.value = update;
+}
+
+class _IncomingCallOverlayScreen extends StatefulWidget {
+  final CallSessionInfo session;
+  final String peerName;
+
+  const _IncomingCallOverlayScreen({
+    required this.session,
+    required this.peerName,
+  });
+
+  @override
+  State<_IncomingCallOverlayScreen> createState() =>
+      _IncomingCallOverlayScreenState();
+}
+
+class _IncomingCallOverlayScreenState extends State<_IncomingCallOverlayScreen> {
+  bool _busy = false;
+
+  Future<void> _accept() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          session: widget.session,
+          peerName: widget.peerName,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _decline() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await CallService.instance.rejectIncoming(widget.session);
+    } catch (_) {}
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isVideo = widget.session.videoEnabled;
+    return Scaffold(
+      backgroundColor: Colors.black.withValues(alpha: 0.86),
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surface,
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.25),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    isVideo ? Icons.videocam_rounded : Icons.call_rounded,
+                    size: 44,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Входящий ${isVideo ? 'видеозвонок' : 'аудиозвонок'}',
+                    style: Theme.of(context).textTheme.titleLarge,
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    widget.peerName,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _busy ? null : _decline,
+                          icon: const Icon(Icons.call_end_rounded, color: Colors.red),
+                          label: const Text('Отклонить'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _busy ? null : _accept,
+                          icon: const Icon(Icons.call_rounded),
+                          label: const Text('Принять'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class RlinkApp extends StatefulWidget {
@@ -3478,7 +3621,7 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     AppSettings.instance.addListener(_onSettingsChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (RuntimePlatform.isDesktopWindows) {
+      if (RuntimePlatform.isDesktop) {
         await DesktopTrayService.instance.init();
       }
       await initServices();
@@ -3538,8 +3681,16 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
       debugPrint('[App] Notifying peers - back online');
       await applyConnectionTransport();
       unawaited(NotificationService.instance.clearApplicationIconBadge());
-      if (RuntimePlatform.isIos && AppSettings.instance.connectionMode != 1) {
-        unawaited(_startLiveActivity());
+      if (RuntimePlatform.isWeb && RelayService.instance.isConnected) {
+        final p = ProfileService.instance.profile;
+        unawaited(
+          syncWebPushSubscription(
+            relayServerUrl: RelayService.instance.serverUrl ??
+                RelayService.defaultServerUrl,
+            publicKey: CryptoService.instance.publicKeyHex,
+            nick: p?.nickname ?? '',
+          ),
+        );
       }
     } catch (e) {
       debugPrint('[App] Error restarting: $e');

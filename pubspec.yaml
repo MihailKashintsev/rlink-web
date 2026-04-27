@@ -110,6 +110,7 @@ dependencies:
 
   # WebSocket for relay server
   web_socket_channel: ^3.0.1
+  flutter_webrtc: ^1.2.0
 
   # Local notifications (personal/group/channel, even in background)
   flutter_local_notifications: ^21.0.0
@@ -124,6 +125,7 @@ dependencies:
   latlong2: ^0.9.1
   web: ^1.1.1
   image: ^4.8.0
+  google_maps_flutter: ^2.17.0
 
 dev_dependencies:
   flutter_test:

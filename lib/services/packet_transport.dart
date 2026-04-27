@@ -59,6 +59,7 @@ class DefaultPacketTransport implements PacketTransport {
           'pair_req',
           'pair_acc',
           'typing',
+          'call_sig',
           'ack',
           'edit',
           'delete',

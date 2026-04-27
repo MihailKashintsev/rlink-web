@@ -18,14 +18,16 @@ Future<void> publishAccountChannelSubscriptions() async {
     final rev = curRev + 1;
     final chans =
         await ChannelService.instance.subscribedChannelIdsForAccountSync(myId);
+    final bots = AppSettings.instance.enabledBotIds;
     final inner =
-        jsonEncode({'hash': hash, 'rev': rev, 'chans': chans});
+        jsonEncode({'hash': hash, 'rev': rev, 'chans': chans, 'bots': bots});
     final sealed = await CryptoService.instance.sealAdminPanelSync(inner);
     await AppSettings.instance.bumpAccountSyncRevisionOnly(rev, sealed);
     await GossipRouter.instance.sendAdminConfigSecure(
       adminPasswordHash: hash,
       revision: rev,
       channelIds: chans,
+      botIds: bots,
     );
     await RelayService.instance.putAccountSyncBlob(sealed);
   } catch (e) {

@@ -492,7 +492,12 @@ class ImageService {
   /// When [isSquare] is true, the video is first center-cropped to 1:1 via
   /// a native platform channel (AVFoundation on iOS, file copy + display crop
   /// on Android), then compressed.
-  Future<String> saveVideo(String sourcePath, {bool isSquare = false}) async {
+  Future<String> saveVideo(
+    String sourcePath, {
+    bool isSquare = false,
+    Duration? trimStart,
+    Duration? trimEnd,
+  }) async {
     final dir = await _videosDir();
     final suffix = isSquare ? '_sq' : '';
     final name = '${_uuid.v4()}$suffix.mp4';
@@ -525,12 +530,20 @@ class ImageService {
     try {
       infoBefore = await VideoCompress.getMediaInfo(inputForCompress);
     } catch (_) {}
+    final startSec = trimStart == null ? null : trimStart.inSeconds;
+    final endSec = trimEnd == null ? null : trimEnd.inSeconds;
+    final trimDurationSec =
+        (startSec != null && endSec != null && endSec > startSec)
+            ? (endSec - startSec)
+            : null;
     try {
       final mediaInfo = await VideoCompress.compressVideo(
         inputForCompress,
         quality: VideoQuality.MediumQuality,
         includeAudio: true,
         deleteOrigin: false,
+        startTime: startSec,
+        duration: trimDurationSec,
       );
       if (mediaInfo?.path != null) {
         final origKB = (await File(sourcePath).length()) ~/ 1024;

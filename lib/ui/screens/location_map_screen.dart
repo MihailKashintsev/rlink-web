@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -188,6 +189,7 @@ class _LocationMapScreenState extends State<LocationMapScreen> {
 
   final _mapController = MapController();
   final _searchController = TextEditingController();
+  gmaps.GoogleMapController? _googleController;
   final _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 8),
@@ -204,6 +206,9 @@ class _LocationMapScreenState extends State<LocationMapScreen> {
   bool _resolvingAddress = false;
   int _addressRequestToken = 0;
   String? _addressText;
+  bool _google3dEnabled = true;
+
+  bool get _canUseGoogleInApp => Platform.isAndroid || Platform.isIOS;
 
   @override
   void initState() {
@@ -220,6 +225,7 @@ class _LocationMapScreenState extends State<LocationMapScreen> {
 
   @override
   void dispose() {
+    _googleController?.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -242,6 +248,21 @@ class _LocationMapScreenState extends State<LocationMapScreen> {
       try {
         _mapController.move(point, zoom);
       } catch (_) {}
+      final gc = _googleController;
+      if (gc != null && _canUseGoogleInApp) {
+        unawaited(
+          gc.animateCamera(
+            gmaps.CameraUpdate.newCameraPosition(
+              gmaps.CameraPosition(
+                target: gmaps.LatLng(point.latitude, point.longitude),
+                zoom: zoom,
+                tilt: _google3dEnabled ? 55 : 0,
+                bearing: _google3dEnabled ? 15 : 0,
+              ),
+            ),
+          ),
+        );
+      }
     }
     unawaited(_resolveAddress(point));
   }
@@ -366,6 +387,105 @@ class _LocationMapScreenState extends State<LocationMapScreen> {
     }
   }
 
+  Widget _buildMapView(ColorScheme cs) {
+    if (!_canUseGoogleInApp) {
+      return _buildOsmMap(cs);
+    }
+    return Stack(
+      children: [
+        gmaps.GoogleMap(
+          mapToolbarEnabled: false,
+          myLocationButtonEnabled: false,
+          buildingsEnabled: true,
+          indoorViewEnabled: false,
+          compassEnabled: true,
+          zoomControlsEnabled: false,
+          mapType:
+              _google3dEnabled ? gmaps.MapType.hybrid : gmaps.MapType.normal,
+          initialCameraPosition: gmaps.CameraPosition(
+            target: gmaps.LatLng(
+              _selectedPoint.latitude,
+              _selectedPoint.longitude,
+            ),
+            zoom: 14,
+            tilt: _google3dEnabled ? 55 : 0,
+            bearing: _google3dEnabled ? 15 : 0,
+          ),
+          onMapCreated: (controller) => _googleController = controller,
+          onTap: widget.allowPicking
+              ? (point) => _setSelectedPoint(
+                    LatLng(point.latitude, point.longitude),
+                  )
+              : null,
+          markers: {
+            gmaps.Marker(
+              markerId: const gmaps.MarkerId('selected'),
+              position: gmaps.LatLng(
+                _selectedPoint.latitude,
+                _selectedPoint.longitude,
+              ),
+            ),
+          },
+        ),
+        Positioned(
+          top: 10,
+          right: 12,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: IconButton(
+              tooltip: _google3dEnabled ? '2D режим' : '3D режим',
+              onPressed: () {
+                setState(() => _google3dEnabled = !_google3dEnabled);
+                _setSelectedPoint(_selectedPoint, moveMap: true, zoom: 14);
+              },
+              icon: Icon(
+                _google3dEnabled
+                    ? Icons.threed_rotation_rounded
+                    : Icons.map_rounded,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOsmMap(ColorScheme cs) {
+    return FlutterMap(
+      mapController: _mapController,
+      options: MapOptions(
+        initialCenter: _selectedPoint,
+        initialZoom: 14,
+        onTap:
+            widget.allowPicking ? (_, point) => _setSelectedPoint(point) : null,
+      ),
+      children: [
+        TileLayer(
+          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          userAgentPackageName: 'com.rlink.app',
+        ),
+        MarkerLayer(
+          markers: [
+            Marker(
+              point: _selectedPoint,
+              width: 56,
+              height: 56,
+              child: Icon(
+                Icons.location_on_rounded,
+                size: 44,
+                color: cs.primary,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -425,37 +545,7 @@ class _LocationMapScreenState extends State<LocationMapScreen> {
             Expanded(
               child: Stack(
                 children: [
-                  FlutterMap(
-                    mapController: _mapController,
-                    options: MapOptions(
-                      initialCenter: _selectedPoint,
-                      initialZoom: 14,
-                      onTap: widget.allowPicking
-                          ? (_, point) => _setSelectedPoint(point)
-                          : null,
-                    ),
-                    children: [
-                      TileLayer(
-                        urlTemplate:
-                            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                        userAgentPackageName: 'com.rlink.app',
-                      ),
-                      MarkerLayer(
-                        markers: [
-                          Marker(
-                            point: _selectedPoint,
-                            width: 56,
-                            height: 56,
-                            child: Icon(
-                              Icons.location_on_rounded,
-                              size: 44,
-                              color: cs.primary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+                  _buildMapView(cs),
                   if (widget.allowPicking)
                     Positioned(
                       top: 10,

@@ -14,6 +14,7 @@ class AccountSyncService {
     String hash,
     int rev,
     List<String> channelIds,
+    List<String> botIds,
   ) async {
     if (hash.length != 64 ||
         !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hash)) {
@@ -21,10 +22,15 @@ class AccountSyncService {
     }
     final cur = AppSettings.instance.adminPasswordSyncRev;
     if (rev <= cur) return;
-    final inner =
-        jsonEncode({'hash': hash, 'rev': rev, 'chans': channelIds});
+    final inner = jsonEncode({
+      'hash': hash,
+      'rev': rev,
+      'chans': channelIds,
+      'bots': botIds,
+    });
     final sealed = await CryptoService.instance.sealAdminPanelSync(inner);
     await AppSettings.instance.applyAdminPasswordSyncIfNewer(hash, rev, sealed);
+    await AppSettings.instance.setEnabledBotIds(botIds);
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isNotEmpty && channelIds.isNotEmpty) {
       await ChannelService.instance.mergeSubscriptionsFromSync(myId, channelIds);
@@ -45,6 +51,7 @@ class AccountSyncService {
     final rev = (map['rev'] as num?)?.toInt() ?? 0;
     final chans =
         (map['chans'] as List?)?.cast<String>() ?? const <String>[];
+    final bots = (map['bots'] as List?)?.cast<String>() ?? const <String>[];
     if (hash == null ||
         hash.length != 64 ||
         !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hash)) {
@@ -54,6 +61,7 @@ class AccountSyncService {
     if (rev <= curRev) return;
 
     await AppSettings.instance.applyAdminPasswordSyncIfNewer(hash, rev, sealed);
+    await AppSettings.instance.setEnabledBotIds(bots);
 
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isNotEmpty && chans.isNotEmpty) {

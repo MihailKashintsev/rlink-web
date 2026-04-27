@@ -32,6 +32,7 @@ import '../../services/chat_storage_service.dart';
 import '../../services/image_service.dart';
 import '../../services/sticker_collection_service.dart';
 import '../../services/invite_dm_service.dart';
+import '../../services/outbound_dm_text.dart';
 import '../../services/voice_service.dart';
 import '../../services/embedded_video_pause_bus.dart';
 import '../widgets/animated_transitions.dart';
@@ -697,13 +698,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
     if (text.isEmpty) return;
     _postCtrl.clear();
 
-    const chunkLen = 600;
-    final parts = <String>[];
-    final t = text.trim();
-    for (var i = 0; i < t.length; i += chunkLen) {
-      final end = (i + chunkLen) > t.length ? t.length : i + chunkLen;
-      parts.add(t.substring(i, end));
-    }
+    final parts = OutboundDmText.splitChunks(text);
 
     final staffLabel = _channel.staffLabelForNewPost(_myId);
     for (final partText in parts) {
@@ -2324,10 +2319,8 @@ class _ChannelInputBar extends StatefulWidget {
 
 class _ChannelInputBarState extends State<_ChannelInputBar> {
   bool _hasText = false;
-  int _length = 0;
   bool _showFormatStrip = false;
   final _focusNode = FocusNode();
-  static const _kMaxPostLen = 12000;
 
   void _onAppSettingsChanged() {
     if (mounted) setState(() {});
@@ -2354,7 +2347,6 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
     if (mounted) {
       setState(() {
         _hasText = has;
-        _length = widget.controller.text.length;
         if (!sel.isValid || sel.isCollapsed) {
           _showFormatStrip = false;
         }
@@ -2482,8 +2474,6 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
     final cs = Theme.of(context).colorScheme;
     final sel = widget.controller.selection;
     final hasSelection = sel.isValid && sel.baseOffset != sel.extentOffset;
-    final near = _length > _kMaxPostLen * 0.8;
-    final over = _length > _kMaxPostLen;
 
     return SafeArea(
       child: Container(
@@ -2667,7 +2657,6 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                             ? (_) {
                                 if (!widget.isSending &&
                                     !widget.isRecording &&
-                                    !over &&
                                     _hasText) {
                                   widget.onSend();
                                 }
@@ -2684,16 +2673,6 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                           border: InputBorder.none,
                           contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16, vertical: 10),
-                          suffix: near
-                              ? Text(
-                                  '${_kMaxPostLen - _length}',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color:
-                                        over ? Colors.red : cs.onSurfaceVariant,
-                                  ),
-                                )
-                              : null,
                         ),
                       );
                     },
@@ -2740,7 +2719,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
               const SizedBox(width: 8),
               if (_hasText || widget.isSending)
                 GestureDetector(
-                  onTap: widget.isSending || widget.isRecording || over
+                  onTap: widget.isSending || widget.isRecording
                       ? null
                       : widget.onSend,
                   child: AnimatedContainer(
