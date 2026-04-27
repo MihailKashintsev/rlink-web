@@ -2338,6 +2338,9 @@ Future<void> initServices() async {
     RelayService.instance.state.addListener(() {
       if (RelayService.instance.isConnected) {
         Future.delayed(const Duration(seconds: 2), _sendProfileToOnlinePeers);
+        // Web: after reconnect/import, force a full profile push to contacts so
+        // both sides refresh nick/username/avatar state symmetrically.
+        Future.delayed(const Duration(seconds: 3), sendProfileToAllContacts);
         Future.delayed(
             const Duration(milliseconds: 2400), _republishOwnChannelsToRelay);
         Future.delayed(const Duration(seconds: 3), flushOutbox);

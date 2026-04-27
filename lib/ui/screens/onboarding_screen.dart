@@ -7,8 +7,11 @@ import 'package:image_picker/image_picker.dart';
 import '../../models/user_profile.dart';
 import '../../services/app_settings.dart';
 import '../../services/ble_service.dart';
+import '../../services/channel_service.dart';
+import '../../services/chat_storage_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/gossip_router.dart';
+import '../../services/group_service.dart';
 import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
@@ -98,6 +101,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
     setState(() => _loading = true);
     try {
+      await _ensureCoreDatabasesInitialized();
       await ProfileService.instance.createProfile(
         publicKeyHex: CryptoService.instance.publicKeyHex,
         nickname: nick,
@@ -150,6 +154,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       }
       await CryptoService.instance.init();
       await ProfileService.instance.init();
+      await _ensureCoreDatabasesInitialized();
       final profile = ProfileService.instance.profile;
       if (profile == null) {
         _showSnack('Ключ импортирован, но профиль не восстановлен', isError: true);
@@ -164,6 +169,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     } finally {
       if (mounted) setState(() => _importBusy = false);
     }
+  }
+
+  Future<void> _ensureCoreDatabasesInitialized() async {
+    await ChatStorageService.instance.init();
+    await ChannelService.instance.init();
+    await GroupService.instance.init();
   }
 
   /// Restart BLE + relay after profile creation so both transports use the

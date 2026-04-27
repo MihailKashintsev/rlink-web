@@ -2173,19 +2173,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _openMediaGallery() async {
     if (_isSending) return;
-    if (kIsWeb) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Web-версия: загрузка медиа через этот экран пока недоступна'),
-          ),
-        );
-      }
-      return;
-    }
     if (!await _ensureReadyForMediaSend()) return;
     if (!mounted) return;
     final myId = CryptoService.instance.publicKeyHex;
+    if (kIsWeb) {
+      await _openWebMediaPicker(myId);
+      return;
+    }
     await showMediaGallerySendSheet(
       context,
       onPhotoPath: (path) => _handlePickedChatImage(XFile(path)),
@@ -2195,6 +2189,180 @@ class _ChatScreenState extends State<ChatScreen> {
       onStickerFromLibrary: _sendStickerFromLibraryPath,
       onFilePath: _sendFileFromMediaGalleryPath,
     );
+  }
+
+  Future<void> _openWebMediaPicker(String myId) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Фото'),
+              onTap: () => Navigator.pop(ctx, 'photo'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.video_library_outlined),
+              title: const Text('Видео'),
+              onTap: () => Navigator.pop(ctx, 'video'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.attach_file_outlined),
+              title: const Text('Файл'),
+              onTap: () => Navigator.pop(ctx, 'file'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+
+    if (choice == 'photo') {
+      final r = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: false,
+        withData: true,
+      );
+      final f = r?.files.firstOrNull;
+      if (f?.bytes == null || !mounted) return;
+      await _sendWebBytesAsFile(
+        bytes: f!.bytes!,
+        fileName: f.name.isNotEmpty ? f.name : 'photo.jpg',
+        myId: myId,
+        textFallback: '📷 Фото',
+      );
+      return;
+    }
+    if (choice == 'video') {
+      final r = await FilePicker.platform.pickFiles(
+        type: FileType.video,
+        allowMultiple: false,
+        withData: true,
+      );
+      final f = r?.files.firstOrNull;
+      if (f?.bytes == null || !mounted) return;
+      await _sendWebVideoBytes(
+        bytes: f!.bytes!,
+        fileName: f.name.isNotEmpty ? f.name : 'video.mp4',
+        myId: myId,
+      );
+      return;
+    }
+    final r = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      allowMultiple: false,
+      withData: true,
+    );
+    final f = r?.files.firstOrNull;
+    if (f?.bytes == null || !mounted) return;
+    await _sendWebBytesAsFile(
+      bytes: f!.bytes!,
+      fileName: f.name.isNotEmpty ? f.name : 'file.bin',
+      myId: myId,
+      textFallback: '📎 ${f.name.isNotEmpty ? f.name : 'Файл'}',
+    );
+  }
+
+  Future<void> _sendWebBytesAsFile({
+    required Uint8List bytes,
+    required String fileName,
+    required String myId,
+    required String textFallback,
+  }) async {
+    setState(() => _isSending = true);
+    _sendActivity(Activity.sendingFile);
+    try {
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+      var wasQueued = false;
+      if (!_savedMessagesLocalOnly) {
+        wasQueued = await _sendMedia(
+          bytes: bytes,
+          msgId: msgId,
+          myId: myId,
+          isFile: true,
+          fileName: fileName,
+          filePath: null,
+        );
+      }
+      await _saveAndTrack(
+        ChatMessage(
+          id: msgId,
+          peerId: targetPeerId,
+          text: textFallback,
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          fileName: fileName,
+          fileSize: bytes.length,
+        ),
+        wasQueued: wasQueued,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка отправки: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      _sendActivity(Activity.stopped);
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _sendWebVideoBytes({
+    required Uint8List bytes,
+    required String fileName,
+    required String myId,
+  }) async {
+    setState(() => _isSending = true);
+    _sendActivity(Activity.sendingFile);
+    try {
+      final msgId = _uuid.v4();
+      final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
+          ? _resolvedPeerId
+          : widget.peerId;
+      var wasQueued = false;
+      if (!_savedMessagesLocalOnly) {
+        wasQueued = await _sendMedia(
+          bytes: bytes,
+          msgId: msgId,
+          myId: myId,
+          isVideo: true,
+          isSquare: false,
+          fileName: fileName,
+          filePath: null,
+        );
+      }
+      await _saveAndTrack(
+        ChatMessage(
+          id: msgId,
+          peerId: targetPeerId,
+          text: '📹 Видео',
+          isOutgoing: true,
+          timestamp: DateTime.now(),
+          status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
+          fileName: fileName,
+          fileSize: bytes.length,
+        ),
+        wasQueued: wasQueued,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка видео: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      _sendActivity(Activity.stopped);
+      if (mounted) setState(() => _isSending = false);
+    }
   }
 
   Future<void> _sendFileFromMediaGalleryPath(String srcPath) async {
@@ -2681,12 +2849,26 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
+    if (kIsWeb) {
+      final picked = await FilePicker.platform.pickFiles(
+        type: FileType.video,
+        allowMultiple: false,
+        withData: true,
+      );
+      final f = picked?.files.firstOrNull;
+      if (f?.bytes == null || !mounted) return;
+      await _sendWebVideoBytes(
+        bytes: f!.bytes!,
+        fileName: f.name.isNotEmpty ? f.name : 'video.mp4',
+        myId: myId,
+      );
+      return;
+    }
     if (!mounted) return;
     _sendActivity(Activity.recordingVideo);
     final videoPath = await showSquareVideoRecorder(context);
     _sendActivity(Activity.stopped);
     if (videoPath == null || !mounted) return;
-
     await _publishSquareVideoFromDisk(videoPath);
   }
 
@@ -2704,17 +2886,17 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
-    // withData: false — get path without loading entire file into RAM.
-    // On Android, file_picker copies to cache so picked.path is always usable.
+    // Web and some desktop providers can return null path, so keep bytes when needed.
     final result = await FilePicker.platform.pickFiles(
       type: FileType.any,
       allowMultiple: false,
-      withData: false,
+      withData: kIsWeb,
     );
     if (result == null || result.files.isEmpty || !mounted) return;
 
     final picked = result.files.first;
     final originalName = picked.name;
+    final pickedBytes = picked.bytes;
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isEmpty) return;
 
@@ -2722,56 +2904,88 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _isSending = true);
     _sendActivity(Activity.sendingFile);
     try {
-      // Copy to app's files dir for persistent local storage
-      final docsDir = await getApplicationDocumentsDirectory();
-      final filesDir = Directory('${docsDir.path}/files')
-        ..createSync(recursive: true);
-      final destPath =
-          '${filesDir.path}/${DateTime.now().millisecondsSinceEpoch}_$originalName';
-
-      if (picked.path != null) {
-        await File(picked.path!).copy(destPath);
-      } else {
-        // path unavailable — try re-pick with bytes (rare edge case)
-        final r2 = await FilePicker.platform.pickFiles(
-            type: FileType.any, allowMultiple: false, withData: true);
-        final b = r2?.files.firstOrNull?.bytes;
-        if (b == null || !mounted) {
-          setState(() => _isSending = false);
-          return;
-        }
-        await File(destPath).writeAsBytes(b);
-      }
-
-      final fileSize = File(destPath).lengthSync();
       final msgId = _uuid.v4();
       final targetPeerId = _looksLikePublicKey(_resolvedPeerId)
           ? _resolvedPeerId
           : widget.peerId;
       bool wasQueued = false;
+      String? localPath;
+      int fileSize = 0;
 
-      if (!_savedMessagesLocalOnly) {
-        if (fileSize > _kMaxBlobBytes) {
-          // Large file — enqueue directly, never load full content into RAM
-          unawaited(MediaUploadQueue.instance.enqueue(
-            msgId: msgId,
-            filePath: destPath,
-            recipientKey: _resolvedPeerId,
-            fromId: myId,
-            isFile: true,
-            fileName: originalName,
-          ));
-          wasQueued = true;
-        } else {
-          final fileBytes = await File(destPath).readAsBytes();
+      if (kIsWeb) {
+        final webBytes = pickedBytes;
+        if (webBytes == null) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Не удалось прочитать файл в браузере'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+        fileSize = webBytes.length;
+        if (!_savedMessagesLocalOnly) {
           wasQueued = await _sendMedia(
-            bytes: fileBytes,
+            bytes: webBytes,
             msgId: msgId,
             myId: myId,
             isFile: true,
             fileName: originalName,
-            filePath: destPath,
+            filePath: null,
           );
+        }
+      } else {
+        // Copy to app's files dir for persistent local storage.
+        final docsDir = await getApplicationDocumentsDirectory();
+        final filesDir = Directory('${docsDir.path}/files')
+          ..createSync(recursive: true);
+        final destPath =
+            '${filesDir.path}/${DateTime.now().millisecondsSinceEpoch}_$originalName';
+
+        if (picked.path != null) {
+          await File(picked.path!).copy(destPath);
+        } else if (pickedBytes != null) {
+          await File(destPath).writeAsBytes(pickedBytes);
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Файл недоступен: нет пути и данных'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+
+        localPath = destPath;
+        fileSize = File(destPath).lengthSync();
+
+        if (!_savedMessagesLocalOnly) {
+          if (fileSize > _kMaxBlobBytes) {
+            // Large file — enqueue directly, never load full content into RAM
+            unawaited(MediaUploadQueue.instance.enqueue(
+              msgId: msgId,
+              filePath: destPath,
+              recipientKey: _resolvedPeerId,
+              fromId: myId,
+              isFile: true,
+              fileName: originalName,
+            ));
+            wasQueued = true;
+          } else {
+            final fileBytes = await File(destPath).readAsBytes();
+            wasQueued = await _sendMedia(
+              bytes: fileBytes,
+              msgId: msgId,
+              myId: myId,
+              isFile: true,
+              fileName: originalName,
+              filePath: destPath,
+            );
+          }
         }
       }
 
@@ -2783,7 +2997,7 @@ class _ChatScreenState extends State<ChatScreen> {
             isOutgoing: true,
             timestamp: DateTime.now(),
             status: wasQueued ? MessageStatus.sending : MessageStatus.sent,
-            filePath: destPath,
+            filePath: localPath,
             fileName: originalName,
             fileSize: fileSize,
           ),
@@ -3090,7 +3304,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onMessagePointerDownQuickReact(PointerDownEvent e, ChatMessage msg) {
     if (e.kind != PointerDeviceKind.mouse) return;
     if ((e.buttons & kPrimaryButton) == 0) return;
-    if (kIsWeb ||
+    if (!kIsWeb &&
         (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS)) {
       return;
     }
