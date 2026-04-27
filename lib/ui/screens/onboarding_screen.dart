@@ -172,6 +172,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   Future<void> _ensureCoreDatabasesInitialized() async {
+    if (RuntimePlatform.isWeb) return;
     await ChatStorageService.instance.init();
     await ChannelService.instance.init();
     await GroupService.instance.init();
