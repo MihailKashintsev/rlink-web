@@ -141,6 +141,9 @@ flutter:
 flutter_launcher_icons:
   android: true
   ios: true
+  web:
+    generate: true
+    image_path: "assets/branding/rlink_launcher_source.png"
   macos:
     generate: true
     image_path: "assets/branding/rlink_launcher_source.png"
