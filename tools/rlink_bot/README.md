@@ -15,6 +15,22 @@ cd tools/rlink_bot
 pip install -e .
 ```
 
+### Windows (PowerShell)
+
+- Во многих версиях PowerShell **`&&` не является разделителем команд** (ошибка «Лексема "&&"…»). Используйте **две строки** или **`;`**:
+  ```powershell
+  cd tools\rlink_bot
+  python -m pip install -e .
+  ```
+- Нужна именно команда **`pip install -e .`** или **`python -m pip install -e .`** — в конце **точка** (каталог пакета). Команда **`pip install -e`** без аргумента завершится ошибкой.
+- Ошибка **`No module named 'websocket'`** значит, что зависимости из `pyproject.toml` не установились (другой Python, не тот venv или установка не выполнялась). Повторите:
+  ```powershell
+  cd C:\путь\к\репо\tools\rlink_bot
+  python -m pip install -e .
+  python -m pip install "websocket-client>=1.7" "cryptography>=42"
+  ```
+  И дальше вызывайте **`python -m rlink_bot`** тем же интерпретатором, которым ставили пакеты.
+
 Или без установки:
 
 ```bash

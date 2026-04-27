@@ -5,11 +5,38 @@
 
 ---
 
+## Windows (PowerShell)
+
+В PowerShell **не используйте `&&`** (в старых версиях будет ошибка). Пишите так:
+
+```powershell
+cd tools\rlink_bot
+python -m pip install -e .
+```
+
+Команда должна быть **`install -e .`** — с **точкой** в конце. Если **`No module named 'websocket'`**, зависимости не встали в тот же Python:
+
+```powershell
+python -m pip install -e .
+python -m pip install "websocket-client>=1.7" "cryptography>=42"
+```
+
+---
+
 ## Чеклист: что сделать по шагам
 
 1. **Установить SDK бота** (один раз на машине):
+
+   bash / macOS / Linux:
    ```bash
-   cd tools/rlink_bot && pip install -e .
+   cd tools/rlink_bot
+   pip install -e .
+   ```
+
+   PowerShell:
+   ```powershell
+   cd tools\rlink_bot
+   python -m pip install -e .
    ```
 
 2. **Сгенерировать ключи** под процесс бота:
@@ -21,8 +48,16 @@
    Скопируйте **64 hex** публичного Ed25519.
 
 3. **Relay** с реестром ботов (локально или прод с новым `server.dart`):
+
    ```bash
-   cd relay_server && dart run bin/server.dart
+   cd relay_server
+   dart run bin/server.dart
+   ```
+
+   PowerShell:
+   ```powershell
+   cd relay_server
+   dart run bin/server.dart
    ```
    Для приложения нужен **тот же** relay URL, что и у бота (`RLINK_RELAY_URL`).
 
