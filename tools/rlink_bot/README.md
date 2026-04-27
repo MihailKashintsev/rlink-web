@@ -2,11 +2,38 @@
 
 Формат шифрования совместим с клиентом Flutter (`CryptoService` + gossip `msg`).
 
-Пример формата короткого кода (только демо; рабочий код выдаёт Lib после `/newbot`):
+**Relay по умолчанию** — тот же, что в приложении: `wss://rlink.ru.tuna.am` (константа `rlink_bot/relay_defaults.py`, синхронно с `RelayService.defaultServerUrl` во Flutter). Указывать `--relay` нужно только если вы поднимаете **свой** relay.
 
-```bash
-python -m rlink_bot code
-```
+---
+
+## Три шага для разработчика
+
+1. **Ключи** (один раз на машине с ботом):
+   ```bash
+   cd tools/rlink_bot
+   python -m pip install -e .
+   python -m rlink_bot keys init --file bot_keys.json
+   python -m rlink_bot keys show-pub --file bot_keys.json
+   ```
+   Публичный **64 hex** отправьте боту **Lib** в Rlink: `/newbot ваш_ник` и ключ (или одной строкой).
+
+2. **Код из Lib** — в ответе будет **claimCode** (коротко) и **claimId** (32 hex). Достаточно **одной команды** (relay не указываете — возьмётся как в приложении):
+   ```bash
+   python -m rlink_bot onboard СЮДА_ВСТАВИТЬ_КОД_ИЗ_LIB --file bot_keys.json
+   ```
+   В stdout один раз — **API token**; рядом появится `rlink_bot_config.json`.
+
+3. **Онлайн** (echo для проверки):
+   ```bash
+   python -m rlink_bot run --file bot_keys.json
+   ```
+   Команда `run` подхватит **relay** и **@ник** из `rlink_bot_config.json`, если файл лежит рядом с ключами.
+
+**Ещё проще:** в репозитории **`example_echo_bot.py`** — вставьте код Lib в переменную `RELAY_CLAIM` в начале файла и запустите `python example_echo_bot.py` из каталога `tools/rlink_bot` (после `pip install -e .`).
+
+Команда **`claim`** — то же, что **`onboard`**, но с явным **`--relay`** по умолчанию из переменной окружения `RLINK_RELAY_URL` (если нужен другой сервер).
+
+Демо-формат claimCode (не из Lib): `python -m rlink_bot code`
 
 ## Установка
 
@@ -38,37 +65,17 @@ cd tools/rlink_bot
 PYTHONPATH=. python -m rlink_bot keys init
 ```
 
-## Как завести бота (коротко)
+## Локальный relay (опционально)
 
-1. **Relay** с поддержкой реестра ботов (ветка с `bot_register_start` / `bot_claim`). Для локального теста:
-   ```bash
-   cd relay_server && dart run bin/server.dart
-   ```
-   По умолчанию `ws://127.0.0.1:8080`. В приложении Rlink для теста нужен relay с этим адресом (если у вас только прод `wss://rlink.ru.tuna.am`, там должен быть задеплоен новый server).
+Если тестируете на своём сервере:
 
-2. **Ключи бота** на машине, где будет крутиться процесс:
-   ```bash
-   python -m rlink_bot keys init --file bot_keys.json
-   python -m rlink_bot keys show-pub --file bot_keys.json
-   ```
-   Скопируйте **64 hex** публичного Ed25519.
+```bash
+cd relay_server
+dart run bin/server.dart
+```
 
-3. **В приложении Rlink**: каталог ботов → **Lib** → `/start` → `/newbot myhandle` → вставить **публичный ключ** отдельным сообщением (или `/newbot myhandle <64hex>` одной строкой). В ответ придёт **claimId** (32 hex).
-
-4. **Завершить регистрацию на relay** (тот же ключ, что в Lib):
-   ```bash
-   export RLINK_RELAY_URL=ws://127.0.0.1:8080   # или ваш wss://
-   python -m rlink_bot claim <claimId> --file bot_keys.json --relay "$RLINK_RELAY_URL"
-   ```
-   В ответе Lib также есть короткий **claimCode** (формат `ABCD-EFGH-JKLM`, без 0/O/1/I/L) — его можно передать в `claim` вместо 32 hex **claimId**.
-   В stdout один раз покажется **API token**; конфиг пишется в `rlink_bot_config.json`.
-
-5. **Запуск echo-бота** (пользователь должен быть **онлайн**, чтобы пришёл `presence` с X25519 — иначе ответ зашифровать некуда):
-   ```bash
-   python -m rlink_bot run --file bot_keys.json --relay "$RLINK_RELAY_URL"
-   ```
-
-6. **Пользователь** в Rlink: поиск `@myhandle` → написать боту. Первое сообщение может прийти, когда у бота уже есть ваш `x25519` из presence (оба онлайн на одном relay).
+PowerShell: две строки, без `&&`. Тогда в шаге 2 используйте  
+`python -m rlink_bot onboard КОД --file bot_keys.json --relay ws://127.0.0.1:8080`.
 
 ## Пример: справочный бот `rlink_help_bot`
 

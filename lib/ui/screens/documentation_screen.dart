@@ -514,15 +514,19 @@ const String _docRu = '''
 Регистрация создаёт заявку на **relay**; приватные ключи бота остаются только у разработчика (например в **Python SDK**).
 
 
-## Как создать своего бота (кратко)
+## Свой бот за три шага
 
-1. Установите пакет из репозитория: каталог **tools/rlink_bot** (`pip install -e .`).  
-2. `python -m rlink_bot keys init` — сгенерировать ключи; `keys show-pub` — публичный Ed25519 (64 hex).  
-3. В приложении: **Боты → Lib** — `/newbot ваш_ник` и ключ (или одной строкой `/newbot ник <hex>`).  
-4. На сервере с ключами: `python -m rlink_bot claim <claimId или claimCode> --relay <wss://…>` — **claimCode** (короткий код вида `ABCD-EFGH-JKLM`) дублирует claimId в ответе Lib; один раз получите **API token** для HTTP Bot API.  
-5. `python -m rlink_bot run` — процесс в сети; для ответа пользователю нужен его **X25519** из presence (оба должны быть онлайн на relay).
+| Шаг | Действие |
+| :--- | :--- |
+| 1 | В каталоге **`tools/rlink_bot`**: `python -m pip install -e .` и `python -m rlink_bot keys init --file bot_keys.json` |
+| 2 | В Rlink: **Боты → Lib** — `/newbot ваш_ник` и публичный ключ (**64 hex** из `keys show-pub`) |
+| 3 | На ПК: **`python -m rlink_bot onboard КОД_ИЗ_LIB --file bot_keys.json`** — relay по умолчанию как в приложении; затем **`python -m rlink_bot run --file bot_keys.json`** |
 
-Подробности — в **README** в `tools/rlink_bot/README.md` в исходниках проекта.
+**КОД_ИЗ_LIB** — **claimCode** (коротко) или **claimId** (32 hex); оба приходят в ответе Lib.
+
+Пример «вставил код в Python-файл»: **`tools/rlink_bot/example_echo_bot.py`** (переменная `RELAY_CLAIM`).
+
+Подробности и Windows PowerShell — **`tools/rlink_bot/README.md`**.
 
 
 ## Приватность
@@ -588,15 +592,19 @@ You can share your public key or **search** the relay by nickname or short id.
 Registration creates a claim on the **relay**; the bot’s **private keys** stay on the developer’s machine (e.g. **Python SDK**).
 
 
-## Creating a bot (short)
+## Your bot in three steps
 
-1. From the repo: **tools/rlink_bot** (`pip install -e .`).  
-2. `python -m rlink_bot keys init` then `keys show-pub` for the Ed25519 public key (64 hex).  
-3. In the app: **Bots → Lib** — `/newbot your_handle` and send the key (or `/newbot handle <hex>` in one line).  
-4. On the bot host: `python -m rlink_bot claim <claimId or claimCode> --relay <wss://…>` — **claimCode** (short `ABCD-EFGH-JKLM` style) is shown alongside claimId in Lib; save the one‑time **API token** for HTTP Bot API.  
-5. `python -m rlink_bot run` — stay online; replying needs the user’s **X25519** from **presence** (both sides online on the same relay).
+| Step | Action |
+| :--- | :--- |
+| 1 | In **`tools/rlink_bot`**: `python -m pip install -e .` and `python -m rlink_bot keys init --file bot_keys.json` |
+| 2 | In Rlink: **Bots → Lib** — `/newbot your_handle` and the public key (**64 hex** from `keys show-pub`) |
+| 3 | On your machine: **`python -m rlink_bot onboard PASTE_FROM_LIB --file bot_keys.json`** — default relay matches the Rlink app; then **`python -m rlink_bot run --file bot_keys.json`** |
 
-More detail: **tools/rlink_bot/README.md** in the project tree.
+**PASTE_FROM_LIB** is **claimCode** (short) or **claimId** (32 hex) from Lib’s reply.
+
+Minimal “paste into code” sample: **`tools/rlink_bot/example_echo_bot.py`** (`RELAY_CLAIM`).
+
+Full notes: **`tools/rlink_bot/README.md`**.
 
 
 ## Privacy

@@ -23,9 +23,9 @@ class LibBotService {
       '• Или одной строкой: /newbot <ник> <64hex>\n'
       '• /cancel — отменить ожидание ключа\n'
       '• /guide — краткая памятка\n\n'
-      'После успеха придут claimId (32 hex) и короткий код claimCode (например ABCD-EFGH-JKLM). '
-      'В claim подойдёт любой из них:\n'
-      '  python -m rlink_bot claim <claimId или claimCode>\n\n'
+      'После успеха придут claimId (32 hex) и короткий код claimCode. '
+      'На ПК достаточно одной команды (relay по умолчанию как в приложении):\n'
+      '  python -m rlink_bot onboard <claimCode или claimId> --file bot_keys.json\n\n'
       'Токен API — один раз в ответ claim, сохраните.\n'
       'Пользователи ищут бота по @нику на relay.';
 
@@ -36,6 +36,7 @@ class LibBotService {
       '/cancel — отменить ожидание публичного ключа\n'
       '/guide — короткий чеклист создания бота\n'
       '/commands — это сообщение\n\n'
+      'После /newbot на ПК: python -m rlink_bot onboard <код из Lib> --file bot_keys.json\n\n'
       'Документация по всему Rlink: Настройки → Документация.';
 
   static const _guideLines = <String>[
@@ -43,7 +44,7 @@ class LibBotService {
     '',
     '1) На ПК: python -m rlink_bot keys init → keys show-pub',
     '2) Здесь: /newbot ваш_ник, затем вставить 64 hex ключа',
-    '3) На ПК: python -m rlink_bot claim <claimId или claimCode> --relay <wss://…>',
+    '3) На ПК: python -m rlink_bot onboard <код из Lib> --file bot_keys.json',
     '4) python -m rlink_bot run — держать процесс онлайн',
     '',
     'Подробно: Настройки → «Документация» (вкладки Русский / English).',
@@ -213,30 +214,24 @@ class LibBotService {
       if (claimId.length != 32) {
         return const ['Некорректный ответ relay (claimId).'];
       }
+      final claimOne = claimCode.isNotEmpty ? claimCode : claimId;
       final lines = <String>[
         'Заявка создана.',
         '',
-        'claimId (32 hex, скопируйте):',
-        claimId,
+        'Скопируйте одно значение (удобнее короткий claimCode):',
+        if (claimCode.isNotEmpty) 'claimCode: $claimCode',
+        'claimId: $claimId',
+        '',
+        'На машине с файлом ключей бота (см. keys init):',
+        '  python -m rlink_bot onboard $claimOne --file bot_keys.json',
+        '',
+        'Relay по умолчанию как в приложении Rlink; другой сервер: добавьте --relay wss://…',
+        '',
+        'Токен API — один раз в stdout; затем держите бота онлайн:',
+        '  python -m rlink_bot run --file bot_keys.json',
+        '',
+        'Пример «вставил код в файл»: tools/rlink_bot/example_echo_bot.py',
       ];
-      if (claimCode.isNotEmpty) {
-        lines.add('');
-        lines.add('Короткий код claimCode (можно вместо claimId в команде claim):');
-        lines.add(claimCode);
-      }
-      lines.addAll([
-        '',
-        'На машине с ключами бота выполните:',
-        '  python -m rlink_bot claim $claimId',
-      ]);
-      if (claimCode.isNotEmpty) {
-        lines.add('  или: python -m rlink_bot claim $claimCode');
-      }
-      lines.addAll([
-        '',
-        'Токен API придёт один раз в stdout — сохраните в секретах.',
-        'Затем запуск: python -m rlink_bot run',
-      ]);
       return lines;
     } catch (e, st) {
       debugPrint('[LibBot] register: $e\n$st');

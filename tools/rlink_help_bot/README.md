@@ -66,16 +66,13 @@ python -m pip install "websocket-client>=1.7" "cryptography>=42"
    затем **отдельным сообщением** вставить публичный ключ (или одной строкой  
    `/newbot rlink_help_bot <64hex>`).
 
-5. **Завершить claim** (именно **ключ бота**, не ваш личный):
+5. **Onboard** — вставьте **claimCode** или **claimId** из ответа Lib (relay по умолчанию как в приложении Rlink):
    ```bash
    cd tools/rlink_help_bot
-   export RLINK_RELAY_URL=ws://127.0.0.1:8080   # ваш relay
-   pip install -e .
-   python -m rlink_bot claim <claimId_или_claimCode> \
-     --file rlink_help_bot_keys.json --relay "$RLINK_RELAY_URL" \
-     --out rlink_help_bot_config.json
+   python3 -m pip install -e .
+   python3 -m rlink_bot onboard КОД_ИЗ_LIB --file rlink_help_bot_keys.json --out rlink_help_bot_config.json
    ```
-   Сохраните **API token** из stdout.
+   Другой relay: `--relay ws://127.0.0.1:8080`. Сохраните **API token** из stdout.
 
 6. **(Опционально) HTTP Bot API** — описание и имя в каталоге:
    ```bash
@@ -91,9 +88,9 @@ python -m pip install "websocket-client>=1.7" "cryptography>=42"
 7. **Запуск бота**:
    ```bash
    cd tools/rlink_help_bot
-   export RLINK_RELAY_URL=ws://127.0.0.1:8080
-   python -m rlink_help_bot --config rlink_help_bot_config.json
+   python3 -m rlink_help_bot --config rlink_help_bot_config.json
    ```
+   Relay подхватывается из `rlink_help_bot_config.json` (после onboard).
 
 8. **Пользователь** в приложении: поиск **`@rlink_help_bot`** → написать `/start` или `1`.  
    Оба должны быть **онлайн на том же relay**, пока не подтянется **presence** с X25519 (иначе ответ не зашифровать).

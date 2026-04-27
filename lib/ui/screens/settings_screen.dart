@@ -513,7 +513,7 @@ class SettingsCategoryCards extends StatelessWidget {
             icon: Icons.menu_book_outlined,
             color: const Color(0xFF3949AB),
             title: 'Документация',
-            subtitle: 'Rlink и боты — RU / EN',
+            subtitle: 'Rlink, боты Lib, python -m rlink_bot onboard — RU / EN',
             onTap: () => DocumentationScreen.open(context),
           ),
           _CategoryItem(

@@ -1,4 +1,4 @@
-"""CLI: keys init | keys show-pub | claim | run"""
+"""CLI: keys init | keys show-pub | onboard | claim | run | code"""
 
 from __future__ import annotations
 
@@ -9,28 +9,14 @@ import secrets
 import sys
 from pathlib import Path
 
+from rlink_bot.bootstrap import claim_and_save_config, normalize_claim_from_lib
 from rlink_bot.crypto_rlink import BotKeys
 from rlink_bot.relay_client import RelayBotSession
+from rlink_bot.relay_defaults import DEFAULT_RELAY_WS
 
-DEFAULT_RELAY = os.environ.get("RLINK_RELAY_URL", "wss://rlink.ru.tuna.am")
+DEFAULT_RELAY = os.environ.get("RLINK_RELAY_URL", DEFAULT_RELAY_WS)
 
 _CLAIM_CODE_ALPHABET_STR = "23456789ABCDEFGHJKMNPRSTWXYZ"
-_CLAIM_CODE_ALPHABET = frozenset(_CLAIM_CODE_ALPHABET_STR)
-
-
-def _normalize_claim_code(raw: str) -> str | None:
-    """Канонический AAAA-BBBB-CCCC или None."""
-    t = raw.strip().upper().replace(" ", "").replace("-", "").replace("_", "")
-    if len(t) != 12:
-        return None
-    if any(c not in _CLAIM_CODE_ALPHABET for c in t):
-        return None
-    return f"{t[0:4]}-{t[4:8]}-{t[8:12]}"
-
-
-def _is_hex_claim_id(s: str) -> bool:
-    s = s.strip().lower()
-    return len(s) == 32 and all(c in "0123456789abcdef" for c in s)
 
 
 def _keys_path(args: argparse.Namespace) -> Path:
@@ -60,56 +46,55 @@ def cmd_keys_show_pub(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_claim(args: argparse.Namespace) -> int:
+def _do_claim_save(args: argparse.Namespace, *, label: str) -> int:
     p = _keys_path(args)
     if not p.exists():
         print(f"Missing keys file {p}", file=sys.stderr)
         return 1
-    keys = BotKeys.from_json_dict(json.loads(p.read_text(encoding="utf-8")))
-    raw = args.claim_id.strip()
-    if _is_hex_claim_id(raw):
-        claim = raw.strip().lower()
-    else:
-        canon = _normalize_claim_code(raw)
-        if not canon:
-            print(
-                "claimId must be 32 hex chars, or claimCode like ABCD-EFGH-JKLM "
-                "(12 letters/digits without 0/O/1/I/L)",
-                file=sys.stderr,
-            )
-            return 1
-        claim = canon
     relay = args.relay.strip()
-    sess = RelayBotSession(relay, keys)
+    out = Path(args.out).expanduser().resolve()
     try:
-        sess.connect(nick=args.nick)
-        ack = sess.claim(claim)
-    finally:
-        sess.close()
-    if not ack.get("ok"):
-        print("claim failed:", ack.get("error"), file=sys.stderr)
+        raw = args.claim_id.strip()
+        normalize_claim_from_lib(raw)  # validate early
+        cfg = claim_and_save_config(
+            p,
+            raw,
+            relay=relay or None,
+            out_path=out,
+            nick=args.nick,
+        )
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
         return 1
-    token = ack.get("apiToken")
-    handle = ack.get("handle")
-    bot_id = ack.get("botId")
+    except RuntimeError as e:
+        print("claim failed:", e, file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(label, e, file=sys.stderr)
+        return 1
+
+    token = cfg.get("api_token")
+    handle = cfg.get("handle")
+    bot_id = cfg.get("bot_id")
     print("OK handle=@%s botId=%s" % (handle, bot_id))
     if token:
         print("API token (save once):", token)
-    cfg = {
-        "relay_url": relay,
-        "handle": handle,
-        "bot_id": bot_id,
-        "api_token": token,
-        "keys_path": str(p),
-    }
-    out = Path(args.out).expanduser().resolve()
-    out.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     print("Wrote", out)
+    print("Relay:", cfg.get("relay_url"))
     return 0
 
 
+def cmd_onboard(args: argparse.Namespace) -> int:
+    """Claim с relay по умолчанию (как в приложении Rlink)."""
+    print("Using relay:", args.relay.strip() or DEFAULT_RELAY_WS)
+    return _do_claim_save(args, label="onboard:")
+
+
+def cmd_claim(args: argparse.Namespace) -> int:
+    return _do_claim_save(args, label="claim:")
+
+
 def cmd_code(_args: argparse.Namespace) -> int:
-    """Тот же формат, что у relay для claimCode (локально — только для примера)."""
     t = "".join(secrets.choice(_CLAIM_CODE_ALPHABET_STR) for _ in range(12))
     print(f"{t[0:4]}-{t[4:8]}-{t[8:12]}")
     return 0
@@ -123,6 +108,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     keys = BotKeys.from_json_dict(json.loads(p.read_text(encoding="utf-8")))
     relay = args.relay.strip()
     nick = args.nick
+    cfg_path = p.parent / "rlink_bot_config.json"
+    if cfg_path.exists():
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            r = str(cfg.get("relay_url") or "").strip()
+            if r:
+                relay = r
+            if nick is None:
+                h = cfg.get("handle")
+                if isinstance(h, str) and h.strip():
+                    hn = h.strip()
+                    nick = hn if hn.startswith("@") else ("@" + hn)
+                    nick = nick[:64]
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
     sess = RelayBotSession(relay, keys)
     print("Connecting", relay)
 
@@ -159,20 +159,38 @@ def main() -> None:
     kp.add_argument("--file", default="rlink_bot_keys.json")
     kp.set_defaults(func=cmd_keys_show_pub)
 
+    onboard = sub.add_parser(
+        "onboard",
+        help="Завершить регистрацию: вставьте claimId/claimCode из Lib (relay по умолчанию как в Rlink)",
+    )
+    onboard.add_argument(
+        "claim_id",
+        help="Скопируйте из ответа Lib после /newbot (32 hex или ABCD-EFGH-JKLM)",
+    )
+    onboard.add_argument("--file", default="rlink_bot_keys.json")
+    onboard.add_argument(
+        "--relay",
+        default="",
+        help=f"Необязательно; по умолчанию {DEFAULT_RELAY_WS}",
+    )
+    onboard.add_argument("--nick", default=None)
+    onboard.add_argument("--out", default="rlink_bot_config.json")
+    onboard.set_defaults(func=cmd_onboard)
+
     c = sub.add_parser(
         "claim",
-        help="Finish relay registration (claimId 32 hex or claimCode AAAA-BBBB-CCCC from Lib)",
+        help="То же, что onboard: claim на relay (явный --relay при другом сервере)",
     )
     c.add_argument("claim_id")
     c.add_argument("--file", default="rlink_bot_keys.json")
     c.add_argument("--relay", default=DEFAULT_RELAY)
-    c.add_argument("--nick", default=None, help="Short nick on relay (default from pubkey)")
+    c.add_argument("--nick", default=None)
     c.add_argument("--out", default="rlink_bot_config.json")
     c.set_defaults(func=cmd_claim)
 
     sub.add_parser(
         "code",
-        help="Print a random claimCode-style string (relay generates the real code on /newbot)",
+        help="Print a random claimCode-style string (demo only)",
     ).set_defaults(func=cmd_code)
 
     r = sub.add_parser("run", help="Connect and echo DMs (needs peers x25519 via presence)")
