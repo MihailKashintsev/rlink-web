@@ -12,6 +12,7 @@ import '../models/group.dart';
 import '../models/message_poll.dart';
 import '../utils/reaction_limit.dart';
 import 'image_service.dart';
+import 'web_identity_portable.dart';
 
 Future<void> _backfillGroupReadCursors(Database db) async {
   final groups =
@@ -207,6 +208,9 @@ class GroupService {
       'created_at': group.createdAt,
     });
     _bump();
+    if (kIsWeb) {
+      unawaited(WebIdentityPortable.exportIdentityKeyDownload());
+    }
     return group;
   }
 
@@ -232,6 +236,86 @@ class GroupService {
               createdAt: r['created_at'] as int,
             ))
         .toList();
+  }
+
+  Future<void> upsertGroupsFromBackup(List<Group> groups) async {
+    await _ensureDbReady();
+    if (_db == null) return;
+    await _db!.transaction((txn) async {
+      for (final g in groups) {
+        await txn.insert(
+          'groups',
+          {
+            'id': g.id,
+            'name': g.name,
+            'creator_id': g.creatorId,
+            'members': g.memberIds.join(','),
+            'moderators': g.moderatorIds.join(','),
+            'avatar_color': g.avatarColor,
+            'avatar_emoji': g.avatarEmoji,
+            'avatar_img_path': g.avatarImagePath,
+            'created_at': g.createdAt,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+    _bump();
+  }
+
+  Future<Map<String, dynamic>> exportBackupSnapshot() async {
+    await _ensureDbReady();
+    if (_db == null) return const {'v': 1};
+    final groups = await _db!.query('groups');
+    final messages = await _db!.query('group_messages');
+    final cursors = await _db!.query('group_read_cursor');
+    return {
+      'v': 1,
+      'groups': groups.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'messages': messages.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'cursors': cursors.map((r) => Map<String, dynamic>.from(r)).toList(),
+    };
+  }
+
+  Future<void> importBackupSnapshot(Map<String, dynamic> snapshot) async {
+    await _ensureDbReady();
+    if (_db == null) return;
+    final groups = (snapshot['groups'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final messages = (snapshot['messages'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final cursors = (snapshot['cursors'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    await _db!.transaction((txn) async {
+      for (final row in groups) {
+        await txn.insert(
+          'groups',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in messages) {
+        await txn.insert(
+          'group_messages',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in cursors) {
+        await txn.insert(
+          'group_read_cursor',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+    _bump();
   }
 
   Future<List<String>> getGroupIds() async {
@@ -278,6 +362,9 @@ class GroupService {
       whereArgs: [group.id],
     );
     _bump();
+    if (kIsWeb) {
+      unawaited(WebIdentityPortable.exportIdentityKeyDownload());
+    }
   }
 
   /// Promote or demote [userId] as moderator of [groupId].

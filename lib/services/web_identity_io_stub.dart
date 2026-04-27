@@ -13,6 +13,10 @@ String buildIdentityExportJson({
   required String xPrivB64,
   required String xPubB64,
   String? profileJson,
+  String? settingsJson,
+  String? channelsJson,
+  String? groupsJson,
+  String? chatsJson,
 }) =>
     '{"v":0}';
 

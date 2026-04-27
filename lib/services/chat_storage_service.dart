@@ -92,6 +92,102 @@ class ChatStorageService {
     await deleteDatabase(path);
   }
 
+  Future<Map<String, dynamic>> exportBackupSnapshot() async {
+    await _ensureDbReady();
+    if (_db == null) return const {'v': 1};
+    final contacts = await _db!.query('contacts');
+    final messages = await _db!.query('messages');
+    final pins = await _db!.query('dm_chat_pins');
+    final scheduled = await _db!.query('scheduled_dm');
+    final cursors = await _db!.query('conversation_read_cursor');
+    final localProfile = await _db!.query('local_profile_cache');
+    return {
+      'v': 1,
+      'contacts': contacts.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'messages': messages.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'pins': pins.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'scheduled': scheduled.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'cursors': cursors.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'localProfile':
+          localProfile.map((r) => Map<String, dynamic>.from(r)).toList(),
+    };
+  }
+
+  Future<void> importBackupSnapshot(Map<String, dynamic> snapshot) async {
+    await _ensureDbReady();
+    if (_db == null) return;
+    final contacts = (snapshot['contacts'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final messages = (snapshot['messages'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final pins = (snapshot['pins'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final scheduled = (snapshot['scheduled'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final cursors = (snapshot['cursors'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final localProfile = (snapshot['localProfile'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    await _db!.transaction((txn) async {
+      for (final row in contacts) {
+        await txn.insert(
+          'contacts',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in messages) {
+        await txn.insert(
+          'messages',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in pins) {
+        await txn.insert(
+          'dm_chat_pins',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in scheduled) {
+        await txn.insert(
+          'scheduled_dm',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in cursors) {
+        await txn.insert(
+          'conversation_read_cursor',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in localProfile) {
+        await txn.insert(
+          'local_profile_cache',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+    _contactsNotifier.value = await getContacts();
+    _messagesNotifiers.clear();
+  }
+
   Future<void> init() async {
     // Windows/Linux: использует FFI-реализацию SQLite вместо нативной
     if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {

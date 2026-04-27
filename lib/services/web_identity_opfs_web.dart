@@ -71,6 +71,10 @@ Map<String, String>? parseIdentityExport(String raw) {
     String? xPr = j['xPr'] as String?;
     String? xPu = j['xPu'] as String?;
     String? prof = j['prof'] as String?;
+    String? stg = j['stg'] as String?;
+    String? chs = j['chs'] as String?;
+    String? grs = j['grs'] as String?;
+    String? cht = j['cht'] as String?;
 
     // Backward compatibility: accept older flat exports.
     if ((edPr == null || edPr.isEmpty) &&
@@ -82,6 +86,10 @@ Map<String, String>? parseIdentityExport(String raw) {
       xPr = j['mesh_x25519_private'] as String?;
       xPu = j['mesh_x25519_public'] as String?;
       prof ??= j['rlink_user_profile'] as String?;
+      stg ??= j['rlink_app_settings_backup'] as String?;
+      chs ??= j['rlink_channels_backup'] as String?;
+      grs ??= j['rlink_groups_backup'] as String?;
+      cht ??= j['rlink_chats_backup'] as String?;
     }
     if (edPr == null ||
         edPu == null ||
@@ -99,6 +107,10 @@ Map<String, String>? parseIdentityExport(String raw) {
       'mesh_x25519_private': xPr,
       'mesh_x25519_public': xPu,
       if (prof != null && prof.isNotEmpty) 'rlink_user_profile': prof,
+      if (stg != null && stg.isNotEmpty) 'rlink_app_settings_backup': stg,
+      if (chs != null && chs.isNotEmpty) 'rlink_channels_backup': chs,
+      if (grs != null && grs.isNotEmpty) 'rlink_groups_backup': grs,
+      if (cht != null && cht.isNotEmpty) 'rlink_chats_backup': cht,
     };
   } catch (_) {
     return null;
@@ -111,6 +123,10 @@ String buildIdentityExportJson({
   required String xPrivB64,
   required String xPubB64,
   String? profileJson,
+  String? settingsJson,
+  String? channelsJson,
+  String? groupsJson,
+  String? chatsJson,
 }) {
   return jsonEncode(<String, dynamic>{
     'v': 1,
@@ -119,6 +135,10 @@ String buildIdentityExportJson({
     'xPr': xPrivB64,
     'xPu': xPubB64,
     if (profileJson != null && profileJson.isNotEmpty) 'prof': profileJson,
+    if (settingsJson != null && settingsJson.isNotEmpty) 'stg': settingsJson,
+    if (channelsJson != null && channelsJson.isNotEmpty) 'chs': channelsJson,
+    if (groupsJson != null && groupsJson.isNotEmpty) 'grs': groupsJson,
+    if (chatsJson != null && chatsJson.isNotEmpty) 'cht': chatsJson,
   });
 }
 

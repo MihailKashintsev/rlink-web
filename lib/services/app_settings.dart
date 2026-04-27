@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'runtime_platform.dart';
+import 'web_account_bundle.dart';
 import 'web_identity_portable.dart';
 
 /// Глобальные настройки приложения — тема, уведомления, акцентный цвет.
@@ -67,10 +69,51 @@ class AppSettings extends ChangeNotifier {
   }
 
   void _notifySettingsChanged() {
+    if (RuntimePlatform.isWeb) {
+      unawaited(_persistWebBackupSnapshot());
+    }
     notifyListeners();
     if (RuntimePlatform.isWeb) {
       unawaited(WebIdentityPortable.exportIdentityKeyDownload());
     }
+  }
+
+  Future<void> _persistWebBackupSnapshot() async {
+    final json = <String, dynamic>{
+      'themeMode': _themeMode.index,
+      'accentColorIndex': _accentColorIndex,
+      'notificationsEnabled': _notificationsEnabled,
+      'notifSound': _notifSound,
+      'notifVibration': _notifVibration,
+      'chatBgMap': _chatBgMap,
+      'locale': _locale,
+      'fontSize': _fontSize,
+      'sendOnEnter': _sendOnEnter,
+      'showReadReceipts': _showReadReceipts,
+      'showOnlineStatus': _showOnlineStatus,
+      'autoDownloadMedia': _autoDownloadMedia,
+      'compactMode': _compactMode,
+      'onlineStatusMode': _onlineStatusMode,
+      'relayEnabled': _relayEnabled,
+      'relayServerUrl': _relayServerUrl,
+      'connectionMode': _connectionMode,
+      'mediaPriority': _mediaPriority,
+      'bubbleStyle': _bubbleStyle,
+      'clockFormat': _clockFormat,
+      'messageDensity': _messageDensity,
+      'showReactionsQuickBar': _showReactionsQuickBar,
+      'quickReactionEmoji': _quickReactionEmoji,
+      'notifyPersonal': _notifyPersonal,
+      'notifyGroups': _notifyGroups,
+      'notifyChannels': _notifyChannels,
+      'appIconVariant': _appIconVariant,
+      'useIosStyleEmoji': _useIosStyleEmoji,
+      'deviceLinkRole': _deviceLinkRole,
+      'linkedDevicePublicKey': _linkedDevicePublicKey,
+      'linkedDeviceNickname': _linkedDeviceNickname,
+      'preLinkConnectionMode': _preLinkConnectionMode,
+    };
+    await WebAccountBundle.layeredWrite(kAppSettingsBackup, jsonEncode(json));
   }
 
   ThemeMode _themeMode = ThemeMode.system;
@@ -311,6 +354,83 @@ class AppSettings extends ChangeNotifier {
     _useIosStyleEmoji = RuntimePlatform.isAndroid
         ? (_prefs.getBool(_keyUseIosStyleEmoji) ?? true)
         : false;
+    if (RuntimePlatform.isWeb) {
+      await _applyWebSettingsBackupIfPresent();
+    }
+    if (RuntimePlatform.isWeb) {
+      unawaited(_persistWebBackupSnapshot());
+    }
+  }
+
+  Future<void> _applyWebSettingsBackupIfPresent() async {
+    try {
+      final raw = await WebAccountBundle.layeredRead(kAppSettingsBackup);
+      if (raw == null || raw.isEmpty) return;
+      final m = jsonDecode(raw);
+      if (m is! Map) return;
+      _themeMode =
+          ThemeMode.values[((m['themeMode'] as num?)?.toInt() ?? _themeMode.index).clamp(0, 2)];
+      _accentColorIndex = ((m['accentColorIndex'] as num?)?.toInt() ??
+              _accentColorIndex)
+          .clamp(0, accentColors.length - 1);
+      _notificationsEnabled =
+          m['notificationsEnabled'] as bool? ?? _notificationsEnabled;
+      _notifSound = m['notifSound'] as bool? ?? _notifSound;
+      _notifVibration = m['notifVibration'] as bool? ?? _notifVibration;
+      _locale = m['locale'] as String? ?? _locale;
+      _fontSize = ((m['fontSize'] as num?)?.toInt() ?? _fontSize).clamp(0, 2);
+      _sendOnEnter = m['sendOnEnter'] as bool? ?? _sendOnEnter;
+      _showReadReceipts = m['showReadReceipts'] as bool? ?? _showReadReceipts;
+      _showOnlineStatus = m['showOnlineStatus'] as bool? ?? _showOnlineStatus;
+      _autoDownloadMedia =
+          m['autoDownloadMedia'] as bool? ?? _autoDownloadMedia;
+      _compactMode = m['compactMode'] as bool? ?? _compactMode;
+      _onlineStatusMode =
+          ((m['onlineStatusMode'] as num?)?.toInt() ?? _onlineStatusMode)
+              .clamp(0, 2);
+      _relayEnabled = m['relayEnabled'] as bool? ?? _relayEnabled;
+      _relayServerUrl = m['relayServerUrl'] as String? ?? _relayServerUrl;
+      _connectionMode =
+          ((m['connectionMode'] as num?)?.toInt() ?? _connectionMode)
+              .clamp(0, 2);
+      _mediaPriority =
+          ((m['mediaPriority'] as num?)?.toInt() ?? _mediaPriority).clamp(0, 1);
+      _bubbleStyle =
+          ((m['bubbleStyle'] as num?)?.toInt() ?? _bubbleStyle).clamp(0, 2);
+      _clockFormat =
+          ((m['clockFormat'] as num?)?.toInt() ?? _clockFormat).clamp(0, 1);
+      _messageDensity =
+          ((m['messageDensity'] as num?)?.toInt() ?? _messageDensity)
+              .clamp(0, 2);
+      _showReactionsQuickBar =
+          m['showReactionsQuickBar'] as bool? ?? _showReactionsQuickBar;
+      _quickReactionEmoji =
+          m['quickReactionEmoji'] as String? ?? _quickReactionEmoji;
+      _notifyPersonal = m['notifyPersonal'] as bool? ?? _notifyPersonal;
+      _notifyGroups = m['notifyGroups'] as bool? ?? _notifyGroups;
+      _notifyChannels = m['notifyChannels'] as bool? ?? _notifyChannels;
+      _appIconVariant =
+          ((m['appIconVariant'] as num?)?.toInt() ?? _appIconVariant)
+              .clamp(0, 2);
+      _useIosStyleEmoji = m['useIosStyleEmoji'] as bool? ?? _useIosStyleEmoji;
+      _deviceLinkRole =
+          ((m['deviceLinkRole'] as num?)?.toInt() ?? _deviceLinkRole)
+              .clamp(0, 2);
+      _linkedDevicePublicKey =
+          (m['linkedDevicePublicKey'] as String?) ?? _linkedDevicePublicKey;
+      _linkedDeviceNickname =
+          (m['linkedDeviceNickname'] as String?) ?? _linkedDeviceNickname;
+      final pre = (m['preLinkConnectionMode'] as num?)?.toInt();
+      _preLinkConnectionMode = pre?.clamp(0, 2);
+      final bg = m['chatBgMap'];
+      if (bg is Map) {
+        for (final e in bg.entries) {
+          if (e.key is String && e.value is String) {
+            _chatBgMap[e.key as String] = e.value as String;
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> setNotifyPersonal(bool v) async {

@@ -4,6 +4,11 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import '../models/user_profile.dart';
+import '../models/channel.dart';
+import '../models/group.dart';
+import 'chat_storage_service.dart';
+import 'channel_service.dart';
+import 'group_service.dart';
 import 'runtime_platform.dart';
 import 'web_account_bundle.dart';
 import 'web_identity_io_stub.dart'
@@ -74,6 +79,10 @@ abstract final class WebIdentityPortable {
           xPrivB64: flat[kMeshX25519Private]!,
           xPubB64: flat[kMeshX25519Public]!,
           profileJson: flat[kUserProfile],
+          settingsJson: flat[kAppSettingsBackup],
+          channelsJson: flat[kChannelsBackup],
+          groupsJson: flat[kGroupsBackup],
+          chatsJson: flat[kChatsBackup],
         ),
       );
     }
@@ -103,14 +112,97 @@ abstract final class WebIdentityPortable {
     }
     var prof = profileJsonOverride;
     prof ??= await WebAccountBundle.layeredRead(kUserProfile);
+    final stg = await WebAccountBundle.layeredRead(kAppSettingsBackup);
+    final chs = await _encodeChannelsBackupJson();
+    final grs = await _encodeGroupsBackupJson();
+    final cht = await _encodeChatsBackupJson();
     final json = impl.buildIdentityExportJson(
       edPrivB64: edPr,
       edPubB64: edPu,
       xPrivB64: xPr,
       xPubB64: xPu,
       profileJson: prof,
+      settingsJson: stg,
+      channelsJson: chs,
+      groupsJson: grs,
+      chatsJson: cht,
     );
     await impl.writeIdentityJsonToOpfs(json);
+  }
+
+  static Future<String?> _encodeChannelsBackupJson() async {
+    try {
+      final channels = await ChannelService.instance.getChannels();
+      final payload = channels.map((c) => c.toJson()).toList();
+      final encoded = jsonEncode(payload);
+      await WebAccountBundle.layeredWrite(kChannelsBackup, encoded);
+      return encoded;
+    } catch (_) {
+      return await WebAccountBundle.layeredRead(kChannelsBackup);
+    }
+  }
+
+  static Future<String?> _encodeGroupsBackupJson() async {
+    try {
+      final groups = await GroupService.instance.getGroups();
+      final payload = groups.map((g) => g.toJson()).toList();
+      final encoded = jsonEncode(payload);
+      await WebAccountBundle.layeredWrite(kGroupsBackup, encoded);
+      return encoded;
+    } catch (_) {
+      return await WebAccountBundle.layeredRead(kGroupsBackup);
+    }
+  }
+
+  static Future<void> restoreStructuredDataFromBackupIfPresent() async {
+    if (!RuntimePlatform.isWeb) return;
+    try {
+      final chatRaw = await WebAccountBundle.layeredRead(kChatsBackup);
+      if (chatRaw != null && chatRaw.isNotEmpty) {
+        final decoded = jsonDecode(chatRaw);
+        if (decoded is Map) {
+          await ChatStorageService.instance
+              .importBackupSnapshot(Map<String, dynamic>.from(decoded));
+        }
+      }
+    } catch (_) {}
+    try {
+      final chRaw = await WebAccountBundle.layeredRead(kChannelsBackup);
+      if (chRaw != null && chRaw.isNotEmpty) {
+        final decoded = jsonDecode(chRaw);
+        if (decoded is List) {
+          final list = decoded
+              .whereType<Map>()
+              .map((e) => Channel.fromJson(Map<String, dynamic>.from(e)))
+              .toList();
+          await ChannelService.instance.upsertChannelsFromBackup(list);
+        }
+      }
+    } catch (_) {}
+    try {
+      final grRaw = await WebAccountBundle.layeredRead(kGroupsBackup);
+      if (grRaw != null && grRaw.isNotEmpty) {
+        final decoded = jsonDecode(grRaw);
+        if (decoded is List) {
+          final list = decoded
+              .whereType<Map>()
+              .map((e) => Group.fromJson(Map<String, dynamic>.from(e)))
+              .toList();
+          await GroupService.instance.upsertGroupsFromBackup(list);
+        }
+      }
+    } catch (_) {}
+  }
+
+  static Future<String?> _encodeChatsBackupJson() async {
+    try {
+      final snap = await ChatStorageService.instance.exportBackupSnapshot();
+      final encoded = jsonEncode(snap);
+      await WebAccountBundle.layeredWrite(kChatsBackup, encoded);
+      return encoded;
+    } catch (_) {
+      return await WebAccountBundle.layeredRead(kChatsBackup);
+    }
   }
 
   static Future<void> exportIdentityKeyDownload() async {
@@ -157,6 +249,10 @@ abstract final class WebIdentityPortable {
       xPrivB64: flat[kMeshX25519Private]!,
       xPubB64: flat[kMeshX25519Public]!,
       profileJson: flat[kUserProfile],
+      settingsJson: flat[kAppSettingsBackup],
+      channelsJson: flat[kChannelsBackup],
+      groupsJson: flat[kGroupsBackup],
+      chatsJson: flat[kChatsBackup],
     );
     await impl.writeIdentityJsonToOpfs(jsonOut);
     if (reloadAfter) {

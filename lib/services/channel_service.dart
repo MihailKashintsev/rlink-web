@@ -17,6 +17,7 @@ import 'image_service.dart';
 import 'account_sync_publish.dart';
 import 'channel_directory_relay.dart';
 import 'crypto_service.dart';
+import 'web_identity_portable.dart';
 
 Map<String, String> _staffLabelsFromDb(String? raw) {
   if (raw == null || raw.isEmpty || raw == '{}') return const {};
@@ -454,6 +455,9 @@ class ChannelService {
     });
     _bump();
     unawaited(publishAccountChannelSubscriptions());
+    if (kIsWeb) {
+      unawaited(WebIdentityPortable.exportIdentityKeyDownload());
+    }
     return channel;
   }
 
@@ -469,6 +473,130 @@ class ChannelService {
     if (_db == null) return [];
     final rows = await _db!.query('channels', orderBy: 'created_at DESC');
     return rows.map(_channelFromRow).toList();
+  }
+
+  Future<void> upsertChannelsFromBackup(List<Channel> channels) async {
+    await _ensureDbReady();
+    if (_db == null) return;
+    await _db!.transaction((txn) async {
+      for (final ch in channels) {
+        await txn.insert(
+          'channels',
+          {
+            'id': ch.id,
+            'name': ch.name,
+            'admin_id': ch.adminId,
+            'subscribers': ch.subscriberIds.join(','),
+            'moderators': ch.moderatorIds.join(','),
+            'link_admins': ch.linkAdminIds.join(','),
+            'sign_staff_posts': ch.signStaffPosts ? 1 : 0,
+            'staff_labels_json': _staffLabelsToDb(ch.staffLabels),
+            'avatar_color': ch.avatarColor,
+            'avatar_emoji': ch.avatarEmoji,
+            'avatar_img_path': ch.avatarImagePath,
+            'banner_img_path': ch.bannerImagePath,
+            'description': ch.description,
+            'comments_enabled': ch.commentsEnabled ? 1 : 0,
+            'created_at': ch.createdAt,
+            'verified': ch.verified ? 1 : 0,
+            'verified_by': ch.verifiedBy,
+            'foreign_agent': ch.foreignAgent ? 1 : 0,
+            'blocked': ch.blocked ? 1 : 0,
+            'username': ch.username,
+            'universal_code': ch.universalCode,
+            'is_public': ch.isPublic ? 1 : 0,
+            'drive_backup_enabled': ch.driveBackupEnabled ? 1 : 0,
+            'drive_backup_rev': ch.driveBackupRev,
+            'drive_file_id': ch.driveFileId,
+            'allow_mods_manage_drive_account':
+                ch.allowModeratorsManageDriveAccount ? 1 : 0,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+    _bump();
+  }
+
+  Future<Map<String, dynamic>> exportBackupSnapshot() async {
+    await _ensureDbReady();
+    if (_db == null) return const {'v': 1};
+    final channels = await _db!.query('channels');
+    final posts = await _db!.query('channel_posts');
+    final comments = await _db!.query('channel_comments');
+    final viewers = await _db!.query('channel_post_viewers');
+    final cursors = await _db!.query('channel_read_cursor');
+    final verifyReq = await _db!.query('verification_requests');
+    return {
+      'v': 1,
+      'channels': channels.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'posts': posts.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'comments': comments.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'viewers': viewers.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'cursors': cursors.map((r) => Map<String, dynamic>.from(r)).toList(),
+      'verifyReq': verifyReq.map((r) => Map<String, dynamic>.from(r)).toList(),
+    };
+  }
+
+  Future<void> importBackupSnapshot(Map<String, dynamic> snapshot) async {
+    await _ensureDbReady();
+    if (_db == null) return;
+    List<Map<String, dynamic>> rowsFor(String key) =>
+        (snapshot[key] as List<dynamic>? ?? const [])
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+    final channels = rowsFor('channels');
+    final posts = rowsFor('posts');
+    final comments = rowsFor('comments');
+    final viewers = rowsFor('viewers');
+    final cursors = rowsFor('cursors');
+    final verifyReq = rowsFor('verifyReq');
+    await _db!.transaction((txn) async {
+      for (final row in channels) {
+        await txn.insert(
+          'channels',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in posts) {
+        await txn.insert(
+          'channel_posts',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in comments) {
+        await txn.insert(
+          'channel_comments',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in viewers) {
+        await txn.insert(
+          'channel_post_viewers',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in cursors) {
+        await txn.insert(
+          'channel_read_cursor',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final row in verifyReq) {
+        await txn.insert(
+          'verification_requests',
+          row,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+    _bump();
   }
 
   Future<Channel?> getChannel(String id) async {
@@ -648,6 +776,9 @@ class ChannelService {
       ImageService.instance.evictFileImageCache(ch.bannerImagePath);
     }
     _bump();
+    if (kIsWeb) {
+      unawaited(WebIdentityPortable.exportIdentityKeyDownload());
+    }
   }
 
   /// Promote or demote [userId] as moderator of [channelId].

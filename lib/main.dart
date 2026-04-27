@@ -508,6 +508,8 @@ Future<void> initServices() async {
       await ChannelService.instance.resetAll();
       EtherService.instance.messages.value = const [];
       EtherService.instance.unreadCount.value = 0;
+    } else if (RuntimePlatform.isWeb) {
+      await WebIdentityPortable.restoreStructuredDataFromBackupIfPresent();
     }
     await StoryService.instance.init();
     await MediaUploadQueue.instance.init();

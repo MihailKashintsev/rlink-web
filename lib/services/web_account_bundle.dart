@@ -19,6 +19,10 @@ const kMeshIdentityPublic = 'mesh_identity_public';
 const kMeshX25519Private = 'mesh_x25519_private';
 const kMeshX25519Public = 'mesh_x25519_public';
 const kUserProfile = 'rlink_user_profile';
+const kAppSettingsBackup = 'rlink_app_settings_backup';
+const kChannelsBackup = 'rlink_channels_backup';
+const kGroupsBackup = 'rlink_groups_backup';
+const kChatsBackup = 'rlink_chats_backup';
 
 /// Set to `'1'` after web identity file import; cleared in [ProfileService.init].
 const kRlinkPostKeyImportFlag = 'rlink_post_key_import';
