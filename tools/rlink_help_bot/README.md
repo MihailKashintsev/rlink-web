@@ -59,7 +59,9 @@ python -m pip install "websocket-client>=1.7" "cryptography>=42"
    cd relay_server
    dart run bin/server.dart
    ```
-   Для приложения нужен **тот же** relay URL, что и у бота (`RLINK_RELAY_URL`).
+  Для приложения нужен **тот же** relay URL, что и у бота (`RLINK_RELAY_URL`).
+  Если relay поднимается через Tuna (`https://...tuna.am`), в приложении и у бота
+  используйте WebSocket-адрес с той же нодой: `wss://...tuna.am`.
 
 4. **В Rlink**: **Боты → Lib** → `/start` →  
    `/newbot rlink_help_bot`  
