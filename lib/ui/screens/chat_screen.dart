@@ -2294,6 +2294,24 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_tearingDown || !mounted) return;
     setState(() => _aiThinking = true);
     try {
+      final internetModeEnabled = AppSettings.instance.connectionMode != 0;
+      final relayOnline = RelayService.instance.isConnected;
+      if (!internetModeEnabled || !relayOnline) {
+        final botMsg = ChatMessage(
+          id: _uuid.v4(),
+          peerId: kLibBotPeerId,
+          text:
+              'Lib работает только через интернет-соединение relay. '
+              'Включите режим Интернет/Both и дождитесь подключения relay.',
+          isOutgoing: false,
+          timestamp: DateTime.now(),
+          status: MessageStatus.delivered,
+        );
+        await ChatStorageService.instance.saveMessage(botMsg);
+        await ChatStorageService.instance.loadMessages(kLibBotPeerId);
+        if (!_tearingDown && mounted) _scrollToBottom();
+        return;
+      }
       final lines = await LibBotService.instance.handleUserTurn(userText);
       if (_tearingDown || !mounted) return;
       final now = DateTime.now();
@@ -4798,21 +4816,22 @@ class _ChatScreenState extends State<ChatScreen> {
                     runSpacing: 10,
                     children: [
                       for (final e in _libQuickCommands)
-                        ActionChip(
-                          label: Padding(
+                        FilledButton.tonal(
+                          key: ValueKey('lib_quick_${e.$2}'),
+                          style: FilledButton.styleFrom(
+                            visualDensity: VisualDensity.standard,
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
+                              horizontal: 16,
+                              vertical: 12,
                             ),
-                            child: Text(
-                              e.$1,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w600),
+                            textStyle: const TextStyle(
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
                           onPressed: _isSending
                               ? null
                               : () => unawaited(_sendPresetCommand(e.$2)),
+                          child: Text(e.$1),
                         ),
                     ],
                   ),
@@ -5347,7 +5366,7 @@ class _MessageBubble extends StatelessWidget {
   });
 
   static final RegExp _botButtonToken = RegExp(
-    r'\[btn:([^\]|]+)\|(/[a-zA-Z][a-zA-Z0-9_]*)\]',
+    r'\[btn:([^\]|]+)\|(/[a-zA-Z][a-zA-Z0-9_-]*)\]',
     multiLine: true,
   );
 
@@ -5677,19 +5696,20 @@ class _MessageBubble extends StatelessWidget {
                     runSpacing: 10,
                     children: [
                       for (final b in slashButtons)
-                        ActionChip(
-                          label: Padding(
+                        FilledButton.tonal(
+                          key: ValueKey('msg_btn_${b.$2}_${b.$1}'),
+                          style: FilledButton.styleFrom(
+                            visualDensity: VisualDensity.standard,
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
+                              horizontal: 16,
+                              vertical: 12,
                             ),
-                            child: Text(
-                              b.$1,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w600),
+                            textStyle: const TextStyle(
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
                           onPressed: () => onSlashCommandTap!(b.$2),
+                          child: Text(b.$1),
                         ),
                     ],
                   ),
@@ -5966,6 +5986,7 @@ class _InputBar extends StatefulWidget {
 
 class _InputBarState extends State<_InputBar> {
   final _focusNode = FocusNode();
+  late final VoidCallback _controllerListener;
 
   /// Панель B/I/S… не перекрывает поле — открывается кнопкой при выделении.
   bool _showFormatStrip = false;
@@ -5978,7 +5999,7 @@ class _InputBarState extends State<_InputBar> {
   void initState() {
     super.initState();
     AppSettings.instance.addListener(_onAppSettingsChanged);
-    widget.controller.addListener(() {
+    _controllerListener = () {
       if (mounted) {
         setState(() {
           final sel = widget.controller.selection;
@@ -5987,12 +6008,14 @@ class _InputBarState extends State<_InputBar> {
           }
         });
       }
-    });
+    };
+    widget.controller.addListener(_controllerListener);
   }
 
   @override
   void dispose() {
     AppSettings.instance.removeListener(_onAppSettingsChanged);
+    widget.controller.removeListener(_controllerListener);
     _focusNode.dispose();
     super.dispose();
   }

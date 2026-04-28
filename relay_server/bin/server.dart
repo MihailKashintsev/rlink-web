@@ -218,6 +218,8 @@ const _botOwnerListRateWindow = Duration(minutes: 1);
 const _botOwnerListRateMax = 45;
 const _botOwnerPatchRateWindow = Duration(minutes: 1);
 const _botOwnerPatchRateMax = 45;
+final String _relayAdminHash =
+    (Platform.environment['RELAY_ADMIN_HASH'] ?? '').trim().toLowerCase();
 
 final Map<String, Map<String, dynamic>> _botDirectory = {};
 final Map<String, Map<String, dynamic>> _botClaims = {};
@@ -432,6 +434,8 @@ void _sendBotDirSnapshot(WebSocketChannel ws) {
       'createdAt': m['createdAt'] ?? 0,
       'avatarUrl': m['avatarUrl'] ?? '',
       'bannerUrl': m['bannerUrl'] ?? '',
+      'verified': m['verified'] == true,
+      'blocked': m['blocked'] == true,
     });
   }
   if (out.isEmpty) return;
@@ -459,6 +463,20 @@ bool _isAllowedBotMediaUrl(String url) {
   final u = Uri.tryParse(url);
   if (u == null || !u.hasScheme) return false;
   return u.scheme == 'https' || u.scheme == 'http';
+}
+
+bool _isBotBlockedOrRevoked(String botId) {
+  final row = _botDirectory[botId];
+  if (row == null) return false;
+  return row['revoked'] == true || row['blocked'] == true;
+}
+
+String _jsonString(dynamic v) => v == null ? '' : v.toString();
+
+bool _isAdminHashValid(String hash) {
+  if (_relayAdminHash.isEmpty) return false;
+  final h = hash.trim().toLowerCase();
+  return h.isNotEmpty && h == _relayAdminHash;
 }
 
 bool _handleTakenByActiveBot(String handleLower) {
@@ -521,10 +539,10 @@ Future<void> _handleBotRegisterStartAsync(
     ackFail('bad_version');
     return;
   }
-  final owner = (obj['owner'] as String?)?.toLowerCase().trim() ?? '';
-  final botPk = (obj['botPublicKey'] as String?)?.toLowerCase().trim() ?? '';
-  final displayName = (obj['displayName'] as String?)?.trim() ?? '';
-  final handleNorm = _normalizeBotHandle(obj['handle'] as String?);
+  final owner = _jsonString(obj['owner']).toLowerCase().trim();
+  final botPk = _jsonString(obj['botPublicKey']).toLowerCase().trim();
+  final displayName = _jsonString(obj['displayName']).trim();
+  final handleNorm = _normalizeBotHandle(_jsonString(obj['handle']));
   final ts = (obj['ts'] as num?)?.toInt() ?? 0;
 
   if (owner != user.publicKey) {
@@ -595,7 +613,7 @@ Future<void> _handleBotRegisterStartAsync(
     'owner': owner,
     'handle': handleNorm,
     'displayName': displayName,
-    'description': (obj['description'] as String?)?.trim() ?? '',
+    'description': _jsonString(obj['description']).trim(),
     'botPublicKey': botPk,
     'createdAt': now,
     'claimCode': claimCode,
@@ -705,6 +723,8 @@ void _handleBotClaim(_User user, Map<String, dynamic> msg) {
     'webhookUrl': '',
     'avatarUrl': '',
     'bannerUrl': '',
+    'verified': false,
+    'blocked': false,
   };
   _persistBotDirectory();
 
@@ -766,7 +786,7 @@ Future<void> _handleBotOwnerListAsync(
     return;
   }
 
-  final reqId = (obj['reqId'] as String?)?.trim() ?? '';
+  final reqId = _jsonString(obj['reqId']).trim();
   if (reqId.length > 64) {
     ackFail('bad_request', '');
     return;
@@ -777,7 +797,7 @@ Future<void> _handleBotOwnerListAsync(
     return;
   }
 
-  final owner = (obj['owner'] as String?)?.toLowerCase().trim() ?? '';
+  final owner = _jsonString(obj['owner']).toLowerCase().trim();
   if (owner != user.publicKey) {
     ackFail('owner_mismatch', reqId);
     return;
@@ -880,7 +900,7 @@ Future<void> _handleBotOwnerPatchAsync(
     return;
   }
 
-  final reqId = (obj['reqId'] as String?)?.trim() ?? '';
+  final reqId = _jsonString(obj['reqId']).trim();
   if (reqId.length > 64) {
     ackFail('bad_request', '');
     return;
@@ -891,7 +911,7 @@ Future<void> _handleBotOwnerPatchAsync(
     return;
   }
 
-  final owner = (obj['owner'] as String?)?.toLowerCase().trim() ?? '';
+  final owner = _jsonString(obj['owner']).toLowerCase().trim();
   if (owner != user.publicKey) {
     ackFail('owner_mismatch', reqId);
     return;
@@ -901,7 +921,7 @@ Future<void> _handleBotOwnerPatchAsync(
     return;
   }
 
-  final botId = (obj['botId'] as String?)?.toLowerCase().trim() ?? '';
+  final botId = _jsonString(obj['botId']).toLowerCase().trim();
   if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(botId)) {
     ackFail('bad_bot_id', reqId);
     return;
@@ -964,7 +984,7 @@ Future<void> _handleBotOwnerPatchAsync(
   var changed = false;
 
   if (obj.containsKey('displayName')) {
-    final n = (obj['displayName'] as String?)?.trim() ?? '';
+    final n = _jsonString(obj['displayName']).trim();
     if (n.isEmpty || n.length > 64) {
       ackFail('bad_display_name', reqId);
       return;
@@ -973,7 +993,7 @@ Future<void> _handleBotOwnerPatchAsync(
     changed = true;
   }
   if (obj.containsKey('description')) {
-    final d = (obj['description'] as String?)?.trim() ?? '';
+    final d = _jsonString(obj['description']).trim();
     if (d.length > 512) {
       ackFail('description_too_long', reqId);
       return;
@@ -986,7 +1006,7 @@ Future<void> _handleBotOwnerPatchAsync(
     row['avatarUrl'] = '';
     changed = true;
   } else if (obj.containsKey('avatarUrl')) {
-    final u = (obj['avatarUrl'] as String?)?.trim() ?? '';
+    final u = _jsonString(obj['avatarUrl']).trim();
     if (!_isAllowedBotMediaUrl(u)) {
       ackFail('bad_url', reqId);
       return;
@@ -999,7 +1019,7 @@ Future<void> _handleBotOwnerPatchAsync(
     row['bannerUrl'] = '';
     changed = true;
   } else if (obj.containsKey('bannerUrl')) {
-    final bu = (obj['bannerUrl'] as String?)?.trim() ?? '';
+    final bu = _jsonString(obj['bannerUrl']).trim();
     if (!_isAllowedBotMediaUrl(bu)) {
       ackFail('bad_url', reqId);
       return;
@@ -1441,6 +1461,13 @@ void _handleMessage(_User user, dynamic raw) {
   final type = msg['type'] as String?;
   if (type == null) return;
 
+  if (_isBotBlockedOrRevoked(user.publicKey) && type != 'ping') {
+    try {
+      user.ws.sink.add(jsonEncode({'type': 'error', 'msg': 'bot_access_denied'}));
+    } catch (_) {}
+    return;
+  }
+
   // Blobs и каталог каналов / боты не считаем в общий flood лимит.
   if (type != 'blob' &&
       type != 'channel_dir_put' &&
@@ -1488,10 +1515,120 @@ void _handleMessage(_User user, dynamic raw) {
     case 'bot_owner_patch':
       _handleBotOwnerPatch(user, msg);
       break;
+    case 'admin_bot_list':
+      _handleAdminBotList(user, msg);
+      break;
+    case 'admin_bot_update':
+      _handleAdminBotUpdate(user, msg);
+      break;
     case 'relay_ack':
       _handleRelayAck(user, msg);
       break;
   }
+}
+
+void _handleAdminBotList(_User user, Map<String, dynamic> msg) {
+  final reqId = _jsonString(msg['reqId']).trim();
+  void ack(Map<String, dynamic> body) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'admin_bot_list_ack',
+        'reqId': reqId,
+        ...body,
+      }));
+    } catch (_) {}
+  }
+
+  final adminHash = _jsonString(msg['adminHash']);
+  if (!_isAdminHashValid(adminHash)) {
+    ack({'ok': false, 'error': 'forbidden'});
+    return;
+  }
+  final includeRevoked = msg['includeRevoked'] == true;
+  final query = _jsonString(msg['q']).trim().toLowerCase();
+  final out = <Map<String, dynamic>>[];
+  for (final m in _botDirectory.values) {
+    final revoked = m['revoked'] == true;
+    if (revoked && !includeRevoked) continue;
+    final id = _jsonString(m['botId']);
+    final handle = _jsonString(m['handle']);
+    final displayName = _jsonString(m['displayName']).isEmpty
+        ? handle
+        : _jsonString(m['displayName']);
+    final owner = _jsonString(m['ownerEd25519Pub']);
+    final blocked = m['blocked'] == true;
+    final verified = m['verified'] == true;
+    if (query.isNotEmpty) {
+      final hay = '$id $handle $displayName $owner ${_jsonString(m['description'])}'
+          .toLowerCase();
+      if (!hay.contains(query)) continue;
+    }
+    out.add({
+      'botId': id,
+      'handle': handle,
+      'displayName': displayName,
+      'description': _jsonString(m['description']),
+      'ownerEd25519Pub': owner,
+      'createdAt': m['createdAt'] ?? 0,
+      'blocked': blocked,
+      'verified': verified,
+      'revoked': revoked,
+    });
+  }
+  out.sort((a, b) => ((b['createdAt'] as num?)?.toInt() ?? 0)
+      .compareTo((a['createdAt'] as num?)?.toInt() ?? 0));
+  ack({'ok': true, 'bots': out});
+}
+
+void _handleAdminBotUpdate(_User user, Map<String, dynamic> msg) {
+  final reqId = _jsonString(msg['reqId']).trim();
+  void ack(Map<String, dynamic> body) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'admin_bot_update_ack',
+        'reqId': reqId,
+        ...body,
+      }));
+    } catch (_) {}
+  }
+
+  final adminHash = _jsonString(msg['adminHash']);
+  if (!_isAdminHashValid(adminHash)) {
+    ack({'ok': false, 'error': 'forbidden'});
+    return;
+  }
+  final botId = _jsonString(msg['botId']).toLowerCase().trim();
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(botId)) {
+    ack({'ok': false, 'error': 'bad_bot_id'});
+    return;
+  }
+  final row = _botDirectory[botId];
+  if (row == null) {
+    ack({'ok': false, 'error': 'not_found'});
+    return;
+  }
+  var changed = false;
+  if (msg.containsKey('verified')) {
+    row['verified'] = msg['verified'] == true;
+    changed = true;
+  }
+  if (msg.containsKey('blocked')) {
+    row['blocked'] = msg['blocked'] == true;
+    changed = true;
+  }
+  if (msg['revoke'] == true) {
+    row['revoked'] = true;
+    row['blocked'] = true;
+    changed = true;
+  }
+  if (!changed) {
+    ack({'ok': false, 'error': 'empty_patch'});
+    return;
+  }
+  row['updatedAt'] = DateTime.now().millisecondsSinceEpoch;
+  _persistBotDirectory();
+  _broadcastBotDirSnapshotToAll();
+  ack({'ok': true});
 }
 
 void _handleRelayAck(_User user, Map<String, dynamic> msg) {
@@ -1724,6 +1861,19 @@ shelf.Handler _wsHandler() {
 
             user = _User(ws: ws, publicKey: publicKey, nick: nick, x25519Key: x25519Key);
             _users[publicKey] = user!;
+            if (_isBotBlockedOrRevoked(publicKey)) {
+              try {
+                ws.sink.add(jsonEncode({
+                  'type': 'error',
+                  'msg': 'bot_access_denied',
+                }));
+              } catch (_) {}
+              try {
+                ws.sink.close(4003, 'bot_access_denied');
+              } catch (_) {}
+              _users.remove(publicKey);
+              return;
+            }
 
             final shortId = publicKey.substring(0, 8);
             ws.sink.add(jsonEncode({
@@ -1823,7 +1973,7 @@ shelf.Response _jsonResponse(Map<String, dynamic> body, {int status = 200}) {
       'content-type': 'application/json',
       'access-control-allow-origin': '*',
       'access-control-allow-methods': 'GET,POST,OPTIONS',
-      'access-control-allow-headers': 'content-type',
+      'access-control-allow-headers': 'content-type, authorization, x-admin-hash',
     },
   );
 }
@@ -1847,7 +1997,7 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
       headers: {
         'access-control-allow-origin': '*',
         'access-control-allow-methods': 'GET,POST,OPTIONS',
-        'access-control-allow-headers': 'content-type, authorization',
+        'access-control-allow-headers': 'content-type, authorization, x-admin-hash',
       },
     );
   }
@@ -1908,6 +2058,7 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
       'uptime': DateTime.now().toIso8601String(),
       'pushConfigured': _webPushConfigured,
       'pushRecipients': _pushSubscriptions.length,
+      'adminEnabled': _relayAdminHash.isNotEmpty,
     });
   }
 
@@ -1920,7 +2071,7 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
       return _jsonResponse({'ok': false, 'error': 'unauthorized'}, status: 401);
     }
     final row = _botDirectory[botId];
-    if (row == null || row['revoked'] == true) {
+  if (row == null || row['revoked'] == true || row['blocked'] == true) {
       return _jsonResponse({'ok': false, 'error': 'not_found'}, status: 404);
     }
     try {
@@ -2029,5 +2180,10 @@ Future<void> main() async {
   stdout.writeln('  Rlink Relay Server v1.0');
   stdout.writeln('  Listening on ws://${server.address.host}:${server.port}');
   stdout.writeln('  Zero-knowledge relay — E2E encrypted only');
+  if (_relayAdminHash.isEmpty) {
+    stdout.writeln('  Admin bot panel: DISABLED (set RELAY_ADMIN_HASH)');
+  } else {
+    stdout.writeln('  Admin bot panel: enabled');
+  }
   stdout.writeln('══════════════════════════════════════════════');
 }

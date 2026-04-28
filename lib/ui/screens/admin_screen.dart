@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -84,6 +85,10 @@ class _AdminScreenState extends State<AdminScreen>
   late final TabController _tabs;
   final _searchCtrl = TextEditingController();
   String _query = '';
+  List<_RelayAdminBot> _relayBots = const [];
+  bool _relayBotsLoading = false;
+  bool _includeRevokedBots = false;
+  String? _relayBotsError;
 
   @override
   void initState() {
@@ -93,6 +98,7 @@ class _AdminScreenState extends State<AdminScreen>
     _searchCtrl.addListener(() {
       setState(() => _query = _searchCtrl.text.trim().toLowerCase());
     });
+    unawaited(_loadRelayBots());
   }
 
   @override
@@ -260,43 +266,95 @@ class _AdminScreenState extends State<AdminScreen>
   Widget _buildBotsTab() {
     final cs = Theme.of(context).colorScheme;
     final enabled = AppSettings.instance.enabledBotIds.toSet();
-    final filtered = _query.isEmpty
+    final builtins = _query.isEmpty
         ? kBuiltinAiBots
         : kBuiltinAiBots
             .where((b) =>
                 b.name.toLowerCase().contains(_query) ||
                 b.description.toLowerCase().contains(_query))
             .toList();
-    if (filtered.isEmpty) {
-      return Center(
-        child: Text(
-          'Ничего не найдено',
-          style: TextStyle(color: cs.onSurfaceVariant),
-        ),
-      );
-    }
-    return ListView.builder(
-      itemCount: filtered.length,
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      itemBuilder: (ctx, i) {
-        final bot = filtered[i];
-        final isEnabled = enabled.contains(bot.id);
-        return Card(
-          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          child: SwitchListTile(
-            value: isEnabled,
-            secondary: CircleAvatar(
-              backgroundColor: Color(bot.avatarColor),
-              child: Text(bot.avatarEmoji, style: const TextStyle(fontSize: 18)),
+    final relayFiltered = _query.isEmpty
+        ? _relayBots
+        : _relayBots.where((b) => b.matches(_query)).toList();
+
+    return RefreshIndicator(
+      onRefresh: _loadRelayBots,
+      child: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          ListTile(
+            leading: const Icon(Icons.settings_ethernet_outlined),
+            title: const Text('Relay-боты (админ)'),
+            subtitle: Text(_relayBotsError ??
+                'Поиск по @нику, названию и полному botId (64 hex).'),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('revoked'),
+                Switch(
+                  value: _includeRevokedBots,
+                  onChanged: (v) async {
+                    setState(() => _includeRevokedBots = v);
+                    await _loadRelayBots();
+                  },
+                ),
+                IconButton(
+                  tooltip: 'Обновить',
+                  onPressed: _relayBotsLoading ? null : () => unawaited(_loadRelayBots()),
+                  icon: _relayBotsLoading
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                ),
+              ],
             ),
-            title: Text(bot.name,
-                style:
-                    const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
-            subtitle: Text(bot.description),
-            onChanged: (_) => _toggleBot(bot.id),
           ),
-        );
-      },
+          if (relayFiltered.isEmpty && !_relayBotsLoading)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Text(
+                _relayBotsError != null ? 'Ошибка загрузки списка ботов' : 'Релей-боты не найдены',
+                style: TextStyle(color: cs.onSurfaceVariant),
+              ),
+            )
+          else
+            ...relayFiltered.map((b) => _RelayBotAdminTile(
+                  bot: b,
+                  onToggleVerified: () => _updateRelayBot(botId: b.botId, verified: !b.verified),
+                  onToggleBlocked: () => _updateRelayBot(botId: b.botId, blocked: !b.blocked),
+                  onRevoke: () => _confirmAndRevokeRelayBot(b),
+                )),
+          const Divider(height: 26),
+          const ListTile(
+            leading: Icon(Icons.smart_toy_outlined),
+            title: Text('Встроенные боты приложения'),
+            subtitle: Text('Локальный переключатель Lib/GigaChat'),
+          ),
+          ...builtins.map((bot) {
+            final isEnabled = enabled.contains(bot.id);
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: SwitchListTile(
+                value: isEnabled,
+                secondary: CircleAvatar(
+                  backgroundColor: Color(bot.avatarColor),
+                  child: Text(bot.avatarEmoji, style: const TextStyle(fontSize: 18)),
+                ),
+                title: Text(
+                  bot.name,
+                  style:
+                      const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                ),
+                subtitle: Text(bot.description),
+                onChanged: (_) => _toggleBot(bot.id),
+              ),
+            );
+          }),
+        ],
+      ),
     );
   }
 
@@ -409,6 +467,96 @@ class _AdminScreenState extends State<AdminScreen>
     await AppSettings.instance.setEnabledBotIds(current.toList());
     await _publishAdminSync();
     if (mounted) setState(() {});
+  }
+
+  Future<void> _loadRelayBots() async {
+    if (_relayBotsLoading) return;
+    setState(() {
+      _relayBotsLoading = true;
+      _relayBotsError = null;
+    });
+    try {
+      final data = await RelayService.instance.sendAdminBotList(
+        adminHash: AppSettings.instance.adminPasswordHash,
+        query: _query,
+        includeRevoked: _includeRevokedBots,
+      );
+      if (data['ok'] != true) {
+        throw Exception(data['error']?.toString() ?? 'request_failed');
+      }
+      final raw = data['bots'];
+      final out = <_RelayAdminBot>[];
+      if (raw is List) {
+        for (final item in raw) {
+          if (item is Map) {
+            out.add(_RelayAdminBot.fromJson(Map<String, dynamic>.from(item)));
+          }
+        }
+      }
+      if (!mounted) return;
+      setState(() => _relayBots = out);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _relayBotsError = e.toString());
+    } finally {
+      if (mounted) setState(() => _relayBotsLoading = false);
+    }
+  }
+
+  Future<void> _updateRelayBot({
+    required String botId,
+    bool? verified,
+    bool? blocked,
+    bool revoke = false,
+  }) async {
+    try {
+      final ack = await RelayService.instance.sendAdminBotUpdate(
+        adminHash: AppSettings.instance.adminPasswordHash,
+        botId: botId,
+        verified: verified,
+        blocked: blocked,
+        revoke: revoke,
+      );
+      if (ack['ok'] != true) {
+        throw Exception(ack['error']?.toString() ?? 'request_failed');
+      }
+      await _loadRelayBots();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Параметры бота обновлены')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  Future<void> _confirmAndRevokeRelayBot(_RelayAdminBot bot) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Удалить бота из relay?'),
+        content: Text(
+          'Бот @${bot.handle} (${bot.botId.substring(0, 12)}...) будет отозван. '
+          'Доступы будут закрыты, владельцу придётся пересоздать бота.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _updateRelayBot(botId: bot.botId, revoke: true);
   }
 
   Future<void> _publishAdminSync() async {
@@ -627,6 +775,186 @@ class _RequestTile extends StatelessWidget {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RelayAdminBot {
+  final String botId;
+  final String handle;
+  final String displayName;
+  final String ownerEd25519Pub;
+  final String description;
+  final bool verified;
+  final bool blocked;
+  final bool revoked;
+
+  const _RelayAdminBot({
+    required this.botId,
+    required this.handle,
+    required this.displayName,
+    required this.ownerEd25519Pub,
+    required this.description,
+    required this.verified,
+    required this.blocked,
+    required this.revoked,
+  });
+
+  bool matches(String q) {
+    final x = q.toLowerCase();
+    return botId.toLowerCase().contains(x) ||
+        handle.toLowerCase().contains(x) ||
+        displayName.toLowerCase().contains(x) ||
+        ownerEd25519Pub.toLowerCase().contains(x) ||
+        description.toLowerCase().contains(x);
+  }
+
+  factory _RelayAdminBot.fromJson(Map<String, dynamic> j) {
+    return _RelayAdminBot(
+      botId: (j['botId'] as String? ?? '').toLowerCase(),
+      handle: j['handle'] as String? ?? '',
+      displayName: j['displayName'] as String? ?? '',
+      ownerEd25519Pub: (j['ownerEd25519Pub'] as String? ?? '').toLowerCase(),
+      description: j['description'] as String? ?? '',
+      verified: j['verified'] == true,
+      blocked: j['blocked'] == true,
+      revoked: j['revoked'] == true,
+    );
+  }
+}
+
+class _RelayBotAdminTile extends StatelessWidget {
+  final _RelayAdminBot bot;
+  final VoidCallback onToggleVerified;
+  final VoidCallback onToggleBlocked;
+  final VoidCallback onRevoke;
+
+  const _RelayBotAdminTile({
+    required this.bot,
+    required this.onToggleVerified,
+    required this.onToggleBlocked,
+    required this.onRevoke,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const CircleAvatar(
+                  child: Icon(Icons.smart_toy_outlined),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '@${bot.handle} — ${bot.displayName}',
+                        style: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        bot.botId,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (bot.description.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                bot.description.trim(),
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ],
+            const SizedBox(height: 6),
+            Text(
+              'Owner: ${bot.ownerEd25519Pub}',
+              style: TextStyle(
+                fontSize: 11,
+                fontFamily: 'monospace',
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                if (bot.verified) _chip('VERIFIED', Colors.blue),
+                if (bot.blocked) _chip('BLOCKED', Colors.red),
+                if (bot.revoked) _chip('REVOKED', Colors.red.shade900),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: bot.revoked ? null : onToggleVerified,
+                  icon: Icon(
+                    bot.verified ? Icons.verified : Icons.verified_outlined,
+                    size: 16,
+                  ),
+                  label: Text(bot.verified ? 'Снять галочку' : 'Выдать галочку'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: bot.revoked ? null : onToggleBlocked,
+                  icon: Icon(
+                    bot.blocked ? Icons.lock_open : Icons.block,
+                    size: 16,
+                    color: bot.blocked ? Colors.red : null,
+                  ),
+                  label: Text(bot.blocked ? 'Разблокировать' : 'Блокировать'),
+                ),
+                FilledButton.icon(
+                  onPressed: bot.revoked ? null : onRevoke,
+                  style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                  icon: const Icon(Icons.delete_outline, size: 16),
+                  label: const Text('Удалить'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _chip(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color, width: 1),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          color: color,
         ),
       ),
     );

@@ -138,6 +138,7 @@ class RelayService with WidgetsBindingObserver {
   void Function(Map<String, dynamic> msg)? onBotRegisterAck;
 
   final Map<String, Completer<Map<String, dynamic>>> _botOwnerAckCompleters = {};
+  final Map<String, Completer<Map<String, dynamic>>> _adminBotAckCompleters = {};
 
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
@@ -889,6 +890,19 @@ class RelayService with WidgetsBindingObserver {
             }
           }
           break;
+        case 'admin_bot_list_ack':
+        case 'admin_bot_update_ack':
+          final adminRid = msg['reqId']?.toString() ?? '';
+          if (adminRid.isNotEmpty) {
+            final c = _adminBotAckCompleters.remove(adminRid);
+            if (c != null && !c.isCompleted) {
+              final copy = Map<String, dynamic>.from(msg);
+              scheduleMicrotask(() {
+                if (!c.isCompleted) c.complete(copy);
+              });
+            }
+          }
+          break;
 
         case 'bot_dir_snapshot':
           _applyBotDirectorySnapshot(msg['bots'] as List<dynamic>?);
@@ -1099,6 +1113,87 @@ class RelayService with WidgetsBindingObserver {
     } catch (e) {
       _botOwnerAckCompleters.remove(reqId);
       debugPrint('[RLINK][Relay] bot_owner_patch failed: $e');
+      return {'ok': false, 'error': e.toString()};
+    }
+  }
+
+  /// Админ: список relay-ботов (поиск по q, includeRevoked=true/false).
+  Future<Map<String, dynamic>> sendAdminBotList({
+    required String adminHash,
+    String query = '',
+    bool includeRevoked = false,
+  }) async {
+    if (!isConnected) return {'ok': false, 'error': 'offline'};
+    final h = adminHash.trim().toLowerCase();
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(h)) {
+      return {'ok': false, 'error': 'bad_admin_hash'};
+    }
+    final reqId = _newBotOwnerReqId();
+    final c = Completer<Map<String, dynamic>>();
+    _adminBotAckCompleters[reqId] = c;
+    try {
+      await _safeSend({
+        'type': 'admin_bot_list',
+        'adminHash': h,
+        'q': query.trim(),
+        'includeRevoked': includeRevoked,
+        'reqId': reqId,
+      }, context: 'admin_bot_list');
+      return await c.future.timeout(
+        const Duration(seconds: 20),
+        onTimeout: () {
+          _adminBotAckCompleters.remove(reqId);
+          return {'ok': false, 'error': 'timeout'};
+        },
+      );
+    } catch (e) {
+      _adminBotAckCompleters.remove(reqId);
+      return {'ok': false, 'error': e.toString()};
+    }
+  }
+
+  /// Админ: обновить бот (галочка/блок/revoke).
+  Future<Map<String, dynamic>> sendAdminBotUpdate({
+    required String adminHash,
+    required String botId,
+    bool? verified,
+    bool? blocked,
+    bool revoke = false,
+  }) async {
+    if (!isConnected) return {'ok': false, 'error': 'offline'};
+    final h = adminHash.trim().toLowerCase();
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(h)) {
+      return {'ok': false, 'error': 'bad_admin_hash'};
+    }
+    final id = botId.trim().toLowerCase();
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) {
+      return {'ok': false, 'error': 'bad_bot_id'};
+    }
+    if (verified == null && blocked == null && !revoke) {
+      return {'ok': false, 'error': 'empty_patch'};
+    }
+    final reqId = _newBotOwnerReqId();
+    final c = Completer<Map<String, dynamic>>();
+    _adminBotAckCompleters[reqId] = c;
+    try {
+      await _safeSend({
+        'type': 'admin_bot_update',
+        'adminHash': h,
+        'botId': id,
+        if (verified != null) 'verified': verified,
+        if (blocked != null) 'blocked': blocked,
+        if (revoke) 'revoke': true,
+        'reqId': reqId,
+      }, context: 'admin_bot_update');
+      return await c.future.timeout(
+        const Duration(seconds: 20),
+        onTimeout: () {
+          _adminBotAckCompleters.remove(reqId);
+          return {'ok': false, 'error': 'timeout'};
+        },
+      );
+    } catch (e) {
+      _adminBotAckCompleters.remove(reqId);
       return {'ok': false, 'error': e.toString()};
     }
   }

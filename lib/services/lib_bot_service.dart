@@ -26,6 +26,29 @@ class LibBotService {
   String? _awaitingBotPubForHandle;
   String _awaitingDisplayName = '';
 
+  Future<bool> _ensureRelayConnected() async {
+    if (RelayService.instance.isConnected) return true;
+    await RelayService.instance.connect();
+    if (RelayService.instance.isConnected) return true;
+    if (RelayService.instance.state.value == RelayState.connecting) {
+      // На мобильной сети/после wake-up websocket иногда поднимается не за 2-3 сек.
+      for (var i = 0; i < 40; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        if (RelayService.instance.isConnected) return true;
+        if (RelayService.instance.state.value == RelayState.disconnected) break;
+      }
+    }
+    return RelayService.instance.isConnected;
+  }
+
+  String _normalizeMediaUrl(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return t;
+    if (t.startsWith('http://') || t.startsWith('https://')) return t;
+    if (t.startsWith('www.')) return 'https://$t';
+    return t;
+  }
+
   static const _help =
       'Lib — регистратор ботов (аналог BotFather; переписки с ботами — E2E).\n\n'
       'Полная инструкция по приложению и ботам: Настройки → Документация (RU / EN).\n\n'
@@ -215,7 +238,7 @@ class LibBotService {
       if (parts.length == 2) {
         return _patchOwnedBot(handleNorm: h, changes: {'clearAvatar': true});
       }
-      final url = parts.sublist(2).join(' ').trim();
+      final url = _normalizeMediaUrl(parts.sublist(2).join(' ').trim());
       return _patchOwnedBot(handleNorm: h, changes: {'avatarUrl': url});
     }
 
@@ -234,7 +257,7 @@ class LibBotService {
       if (parts.length == 2) {
         return _patchOwnedBot(handleNorm: h, changes: {'clearBanner': true});
       }
-      final url = parts.sublist(2).join(' ').trim();
+      final url = _normalizeMediaUrl(parts.sublist(2).join(' ').trim());
       return _patchOwnedBot(handleNorm: h, changes: {'bannerUrl': url});
     }
 
@@ -341,7 +364,8 @@ class LibBotService {
       case 'offline':
         return 'Relay не подключён.';
       case 'timeout':
-        return 'Таймаут ответа relay.';
+        return 'Таймаут ответа relay. Возможно на сервере ещё нет поддержки bot_owner_patch '
+            '(обновите relay до актуального server.dart) или нестабильное соединение.';
       case 'not_found':
         return 'Бот не найден в каталоге relay.';
       case 'not_owner':
@@ -380,9 +404,22 @@ class LibBotService {
     return (out, null);
   }
 
+  Map<String, dynamic>? _findOwnedBotByHandle(
+    List<Map<String, dynamic>> bots,
+    String handleNorm,
+  ) {
+    for (final b in bots) {
+      if ((b['handle'] as String?)?.toLowerCase() == handleNorm) return b;
+    }
+    return null;
+  }
+
   Future<List<String>> _myBotsLines() async {
-    if (!RelayService.instance.isConnected) {
-      return const ['Relay не подключён.'];
+    if (!await _ensureRelayConnected()) {
+      return const [
+        'Relay не подключён.',
+        'Проверьте интернет и URL relay в настройках сети, затем повторите команду.',
+      ];
     }
     final (bots, err) = await _loadMyBots();
     if (err != null) return [err];
@@ -429,18 +466,15 @@ class LibBotService {
     required String handleNorm,
     required Map<String, dynamic> changes,
   }) async {
-    if (!RelayService.instance.isConnected) {
-      return const ['Relay не подключён.'];
+    if (!await _ensureRelayConnected()) {
+      return const [
+        'Relay не подключён.',
+        'Проверьте интернет и URL relay в настройках сети, затем повторите команду.',
+      ];
     }
     final (bots, err) = await _loadMyBots();
     if (err != null) return [err];
-    Map<String, dynamic>? row;
-    for (final b in bots) {
-      if ((b['handle'] as String?)?.toLowerCase() == handleNorm) {
-        row = b;
-        break;
-      }
-    }
+    final row = _findOwnedBotByHandle(bots, handleNorm);
     if (row == null) {
       return [
         'Бот @$handleNorm не найден среди ваших на relay.',
@@ -464,7 +498,7 @@ class LibBotService {
     required String displayName,
     required String botPubHex,
   }) async {
-    if (!RelayService.instance.isConnected) {
+    if (!await _ensureRelayConnected()) {
       return const [
         'Relay не подключён. Включите интернет-соединение в настройках и попробуйте снова.',
       ];
@@ -519,6 +553,21 @@ class LibBotService {
       );
       if (ack['ok'] != true) {
         final err = ack['error']?.toString() ?? 'unknown';
+        if (err == 'timeout') {
+          // Защита от ложного timeout: сервер мог применить заявку, но ack потерялся.
+          final (bots, listErr) = await _loadMyBots();
+          if (listErr == null) {
+            final row = _findOwnedBotByHandle(bots, handle);
+            final rowBotId = (row?['botId'] as String?)?.toLowerCase() ?? '';
+            if (rowBotId == botPubHex) {
+              return [
+                'Похоже, relay зарегистрировал бота, но подтверждение пришло с задержкой.',
+                '@$handle уже есть в вашем списке (/mybots).',
+                'Продолжайте шаг onboarding на ПК как обычно.',
+              ];
+            }
+          }
+        }
         return [
           'Relay отклонил регистрацию: $err',
           if (err == 'timeout') ...[
