@@ -35,7 +35,9 @@ class AppSettings extends ChangeNotifier {
   static const _keyConnectionMode =
       'connection_mode'; // 0=BLE only, 1=Internet, 2=BLE+Wi‑Fi Direct+Internet
   static const _keyMediaPriority = 'media_priority'; // 0=BLE, 1=Internet
-  static const _keyAdminPasswordHash = 'admin_password_hash';
+  /// v2: предыдущий ключ мог содержать устаревший хэш после смены настроек;
+  /// без миграции — снова действует заводской пароль до смены в админке.
+  static const _keyAdminPasswordHash = 'admin_password_hash_v2';
   static const _keyBubbleStyle = 'bubble_style'; // 0=rounded,1=square,2=minimal
   static const _keyClockFormat = 'clock_format'; // 0=24h,1=12h
   static const _keyMessageDensity =
@@ -299,6 +301,7 @@ class AppSettings extends ChangeNotifier {
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
     _prefsReady = true;
+    await _migrateAdminPasswordHashV2IfNeeded();
     final modeIdx = _prefs.getInt(_keyThemeMode) ?? 0;
     _themeMode = ThemeMode.values[modeIdx.clamp(0, 2)];
     _accentColorIndex =
@@ -751,11 +754,26 @@ class AppSettings extends ChangeNotifier {
   // Default password: "Misha0000ff2010"
   static const _defaultAdminHash =
       '8676c71fc75fa72489c87aa387b752ad816a4ea4476995da848c76fa06dae4fd';
+  static const _keyAdminPwdV2Migrated = 'admin_password_hash_v2_migrated';
   static const _keyAdminCfgRev = 'admin_cfg_rev';
   static const _keyAdminCfgSealed = 'admin_cfg_sealed_box';
 
-  String get adminPasswordHash =>
-      _prefs.getString(_keyAdminPasswordHash) ?? _defaultAdminHash;
+  /// Одноразово: новый ключ хэша, сброс sealed и подъём ревизии, чтобы старый
+  /// admin_cfg2 с relay не откатил пароль к утерянному значению.
+  Future<void> _migrateAdminPasswordHashV2IfNeeded() async {
+    if (_prefs.getBool(_keyAdminPwdV2Migrated) == true) return;
+    await _prefs.setBool(_keyAdminPwdV2Migrated, true);
+    await _prefs.remove('admin_password_hash');
+    await _prefs.remove(_keyAdminCfgSealed);
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    await _prefs.setInt(_keyAdminCfgRev, stamp);
+  }
+
+  String get adminPasswordHash {
+    final s = _prefs.getString(_keyAdminPasswordHash);
+    if (s == null || s.isEmpty) return _defaultAdminHash;
+    return s;
+  }
 
   int get adminPasswordSyncRev => _prefs.getInt(_keyAdminCfgRev) ?? 0;
 

@@ -44,6 +44,8 @@ import 'services/media_upload_queue.dart';
 import 'services/notification_service.dart';
 import 'services/story_service.dart';
 import 'services/relay_service.dart';
+import 'services/ai_bot_constants.dart';
+import 'services/dm_bot_flags.dart';
 import 'services/device_link_sync_service.dart';
 import 'services/account_sync_service.dart';
 import 'services/scheduled_dm_service.dart';
@@ -228,6 +230,7 @@ Future<void> _broadcastProfileMusic(
       final msgId = 'profile_music_${myPublicKey.substring(0, 16)}_$ts';
       final contacts = await ChatStorageService.instance.getContacts();
       for (final c in contacts) {
+        if (isDmBotPeerId(c.publicKeyHex)) continue;
         try {
           await RelayService.instance.sendBlob(
             recipientKey: c.publicKeyHex,
@@ -283,6 +286,7 @@ Future<void> flushOutbox() async {
     if (myId.isEmpty) return;
     for (final m in pending) {
       if (!RelayService.instance.isConnected) break;
+      if (isAiBotPeerId(m.peerId)) continue;
       // Только текстовые сообщения — медиа требуют отдельной повторной загрузки.
       if (m.imagePath != null ||
           m.videoPath != null ||
@@ -1105,7 +1109,9 @@ Future<void> initServices() async {
           // и баннер ушли ДО показа экрана празднования. Иначе у получателя
           // успевает сохраниться только метадата профиля (эмодзи/тег) без
           // картинок.
-          await _sendFullProfileToPeer(publicKey);
+          if (!isDmBotPeerId(publicKey)) {
+            await _sendFullProfileToPeer(publicKey);
+          }
           // Also broadcast via gossip for BLE peers
           await GossipRouter.instance.broadcastProfile(
             id: myProfile.publicKeyHex,
@@ -2753,6 +2759,7 @@ Future<void> sendProfileToAllContacts() async {
   if (RelayService.instance.isConnected) {
     final contacts = await ChatStorageService.instance.getContacts();
     for (final c in contacts) {
+      if (isDmBotPeerId(c.publicKeyHex)) continue;
       unawaited(_sendFullProfileToPeer(c.publicKeyHex));
     }
     debugPrint('[RLINK][Profile] Relay-pushed to ${contacts.length} contacts');
@@ -2792,6 +2799,7 @@ Future<void> sendProfileToAllContacts() async {
 
 /// Public wrapper for targeted full profile sync (profile + avatar + banner/music).
 Future<void> sendFullProfileToPeer(String peerPublicKey) async {
+  if (isDmBotPeerId(peerPublicKey)) return;
   await _sendFullProfileToPeer(peerPublicKey);
 }
 
@@ -2812,6 +2820,7 @@ Future<void> _sendProfileToOnlinePeers() async {
   if (!RelayService.instance.isConnected) return;
   final peers = RelayService.instance.knownOnlinePeers;
   for (final p in peers) {
+    if (isDmBotPeerId(p.publicKey)) continue;
     unawaited(_sendProfileDirectToPeer(p.publicKey));
   }
   if (peers.isNotEmpty) {
@@ -2861,6 +2870,7 @@ Future<void> _republishOwnChannelsToRelay() async {
 void _onRelayPeerOnline(String peerPublicKey) {
   final myProfile = ProfileService.instance.profile;
   if (myProfile == null) return;
+  if (isDmBotPeerId(peerPublicKey)) return;
   unawaited(_sendFullProfileToPeer(peerPublicKey));
 }
 
@@ -2884,6 +2894,7 @@ Future<void> _broadcastAvatar(String myPublicKey, String imagePath) async {
         final blobMsgId = 'avatar_${myPublicKey.substring(0, 16)}_$ts';
         final contacts = await ChatStorageService.instance.getContacts();
         for (final c in contacts) {
+          if (isDmBotPeerId(c.publicKeyHex)) continue;
           try {
             await RelayService.instance.sendBlob(
               recipientKey: c.publicKeyHex,
@@ -2948,6 +2959,7 @@ Future<void> _broadcastBanner(String myPublicKey, String bannerPath) async {
       // Relay: send to all online contacts
       final contacts = await ChatStorageService.instance.getContacts();
       for (final c in contacts) {
+        if (isDmBotPeerId(c.publicKeyHex)) continue;
         try {
           await RelayService.instance.sendBlob(
             recipientKey: c.publicKeyHex,

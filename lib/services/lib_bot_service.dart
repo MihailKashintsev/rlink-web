@@ -35,6 +35,7 @@ class LibBotService {
       '• /setdesc @ник текст — описание (до 512; пустой текст — очистить)\n'
       '• /setavatar @ник <url> — URL аватара (http/https); без URL — сбросить\n'
       '• /setbanner @ник <url> — баннер; без URL — сбросить\n'
+      '• /delbot @ник — удалить (отозвать) бота из каталога relay\n'
       '• /newbot <ник> — затем **в чат Lib** одним сообщением публичный ключ бота Ed25519 (64 hex). '
       'Ключ копируют с ПК: `python -m rlink_bot keys show-pub` (в терминал ключ вводить не нужно).\n'
       '• Или одной строкой: /newbot <ник> <64hex>\n'
@@ -54,6 +55,7 @@ class LibBotService {
       '/setdesc @ник текст — описание (пусто = очистить)\n'
       '/setavatar @ник [url] — аватар по URL или сброс без url\n'
       '/setbanner @ник [url] — баннер или сброс\n'
+      '/delbot @ник — удалить бота из каталога relay\n'
       '/newbot <ник> — новый бот (см. кнопки под полем ввода)\n'
       '/cancel — отменить ожидание публичного ключа\n'
       '/guide — короткий чеклист создания бота\n'
@@ -287,6 +289,21 @@ class LibBotService {
       ];
     }
 
+    if (lower.startsWith('/delbot')) {
+      final parts = t.split(RegExp(r'\s+'));
+      if (parts.length < 2) {
+        return const [
+          'Использование: /delbot @ник',
+          'Пример: /delbot @mybot',
+        ];
+      }
+      final h = _parseHandleArg(parts[1]);
+      if (h == null) {
+        return const ['Некорректный ник. Допустимы a–z, 0–9, _, длина от 2.'];
+      }
+      return _revokeOwnedBot(handleNorm: h);
+    }
+
     return const [
       'Неизвестная команда. Введите /help',
     ];
@@ -339,6 +356,8 @@ class LibBotService {
         return 'Слишком частые запросы к relay. Подождите немного.';
       case 'empty_patch':
         return 'Пустое изменение.';
+      case 'already_revoked':
+        return 'Бот уже удалён (revoked).';
       default:
         return 'Ошибка relay: $e';
     }
@@ -386,7 +405,24 @@ class LibBotService {
       lines.add('');
     }
     lines.add('Правки: /setname, /setdesc, /setavatar, /setbanner (см. /help).');
+    lines.add('Удалить бота: /delbot @ник');
     return lines;
+  }
+
+  Future<List<String>> _revokeOwnedBot({
+    required String handleNorm,
+  }) async {
+    final res = await _patchOwnedBot(
+      handleNorm: handleNorm,
+      changes: const {'revoke': true},
+    );
+    if (res.length == 1 && res.first.startsWith('Готово:')) {
+      return [
+        'Готово: @$handleNorm удалён из каталога relay.',
+        'Повторно заново добавить можно через /newbot @$handleNorm <64hex>.',
+      ];
+    }
+    return res;
   }
 
   Future<List<String>> _patchOwnedBot({

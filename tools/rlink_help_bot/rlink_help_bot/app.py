@@ -129,6 +129,12 @@ _TOPIC_DEFS: list[tuple[str, str, tuple[str, ...], str]] = [
 ]
 
 
+def _button_tokens(pairs: list[tuple[str, str]]) -> str:
+    # Спец-формат для клиента Rlink: ActionChip-кнопки в пузыре.
+    # Пример токена: [btn:Меню|/menu]
+    return " ".join(f"[btn:{label}|{command}]" for label, command in pairs)
+
+
 def _menu_text() -> str:
     lines = [
         "📚 **Rlink Help** — выберите тему (ответьте **цифрой** или командой `/menu`):",
@@ -157,6 +163,13 @@ def _resolve_topic(user_text: str) -> str | None:
         return None
     if t in ("/start", "/help", "/menu", "menu", "меню", "привет", "hello", "hi"):
         return "__menu__"
+    if t in ("/topic_intro", "/topic_keys", "/topic_network", "/topic_lib"):
+        return {
+            "/topic_intro": "1",
+            "/topic_keys": "2",
+            "/topic_network": "3",
+            "/topic_lib": "4",
+        }[t]
     if re.fullmatch(r"\d+", t):
         for num, _, _, _ in _TOPIC_DEFS:
             if t == num:
@@ -185,10 +198,32 @@ def build_reply(user_text: str) -> str:
             )
         else:
             hint = ""
-        return hint + _menu_text()
+        return (
+            hint
+            + _menu_text()
+            + "\n\n"
+            + _button_tokens(
+                [
+                    ("О приложении", "/topic_intro"),
+                    ("Ключи", "/topic_keys"),
+                    ("Сеть BLE/relay", "/topic_network"),
+                    ("Боты и Lib", "/topic_lib"),
+                    ("Меню", "/menu"),
+                ]
+            )
+        )
     body = _body_for(key)
     assert body
-    footer = "\n\n—\n**Ещё вопрос?** Напишите `/menu` или другую цифру."
+    footer = (
+        "\n\n—\n**Ещё вопрос?** Напишите `/menu` или другую цифру.\n\n"
+        + _button_tokens(
+            [
+                ("Меню", "/menu"),
+                ("Сеть BLE/relay", "/topic_network"),
+                ("Боты и Lib", "/topic_lib"),
+            ]
+        )
+    )
     return body + footer
 
 

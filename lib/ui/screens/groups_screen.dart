@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -1943,6 +1944,72 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
+  String _plainTextForClipboardGroup(GroupMessage m) {
+    final lines = <String>[];
+    final fn = m.forwardFromNick?.trim();
+    if (fn != null && fn.isNotEmpty) {
+      lines.add('Переслано от: $fn');
+    } else if (m.forwardFromId != null &&
+        m.forwardFromId!.trim().isNotEmpty) {
+      lines.add('Переслано (автор: ${m.forwardFromId})');
+    }
+    lines.add('Автор: ${_nickFor(m.senderId)}');
+
+    final todo = SharedTodoPayload.tryDecode(m.text);
+    if (todo != null) {
+      final title = todo.title.trim();
+      if (title.isNotEmpty) lines.add(title);
+      for (final it in todo.items) {
+        lines.add('${it.done ? "✓" : "○"} ${it.text}');
+      }
+    } else {
+      final cal = SharedCalendarPayload.tryDecode(m.text);
+      if (cal != null) {
+        final title = cal.title.trim();
+        lines.add(title.isEmpty ? 'Событие' : title);
+        if (cal.startMs > 0) {
+          final dt = DateTime.fromMillisecondsSinceEpoch(cal.startMs);
+          final mm = dt.minute.toString().padLeft(2, '0');
+          lines.add(
+              '${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}.${dt.year} ${dt.hour}:$mm');
+        }
+        final note = cal.note?.trim();
+        if (note != null && note.isNotEmpty) lines.add(note);
+      } else {
+        final poll = MessagePoll.tryDecode(m.pollJson);
+        if (poll != null) {
+          final q = poll.question.trim();
+          lines.add(q.isEmpty ? 'Опрос' : 'Опрос: $q');
+          final labels = poll.displayLabels(m.id);
+          for (var i = 0; i < labels.length; i++) {
+            lines.add('${i + 1}. ${labels[i]}');
+          }
+        } else {
+          final missing = groupMessageMissingLocalMedia(m);
+          final t = m.text.trim();
+          if (t.isNotEmpty && !(missing && isSyntheticMediaCaption(m.text))) {
+            lines.add(t);
+          }
+        }
+      }
+    }
+
+    if (m.imagePath != null && m.imagePath!.trim().isNotEmpty) {
+      lines.add('[Изображение]');
+    }
+    if (m.videoPath != null && m.videoPath!.trim().isNotEmpty) {
+      lines.add('[Видео]');
+    }
+    if (m.voicePath != null && m.voicePath!.trim().isNotEmpty) {
+      lines.add('[Голосовое сообщение]');
+    }
+    if (m.latitude != null && m.longitude != null) {
+      lines.add('[Гео: ${m.latitude}, ${m.longitude}]');
+    }
+
+    return lines.join('\n').trim();
+  }
+
   Future<void> _handleGroupMessageLongPress(GroupMessage m) async {
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -1954,6 +2021,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               leading: const Icon(Icons.emoji_emotions_outlined),
               title: const Text('Реакция'),
               onTap: () => Navigator.pop(ctx, 'react'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy_outlined),
+              title: const Text('Скопировать'),
+              onTap: () => Navigator.pop(ctx, 'copy'),
             ),
             ListTile(
               leading: const Icon(Icons.forward),
@@ -1980,6 +2052,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         targetId: m.id,
         emoji: emoji,
         fromId: myId,
+      );
+    } else if (action == 'copy') {
+      final plain = _plainTextForClipboardGroup(m);
+      if (plain.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Нечего копировать')),
+        );
+        return;
+      }
+      await Clipboard.setData(ClipboardData(text: plain));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Сообщение скопировано')),
       );
     } else if (action == 'fwd') {
       await _forwardGroupMessageToDm(m);

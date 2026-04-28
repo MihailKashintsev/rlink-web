@@ -16,6 +16,7 @@ class _ChatInboxCustomGroupScreenState extends State<ChatInboxCustomGroupScreen>
   final _selected = <String>{};
   final _nameCtrl = TextEditingController();
   bool _loading = true;
+  bool _saving = false;
 
   @override
   void initState() {
@@ -40,15 +41,36 @@ class _ChatInboxCustomGroupScreenState extends State<ChatInboxCustomGroupScreen>
   }
 
   Future<void> _save() async {
+    FocusScope.of(context).unfocus();
     if (_selected.isEmpty) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Выберите хотя бы один чат')),
+        const SnackBar(
+          content: Text('Выберите хотя бы один чат'),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
       return;
     }
-    await ChatInboxService.instance
-        .addCustomTab(_nameCtrl.text.trim(), _selected.toList());
-    if (mounted) Navigator.pop(context);
+    setState(() => _saving = true);
+    try {
+      await ChatInboxService.instance
+          .addCustomTab(_nameCtrl.text.trim(), _selected.toList());
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    } catch (e, st) {
+      debugPrint('[ChatInboxCustomGroup] save failed: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Не удалось сохранить: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -57,10 +79,27 @@ class _ChatInboxCustomGroupScreenState extends State<ChatInboxCustomGroupScreen>
       appBar: AppBar(
         title: const Text('Новая группа'),
         actions: [
-          TextButton(
-            onPressed: _save,
-            child: const Text('Готово'),
-          ),
+          if (_saving)
+            const Padding(
+              padding: EdgeInsetsDirectional.only(end: 16),
+              child: Center(
+                child: SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            )
+          else
+            IconButton(
+              tooltip: 'Готово',
+              icon: const Icon(Icons.check_rounded),
+              onPressed: _loading
+                  ? null
+                  : () async {
+                      await _save();
+                    },
+            ),
         ],
       ),
       body: _loading

@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
-import 'ai_bot_constants.dart';
 import '../models/chat_message.dart';
+import 'dm_bot_flags.dart';
 import 'app_settings.dart';
 import 'chat_storage_service.dart';
 import 'crypto_service.dart';
@@ -158,7 +158,7 @@ class DeviceLinkSyncService {
       var sent = 0;
       final peerIds = await ChatStorageService.instance.getChatPeerIds();
       for (final peerId in peerIds) {
-        if (isAiBotPeerId(peerId)) continue;
+        if (isDmBotPeerId(peerId)) continue;
         if (_normalizeKey(peerId) == _normalizeKey(recipientId)) continue;
         final messages =
             await ChatStorageService.instance.getAllMessages(peerId);
@@ -199,7 +199,7 @@ class DeviceLinkSyncService {
     final myKey = CryptoService.instance.publicKeyHex;
     if (linkedPeer == null || myKey.isEmpty) return;
 
-    if (isAiBotPeerId(msg.peerId)) return;
+    if (isDmBotPeerId(msg.peerId)) return;
     if (_normalizeKey(msg.peerId) == _normalizeKey(linkedPeer)) return;
 
     try {

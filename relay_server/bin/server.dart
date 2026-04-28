@@ -918,6 +918,7 @@ Future<void> _handleBotOwnerPatchAsync(
       obj.containsKey('description') ||
       obj.containsKey('avatarUrl') ||
       obj.containsKey('bannerUrl') ||
+      obj['revoke'] == true ||
       obj['clearAvatar'] == true ||
       obj['clearBanner'] == true;
   if (!hasChange) {
@@ -947,6 +948,16 @@ Future<void> _handleBotOwnerPatchAsync(
   }
   if ((row['ownerEd25519Pub'] as String?)?.toLowerCase() != owner) {
     ackFail('not_owner', reqId);
+    return;
+  }
+
+  if (obj['revoke'] == true) {
+    row['revoked'] = true;
+    row['updatedAt'] = nowMs;
+    _persistBotDirectory();
+    _broadcastBotDirSnapshotToAll();
+    stdout.writeln('[RLINK][Relay] bot_owner_patch revoke bot=$botId owner=$owner');
+    ackOk(reqId);
     return;
   }
 

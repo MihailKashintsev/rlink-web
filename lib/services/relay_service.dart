@@ -142,6 +142,9 @@ class RelayService with WidgetsBindingObserver {
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
 
+  /// Ed25519 ключи из последнего `bot_dir_snapshot` (сторонние боты relay).
+  final Set<String> _relayCatalogBotIds = <String>{};
+
   /// Публичные URL аватар/баннер ботов (каталог relay).
   final Map<String, String> _relayBotAvatarUrl = {};
   final Map<String, String> _relayBotBannerUrl = {};
@@ -201,6 +204,12 @@ class RelayService with WidgetsBindingObserver {
   String? relayBotBannerUrl(String publicKey) {
     if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(publicKey)) return null;
     return _relayBotBannerUrl[publicKey.toLowerCase()];
+  }
+
+  /// Бот из публичного каталога relay (не путать с Lib/Giga — у них псевдо peer id).
+  bool isRelayCatalogBot(String publicKey) {
+    final k = publicKey.trim().toLowerCase();
+    return k.length == 64 && _relayCatalogBotIds.contains(k);
   }
 
   void _applyRelayBotVisualFromSnapshot(String idLower, String avatarUrl, String bannerUrl) {
@@ -1034,6 +1043,7 @@ class RelayService with WidgetsBindingObserver {
       'bannerUrl',
       'clearAvatar',
       'clearBanner',
+      'revoke',
     };
     final ch = changes ?? const <String, dynamic>{};
     if (ch.isEmpty) {
@@ -1094,13 +1104,20 @@ class RelayService with WidgetsBindingObserver {
   }
 
   void _applyBotDirectorySnapshot(List<dynamic>? bots) {
-    if (bots == null || bots.isEmpty) return;
+    if (bots == null) return;
+    _relayCatalogBotIds.clear();
+    if (bots.isEmpty) {
+      botDirectoryVersion.value++;
+      debugPrint('[RLINK][Relay] bot_dir_snapshot empty — каталог ботов очищен');
+      return;
+    }
     for (final raw in bots) {
       if (raw is! Map) continue;
       final m = Map<String, dynamic>.from(raw);
       final id = (m['botId'] as String?)?.toLowerCase().trim() ?? '';
       final x = (m['x25519Pub'] as String?)?.trim() ?? '';
       if (id.length != 64 || x.isEmpty) continue;
+      _relayCatalogBotIds.add(id);
       _peerX25519Keys[id] = x;
       BleService.instance.registerPeerX25519Key(id, x);
       unawaited(ChatStorageService.instance.updateContactX25519Key(id, x));

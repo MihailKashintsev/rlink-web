@@ -171,11 +171,10 @@ String? _highlightLanguageForCode(String? fenceLanguage, String code) {
 /// и не сразу после `://` (часть URL).
 List<_Hit> _collectSlashCommandHits(String s, List<_Hit> blocked) {
   final out = <_Hit>[];
-  for (final m in RegExp(r'(^|\s)(/[a-zA-Z][a-zA-Z0-9_]*)').allMatches(s)) {
-    final g1 = m.group(1)!;
+  for (final m in RegExp(r'(^|[^\w/])(/[a-zA-Z][a-zA-Z0-9_]*)').allMatches(s)) {
     final cmd = m.group(2)!;
-    final st = m.start + g1.length;
-    final en = m.end;
+    final st = m.start + (m.group(1)?.length ?? 0);
+    final en = st + cmd.length;
     if (st >= 2 && s[st - 1] == '/' && s[st - 2] == ':') {
       continue;
     }

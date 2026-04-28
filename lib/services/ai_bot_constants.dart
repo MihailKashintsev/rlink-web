@@ -30,7 +30,9 @@ const AiBotDefinition kGigachatBot = AiBotDefinition(
   name: 'GigaChat',
   avatarColor: 0xFF21A038,
   avatarEmoji: '🤖',
-  description: 'ИИ-ассистент от Сбера. Поддерживает только текст.',
+  description:
+      'ИИ-ассистент от Сбера. В Rlink — только текст (без файлов, голоса и звонков). '
+      'Ответы приходят с серверов Сбера; нужен интернет и настроенный GigaChat.',
   enabledByDefault: false,
 );
 
@@ -40,8 +42,9 @@ const AiBotDefinition kLibBot = AiBotDefinition(
   avatarColor: 0xFF5C6BC0,
   avatarEmoji: '📚',
   description:
-      'Регистрация ботов для разработчиков: команды /start, /newbot. '
-      'Сообщения с ботами — E2E; relay не читает переписку.',
+      'Регистратор сторонних ботов для разработчиков: команды /start, /newbot и др. '
+      'Диалоги с Lib и с ботами из каталога — только текст. '
+      'Переписка с пользователями и ботами шифруется end-to-end; relay не читает содержимое.',
   enabledByDefault: false,
 );
 

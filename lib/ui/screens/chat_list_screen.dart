@@ -12,6 +12,7 @@ import '../../services/chat_inbox_service.dart';
 import '../../services/ble_service.dart';
 import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/dm_bot_flags.dart';
 import '../../services/dm_compose_draft_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/ether_service.dart';
@@ -827,6 +828,12 @@ class _MeTab extends StatelessWidget {
 
 enum _ChatItemType { personal, group, channel }
 
+String _dmChatListBotChipLabel(String peerId) {
+  if (peerId == kLibBotPeerId) return 'Lib';
+  if (peerId == kGigachatBotPeerId) return 'ИИ';
+  return 'Бот';
+}
+
 /// Превью строки в списке чатов: при несохранённом вводе — «Черновик: …» вместо последнего сообщения.
 String _dmChatListPreviewOrDraft(
   String peerId,
@@ -864,6 +871,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   VoidCallback? _readStateListener;
   VoidCallback? _settingsListener;
   VoidCallback? _draftRevisionListener;
+  VoidCallback? _botDirListener;
   late final VoidCallback _inboxListener;
 
   @override
@@ -901,6 +909,9 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     _draftRevisionListener = () => _debouncedLoad();
     DmComposeDraftService.instance.revision
         .addListener(_draftRevisionListener!);
+    _botDirListener = () => _debouncedLoad();
+    RelayService.instance.botDirectoryVersion
+        .addListener(_botDirListener!);
   }
 
   void _debouncedLoad() {
@@ -942,6 +953,10 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     if (_draftRevisionListener != null) {
       DmComposeDraftService.instance.revision
           .removeListener(_draftRevisionListener!);
+    }
+    if (_botDirListener != null) {
+      RelayService.instance.botDirectoryVersion
+          .removeListener(_botDirListener!);
     }
     ChatInboxService.instance.removeListener(_inboxListener);
     super.dispose();
@@ -989,7 +1004,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         isOnline: showOnline && transports.isNotEmpty,
         onlineTransports: transports,
         showPresenceStatus: showOnline,
-        isAiBot: isAiBotPeerId(s.peerId),
+        isAiBot: isDmBotPeerId(s.peerId),
         unreadCount: dmUnread[s.peerId] ?? 0,
       ));
     }
@@ -1016,7 +1031,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         isOnline: showOnline && transports.isNotEmpty,
         onlineTransports: transports,
         showPresenceStatus: showOnline,
-        isAiBot: isAiBotPeerId(c.publicKeyHex),
+        isAiBot: isDmBotPeerId(c.publicKeyHex),
         unreadCount: 0,
       ));
     }
@@ -1759,7 +1774,7 @@ class _TelegramChatRow extends StatelessWidget {
                                 ),
                               ),
                               child: Text(
-                                item.id == kLibBotPeerId ? 'Lib' : 'ИИ',
+                                _dmChatListBotChipLabel(item.id),
                                 style: TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w700,
@@ -1940,7 +1955,7 @@ class _ChatItem {
   /// Есть ли уже сообщения в избранном (для подписи времени в списке).
   final bool savedHasMessages;
 
-  /// Чат со встроенным ботом (Lib, GigaChat и т.д.), не обычный контакт.
+  /// Личка с ботом: Lib, GigaChat или бот из каталога relay.
   final bool isAiBot;
   _ChatItem({
     this.type = _ChatItemType.personal,

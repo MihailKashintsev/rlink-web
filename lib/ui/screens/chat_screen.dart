@@ -8,6 +8,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show ValueListenable, kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:camera/camera.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
@@ -38,6 +39,7 @@ import '../../services/channel_service.dart';
 import '../../services/call_service.dart';
 import '../../services/connection_transport.dart';
 import '../../services/device_link_sync_service.dart';
+import '../../services/dm_bot_flags.dart';
 import '../../services/dm_compose_draft_service.dart';
 import '../../services/ether_service.dart';
 import '../../services/group_service.dart';
@@ -274,7 +276,12 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Только для GigaChat: на iOS/Android [ConnectivityResult.vpn] из connectivity_plus.
   bool _vpnProbablyActive = false;
 
-  bool get _isAiBot => isAiBotPeerId(widget.peerId);
+  /// Только Lib / GigaChat (псевдо peer id).
+  bool get _isBuiltinAiBot => isAiBotPeerId(widget.peerId);
+
+  /// Любой бот в личке: встроенный или из каталога relay.
+  bool get _isDmBot => isDmBotPeerId(widget.peerId);
+
   bool get _isLibBot => widget.peerId == kLibBotPeerId;
   bool get _isGigachatBot => widget.peerId == kGigachatBotPeerId;
 
@@ -309,13 +316,15 @@ class _ChatScreenState extends State<ChatScreen> {
     String? fileName,
     String? filePath, // local file path for upload queue (large file resume)
   }) async {
-    if (_isAiBot) {
+    if (_isDmBot) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(_isLibBot
                 ? 'В чате с Lib доступен только текст'
-                : 'В чате с ИИ доступен только текст'),
+                : _isGigachatBot
+                    ? 'В чате с ИИ доступен только текст'
+                    : 'В чате с ботом доступен только текст'),
           ),
         );
       }
@@ -594,11 +603,11 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _resolvedPeerId = _isAiBot
+    _resolvedPeerId = _isBuiltinAiBot
         ? widget.peerId
         : BleService.instance.resolvePublicKey(widget.peerId);
     // If chat was opened by short code, try resolving to full relay key.
-    if (!_isAiBot && !_looksLikePublicKey(_resolvedPeerId)) {
+    if (!_isBuiltinAiBot && !_looksLikePublicKey(_resolvedPeerId)) {
       final byPrefix =
           RelayService.instance.findPeerByPrefix(_resolvedPeerId.toLowerCase());
       if (byPrefix != null && _looksLikePublicKey(byPrefix)) {
@@ -652,7 +661,7 @@ class _ChatScreenState extends State<ChatScreen> {
       unawaited(_restoreComposeDraft());
     });
 
-    if (_isAiBot) {
+    if (_isGigachatBot) {
       unawaited(_refreshGigachatVpnFlag());
       _vpnConnSub = Connectivity().onConnectivityChanged.listen((results) {
         if (_tearingDown || !mounted) return;
@@ -701,7 +710,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onPeersChanged() {
     if (_tearingDown || !mounted) return;
-    if (_isAiBot) return;
+    if (_isBuiltinAiBot) return;
     final resolved = BleService.instance.resolvePublicKey(widget.peerId);
     if (resolved != _resolvedPeerId && resolved != widget.peerId) {
       if (_tearingDown || !mounted) return;
@@ -779,7 +788,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _sendActivity(int activity) {
-    if (_isAiBot) return;
+    if (_isDmBot) return;
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isEmpty || _savedMessagesLocalOnly) return;
     GossipRouter.instance.sendTypingIndicator(
@@ -853,7 +862,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _startCall({required bool video}) async {
-    if (_isAiBot || _savedMessagesLocalOnly) return;
+    if (_isDmBot || _savedMessagesLocalOnly) return;
     if (!_looksLikePublicKey(_resolvedPeerId)) {
       final ok = await _waitForPeerPublicKey();
       if (!ok) return;
@@ -2039,6 +2048,7 @@ class _ChatScreenState extends State<ChatScreen> {
     ('Все команды', '/commands'),
     ('Мои боты', '/mybots'),
     ('Новый бот', '/newbot'),
+    ('Удалить бота', '/delbot @'),
     ('Памятка', '/guide'),
     ('Отмена', '/cancel'),
   ];
@@ -2079,7 +2089,7 @@ class _ChatScreenState extends State<ChatScreen> {
     String? msgId;
     try {
       // Peer id might be a BLE UUID until profiles exchange completes.
-      if (!_isAiBot && !_looksLikePublicKey(_resolvedPeerId)) {
+      if (!_isBuiltinAiBot && !_looksLikePublicKey(_resolvedPeerId)) {
         final ok = await _waitForPeerPublicKey();
         if (!ok) {
           if (mounted) {
@@ -2096,7 +2106,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // 1) Edit mode: send edit packet for an existing outgoing message.
       if (_editingMessageId != null) {
         final targetId = _editingMessageId!;
-        if (!_savedMessagesLocalOnly && !_isAiBot) {
+        if (!_savedMessagesLocalOnly && !_isBuiltinAiBot) {
           await GossipRouter.instance.sendEditMessage(
             messageId: targetId,
             newText: text,
@@ -2113,7 +2123,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
       // 2) Normal mode: send message(s). Личные чаты: нарезка по 600 симв. на
       // транспорт (см. OutboundDmText). ИИ — одним сообщением.
-      final parts = _isAiBot
+      final parts = _isBuiltinAiBot
           ? <String>[text]
           : OutboundDmText.splitChunks(text);
       if (parts.isEmpty) return;
@@ -2166,7 +2176,7 @@ class _ChatScreenState extends State<ChatScreen> {
         await ChatStorageService.instance.saveMessage(msg);
         if (_tearingDown || !mounted) break;
 
-        if (!_savedMessagesLocalOnly && !_isAiBot) {
+        if (!_savedMessagesLocalOnly && !_isBuiltinAiBot) {
           if (x25519Key != null && x25519Key.isNotEmpty) {
             final encrypted = await CryptoService.instance.encryptMessage(
               plaintext: chunk,
@@ -2328,13 +2338,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendCollabEncoded(String encoded) async {
-    if (_isAiBot) {
+    if (_isDmBot) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(_isLibBot
                 ? 'В чате с Lib доступен только обычный текст'
-                : 'В чате с ИИ доступен только обычный текст'),
+                : _isGigachatBot
+                    ? 'В чате с ИИ доступен только обычный текст'
+                    : 'В чате с ботом доступен только обычный текст'),
           ),
         );
       }
@@ -2378,7 +2390,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _patchSharedCollab(ChatMessage msg, String newEncoded) async {
     await ChatStorageService.instance.editMessage(msg.id, newEncoded);
-    if (!_savedMessagesLocalOnly && !_isAiBot) {
+    if (!_savedMessagesLocalOnly && !_isDmBot) {
       await GossipRouter.instance.sendEditMessage(
         messageId: msg.id,
         newText: newEncoded,
@@ -3684,6 +3696,104 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Текст для буфера: пересылка, цитата, тело, списки/календарь/приглашения, метки вложений.
+  String _plainTextForClipboard(ChatMessage msg) {
+    final lines = <String>[];
+    final nick = msg.forwardFromNick?.trim();
+    if (nick != null && nick.isNotEmpty) {
+      lines.add('Переслано от: $nick');
+    } else if (msg.forwardFromId != null &&
+        msg.forwardFromId!.trim().isNotEmpty) {
+      lines.add('Переслано (автор: ${msg.forwardFromId})');
+    }
+
+    final replyId = msg.replyToMessageId;
+    if (replyId != null && replyId.isNotEmpty) {
+      String? snap;
+      final list = ChatStorageService.instance
+          .messagesNotifier(_resolvedPeerId)
+          .value;
+      for (final m in list) {
+        if (m.id == replyId) {
+          snap = m.text.trim();
+          if (snap.length > 240) snap = '${snap.substring(0, 237)}…';
+          break;
+        }
+      }
+      lines.add(snap != null && snap.isNotEmpty
+          ? 'Ответ на: $snap'
+          : 'Ответ на сообщение');
+    }
+
+    final todo = SharedTodoPayload.tryDecode(msg.text);
+    if (todo != null) {
+      final title = todo.title.trim();
+      if (title.isNotEmpty) lines.add(title);
+      for (final it in todo.items) {
+        lines.add('${it.done ? "✓" : "○"} ${it.text}');
+      }
+    } else {
+      final cal = SharedCalendarPayload.tryDecode(msg.text);
+      if (cal != null) {
+        final title = cal.title.trim();
+        lines.add(title.isEmpty ? 'Событие' : title);
+        if (cal.startMs > 0) {
+          final dt = DateTime.fromMillisecondsSinceEpoch(cal.startMs);
+          final mm = dt.minute.toString().padLeft(2, '0');
+          lines.add(
+              '${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}.${dt.year} ${dt.hour}:$mm');
+        }
+        final note = cal.note?.trim();
+        if (note != null && note.isNotEmpty) lines.add(note);
+      } else {
+        final inv = _dmInviteMap(msg);
+        if (inv != null) {
+          final k = inv['kind'] as String?;
+          if (k == 'device_link') {
+            lines.add('Запрос на связку устройств');
+          } else if (k == 'channel') {
+            final name = (inv['channelName'] as String?)?.trim() ?? '';
+            lines.add(name.isEmpty
+                ? 'Приглашение в канал'
+                : 'Приглашение в канал: $name');
+          } else if (k == 'group') {
+            final name = (inv['groupName'] as String?)?.trim() ?? '';
+            lines.add(name.isEmpty
+                ? 'Приглашение в группу'
+                : 'Приглашение в группу: $name');
+          }
+          final t = msg.text.trim();
+          if (t.isNotEmpty) lines.add(t);
+        } else {
+          final missing = dmMessageMissingLocalMedia(msg);
+          final t = msg.text.trim();
+          if (t.isNotEmpty && !(missing && isSyntheticMediaCaption(msg.text))) {
+            lines.add(t);
+          }
+        }
+      }
+    }
+
+    if (msg.imagePath != null && msg.imagePath!.trim().isNotEmpty) {
+      lines.add('[Изображение]');
+    }
+    if (msg.videoPath != null && msg.videoPath!.trim().isNotEmpty) {
+      lines.add('[Видео]');
+    }
+    if (msg.voicePath != null && msg.voicePath!.trim().isNotEmpty) {
+      lines.add('[Голосовое сообщение]');
+    }
+    if (msg.filePath != null && msg.filePath!.trim().isNotEmpty) {
+      final n = msg.fileName?.trim();
+      lines.add(n != null && n.isNotEmpty ? '[Файл: $n]' : '[Файл]');
+    }
+    if (msg.latitude != null && msg.longitude != null) {
+      lines.add('[Гео: ${msg.latitude}, ${msg.longitude}]');
+    }
+
+    return lines.join('\n').trim();
+  }
+
   Future<void> _onLongPressMessage(ChatMessage msg) async {
     final stickerSourcePath = msg.imagePath == null
         ? null
@@ -3716,6 +3826,26 @@ class _ChatScreenState extends State<ChatScreen> {
               onTap: () {
                 Navigator.pop(ctx);
                 _startReply(msg);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy_outlined),
+              title: const Text('Скопировать'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final plain = _plainTextForClipboard(msg);
+                if (plain.isEmpty) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Нечего копировать')),
+                  );
+                  return;
+                }
+                await Clipboard.setData(ClipboardData(text: plain));
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Сообщение скопировано')),
+                );
               },
             ),
             ListTile(
@@ -3866,7 +3996,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _openPeerProfile() {
-    if (_isAiBot) {
+    if (_isBuiltinAiBot) {
       Navigator.push(
         context,
         MaterialPageRoute<void>(
@@ -3993,7 +4123,7 @@ class _ChatScreenState extends State<ChatScreen> {
             emoji: widget.peerAvatarEmoji,
             imagePath: _headerAvatarPath ?? widget.peerAvatarImagePath,
             size: 38,
-            isOnline: !_isAiBot &&
+            isOnline: !_isDmBot &&
                 (BleService.instance.isPeerConnected(_resolvedPeerId) ||
                     (RelayService.instance.isConnected &&
                         RelayService.instance.isPeerOnline(_resolvedPeerId))),
@@ -4003,11 +4133,13 @@ class _ChatScreenState extends State<ChatScreen> {
             Text(widget.peerNickname,
                 style:
                     const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-            if (_isAiBot)
+            if (_isDmBot)
               Text(
                 _isLibBot
                     ? 'Регистратор ботов'
-                    : 'ИИ · GigaChat (Сбер)',
+                    : _isGigachatBot
+                        ? 'ИИ · GigaChat (Сбер)'
+                        : 'Сторонний бот · только текст, ответ когда процесс бота в сети',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w500,
@@ -4059,13 +4191,13 @@ class _ChatScreenState extends State<ChatScreen> {
           ]),
         ]),
         actions: [
-          if (!_isAiBot && !_savedMessagesLocalOnly)
+          if (!_isDmBot && !_savedMessagesLocalOnly)
             IconButton(
               tooltip: 'Аудиозвонок',
               onPressed: () => _startCall(video: false),
               icon: const Icon(Icons.call_outlined),
             ),
-          if (!_isAiBot && !_savedMessagesLocalOnly)
+          if (!_isDmBot && !_savedMessagesLocalOnly)
             IconButton(
               tooltip: 'Видеозвонок',
               onPressed: () => _startCall(video: true),
@@ -4079,17 +4211,18 @@ class _ChatScreenState extends State<ChatScreen> {
                       null;
               return [
                 const PopupMenuItem(value: 'profile', child: Text('Профиль')),
-                if (!_isAiBot && !_savedMessagesLocalOnly)
+                if (!_isDmBot && !_savedMessagesLocalOnly)
                   const PopupMenuItem(
                     value: 'edit_contact',
                     child: Text('Изменить контакт'),
                   ),
-                if (!_isAiBot)
+                if (!_isDmBot)
                   const PopupMenuItem(
                     value: 'peer_stickers',
                     child: Text('Стикеры из чата'),
                   ),
-                const PopupMenuItem(
+                if (!_isDmBot)
+                  const PopupMenuItem(
                     value: 'chat_cal', child: Text('Календарь чата')),
                 const PopupMenuItem(
                     value: 'background', child: Text('Фон чата')),
@@ -4192,7 +4325,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   const SizedBox(width: 10),
                   Text(
-                    _isLibBot ? 'Lib отвечает…' : 'GigaChat формирует ответ…',
+                    _isLibBot
+                        ? 'Lib отвечает…'
+                        : _isGigachatBot
+                            ? 'GigaChat формирует ответ…'
+                            : 'Ждём ответ бота…',
                     style: TextStyle(
                       fontSize: 12,
                       color: Theme.of(context).colorScheme.onSecondaryContainer,
@@ -4278,7 +4415,7 @@ class _ChatScreenState extends State<ChatScreen> {
             if (!_isContact &&
                 !_strangerBannerDismissed &&
                 !_savedMessagesLocalOnly &&
-                !_isAiBot)
+                !_isDmBot)
               Container(
                 width: double.infinity,
                 padding:
@@ -4541,8 +4678,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                                   playbackThread: messages,
                                                   playbackIndex: i,
                                                   highlightSlashCommands:
-                                                      _isAiBot,
-                                                  onSlashCommandTap: _isAiBot
+                                                      _isBuiltinAiBot,
+                                                  onSlashCommandTap:
+                                                      _isBuiltinAiBot
                                                       ? _onSlashCommandFromBubble
                                                       : null,
                                                 ),
@@ -4653,16 +4791,25 @@ class _ChatScreenState extends State<ChatScreen> {
                 padding:
                     const EdgeInsets.fromLTRB(10, 4, 10, 2),
                 child: Align(
-                  alignment: Alignment.centerLeft,
+                  alignment: Alignment.center,
                   child: Wrap(
-                    spacing: 8,
-                    runSpacing: 6,
+                    alignment: WrapAlignment.center,
+                    spacing: 10,
+                    runSpacing: 10,
                     children: [
                       for (final e in _libQuickCommands)
                         ActionChip(
-                          label: Text(e.$1),
-                          visualDensity: VisualDensity.compact,
-                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          label: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            child: Text(
+                              e.$1,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                          ),
                           onPressed: _isSending
                               ? null
                               : () => unawaited(_sendPresetCommand(e.$2)),
@@ -4677,17 +4824,17 @@ class _ChatScreenState extends State<ChatScreen> {
               isRecording: _isRecording,
               isHoldVideoStarting: _dmHoldVideoStarting,
               recordingSecondsNotifier: _recordingSecondsNotifier,
-              hintText: _isAiBot
+              hintText: _isDmBot
                   ? (widget.peerId == kLibBotPeerId
                       ? 'Команда для Lib…'
                       : 'Сообщение для GigaChat…')
                   : null,
-              aiTextOnlyComposer: _isAiBot,
+              aiTextOnlyComposer: _isDmBot,
               locationActive: _pendingLat != null,
               onSend: _send,
               onLongPressSend: _scheduleSendDialog,
-              onPickTodo: _isAiBot ? null : _composeAndSendTodo,
-              onPickCalendar: _isAiBot ? null : _composeAndSendCalendar,
+              onPickTodo: _isDmBot ? null : _composeAndSendTodo,
+              onPickCalendar: _isDmBot ? null : _composeAndSendCalendar,
               onOpenMediaGallery: _openMediaGallery,
               onPickSquareVideo: _sendVideo,
               onPickFile: _sendFile,
@@ -5199,6 +5346,23 @@ class _MessageBubble extends StatelessWidget {
     this.onSlashCommandTap,
   });
 
+  static final RegExp _botButtonToken = RegExp(
+    r'\[btn:([^\]|]+)\|(/[a-zA-Z][a-zA-Z0-9_]*)\]',
+    multiLine: true,
+  );
+
+  ({String text, List<(String, String)> buttons}) _parseBotButtons(String raw) {
+    final buttons = <(String, String)>[];
+    final cleaned = raw.replaceAllMapped(_botButtonToken, (m) {
+      final label = (m.group(1) ?? '').trim();
+      final command = (m.group(2) ?? '').trim();
+      if (label.isEmpty || command.isEmpty) return '';
+      buttons.add((label, command));
+      return '';
+    });
+    return (text: cleaned.trim(), buttons: buttons);
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -5207,6 +5371,9 @@ class _MessageBubble extends StatelessWidget {
     final compact = settings.compactMode;
     final missing = dmMessageMissingLocalMedia(msg);
     final inviteMap = _dmInviteMap(msg);
+    final parsed = _parseBotButtons(msg.text);
+    final plainText = parsed.text;
+    final slashButtons = parsed.buttons;
 
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0.0, end: 1.0),
@@ -5479,14 +5646,14 @@ class _MessageBubble extends StatelessWidget {
                     ),
                   ],
                 )
-              else if (msg.text.isNotEmpty &&
+              else if (plainText.isNotEmpty &&
                   msg.voicePath == null &&
-                  !(missing && isSyntheticMediaCaption(msg.text)))
+                  !(missing && isSyntheticMediaCaption(plainText)))
                 ValueListenableBuilder<List<Contact>>(
                   valueListenable: ChatStorageService.instance.contactsNotifier,
                   builder: (_, contacts, __) {
                     return RichMessageText(
-                      text: msg.text,
+                      text: plainText,
                       textColor: isOut ? cs.onPrimary : cs.onSurface,
                       isOut: isOut,
                       mentionLabelFor: (hex) => resolveChannelMentionDisplay(
@@ -5501,6 +5668,33 @@ class _MessageBubble extends StatelessWidget {
                     );
                   },
                 ),
+              if (slashButtons.isNotEmpty && onSlashCommandTap != null) ...[
+                const SizedBox(height: 8),
+                Center(
+                  child: Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      for (final b in slashButtons)
+                        ActionChip(
+                          label: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            child: Text(
+                              b.$1,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                          onPressed: () => onSlashCommandTap!(b.$2),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
               if (msg.latitude != null && msg.longitude != null)
                 _LocationChip(
                   lat: msg.latitude!,

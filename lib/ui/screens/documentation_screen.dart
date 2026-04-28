@@ -498,7 +498,7 @@ const String _docRu = '''
 | Бот | Роль |
 | :--- | :--- |
 | **GigaChat** | Встроенный ИИ (ключ API в профиле); ответы на стороне Сбера |
-| **Lib** | Регистратор сторонних ботов (`/newbot`, `/mybots`, правки метаданных, claim, токен API) |
+| **Lib** | Регистратор сторонних ботов (`/newbot`, `/mybots`, `/delbot`, правки метаданных, claim, токен API) |
 | **Сторонние боты** | Своя пара ключей, свой процесс на relay; поиск по **@нику** |
 
 ### Команды Lib
@@ -508,6 +508,7 @@ const String _docRu = '''
 | `/start`, `/help` | Справка по регистрации |
 | `/mybots` | Список ваших ботов на relay |
 | `/setname`, `/setdesc`, `/setavatar`, `/setbanner` | Правки каталога по `@нику` (см. `/help`) |
+| `/delbot @ник` | Удалить (revoked) бота из каталога relay |
 | `/newbot` | Новый бот (ник + ключ Ed25519 64 hex) |
 | `/commands` | Список команд |
 | `/cancel` | Сброс ожидания ключа |
@@ -578,7 +579,7 @@ You can share your public key or **search** the relay by nickname or short id.
 | Bot | Role |
 | :--- | :--- |
 | **GigaChat** | Built‑in AI (API key in profile); replies from Sber’s service |
-| **Lib** | Third‑party bot registrar (`/newbot`, `/mybots`, metadata edits, claim, API token) |
+| **Lib** | Third‑party bot registrar (`/newbot`, `/mybots`, `/delbot`, metadata edits, claim, API token) |
 | **Custom bots** | Own keypair and process on relay; discovery by **@handle** |
 
 ### Lib commands
@@ -588,6 +589,7 @@ You can share your public key or **search** the relay by nickname or short id.
 | `/start`, `/help` | Registration help |
 | `/mybots` | List your bots on the relay |
 | `/setname`, `/setdesc`, `/setavatar`, `/setbanner` | Catalog edits by `@handle` (see `/help`) |
+| `/delbot @handle` | Remove (revoke) bot from the relay catalog |
 | `/newbot` | New bot (handle + Ed25519 public key, 64 hex) |
 | `/commands` | Command list |
 | `/cancel` | Cancel waiting for the key |

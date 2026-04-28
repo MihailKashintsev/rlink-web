@@ -3,14 +3,27 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../app_version.dart';
 import '../../l10n/app_l10n.dart';
+import '../admin_unlock.dart';
 
-class AboutScreen extends StatelessWidget {
+class AboutScreen extends StatefulWidget {
   const AboutScreen({super.key});
 
+  @override
+  State<AboutScreen> createState() => _AboutScreenState();
+}
+
+class _AboutScreenState extends State<AboutScreen> {
+  static const _kAdminSecretTaps = 16;
+  static const _kTapResetMs = 2000;
+
+  int _developerTapCount = 0;
+  DateTime _lastDeveloperTapAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   static const _websiteUrl = 'https://rendergames.online/rlink';
-  static const _telegramUrl  = 'https://t.me/rendergm';
-  static const _boostyUrl    = 'https://boosty.to/rendergamesru/purchase/3242287?ssource=DIRECT&share=subscription_link';
-  static const _githubUrl    = 'https://github.com/MihailKashintsev/';
+  static const _telegramUrl = 'https://t.me/rendergm';
+  static const _boostyUrl =
+      'https://boosty.to/rendergamesru/purchase/3242287?ssource=DIRECT&share=subscription_link';
+  static const _githubUrl = 'https://github.com/MihailKashintsev/';
 
   Future<void> _open(BuildContext context, String url) async {
     final uri = Uri.parse(url);
@@ -20,6 +33,19 @@ class AboutScreen extends StatelessWidget {
           SnackBar(content: Text('${AppL10n.t('error')}: $url')),
         );
       }
+    }
+  }
+
+  void _onDeveloperAreaTap() {
+    final now = DateTime.now();
+    if (now.difference(_lastDeveloperTapAt).inMilliseconds > _kTapResetMs) {
+      _developerTapCount = 0;
+    }
+    _lastDeveloperTapAt = now;
+    _developerTapCount++;
+    if (_developerTapCount >= _kAdminSecretTaps) {
+      _developerTapCount = 0;
+      showAdminPasswordDialog(context);
     }
   }
 
@@ -39,48 +65,48 @@ class AboutScreen extends StatelessWidget {
               builder: (context) {
                 final version = AppVersion.label;
                 return Column(children: [
-              Container(
-                width: 88,
-                height: 88,
-                decoration: BoxDecoration(
-                  color: cs.primary,
-                  borderRadius: BorderRadius.circular(22),
-                  boxShadow: [
-                    BoxShadow(
-                      color: cs.primary.withValues(alpha: 0.4),
-                      blurRadius: 20,
-                      offset: const Offset(0, 8),
+                  Container(
+                    width: 88,
+                    height: 88,
+                    decoration: BoxDecoration(
+                      color: cs.primary,
+                      borderRadius: BorderRadius.circular(22),
+                      boxShadow: [
+                        BoxShadow(
+                          color: cs.primary.withValues(alpha: 0.4),
+                          blurRadius: 20,
+                          offset: const Offset(0, 8),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-                child: const Icon(Icons.bluetooth_rounded,
-                    color: Colors.white, size: 48),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Rlink',
-                style: Theme.of(context)
-                    .textTheme
-                    .headlineMedium
-                    ?.copyWith(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${AppL10n.t('about_version')} $version',
-                style: TextStyle(color: Theme.of(context).hintColor),
-              ),
-              const SizedBox(height: 12),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: Text(
-                  AppL10n.t('about_description'),
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Theme.of(context).hintColor,
-                    height: 1.5,
+                    child: const Icon(Icons.bluetooth_rounded,
+                        color: Colors.white, size: 48),
                   ),
-                ),
-              ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Rlink',
+                    style: Theme.of(context)
+                        .textTheme
+                        .headlineMedium
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${AppL10n.t('about_version')} $version',
+                    style: TextStyle(color: Theme.of(context).hintColor),
+                  ),
+                  const SizedBox(height: 12),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 32),
+                    child: Text(
+                      AppL10n.t('about_description'),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Theme.of(context).hintColor,
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
                 ]);
               },
             ),
@@ -118,17 +144,23 @@ class AboutScreen extends StatelessWidget {
             onTap: () => _open(context, _githubUrl),
           ),
 
-          // ── Developer ────────────────────────────────────────────
+          // ── Developer (16× tap → пароль админ-панели) ─────────────
           _SectionHeader(AppL10n.t('about_developer')),
-          ListTile(
-            leading: CircleAvatar(
-              backgroundColor: cs.primary.withValues(alpha: 0.15),
-              child: Text('M',
-                  style: TextStyle(
-                      color: cs.primary, fontWeight: FontWeight.w700)),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: _onDeveloperAreaTap,
+              child: ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: cs.primary.withValues(alpha: 0.15),
+                  child: Text('M',
+                      style: TextStyle(
+                          color: cs.primary, fontWeight: FontWeight.w700)),
+                ),
+                title: const Text('Mihail Kashintsev'),
+                subtitle: const Text('Rendergames'),
+              ),
             ),
-            title: const Text('Mihail Kashintsev'),
-            subtitle: const Text('Rendergames'),
           ),
 
           const SizedBox(height: 32),

@@ -32,7 +32,6 @@ import '../screens/about_screen.dart';
 import '../screens/documentation_screen.dart';
 import '../screens/settings_data_page.dart';
 import '../../main.dart' show sendProfileToAllContacts;
-import '../screens/admin_screen.dart';
 import '../widgets/reactions.dart';
 import '../rlink_nav_routes.dart';
 
@@ -95,10 +94,6 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  // Hidden admin panel: 15 rapid taps on version text
-  int _versionTapCount = 0;
-  DateTime _lastTapAt = DateTime.fromMillisecondsSinceEpoch(0);
-
   @override
   Widget build(BuildContext context) {
     final settings = AppSettings.instance;
@@ -131,19 +126,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 32),
 
-          // ── Version footer (hidden admin trigger) ─────────────────
           Center(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _handleVersionTap,
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(vertical: 8, horizontal: 24),
-                child: Text(
-                  'Rlink v${AppVersion.label} • ${AppL10n.t('footer_ble_mesh')}',
-                  style: TextStyle(
-                      color: Theme.of(context).hintColor, fontSize: 12),
-                ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 24),
+              child: Text(
+                'Rlink v${AppVersion.label} • ${AppL10n.t('footer_ble_mesh')}',
+                style: TextStyle(
+                    color: Theme.of(context).hintColor, fontSize: 12),
               ),
             ),
           ),
@@ -155,69 +144,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _push(BuildContext context, Widget page) {
     Navigator.push(context, rlinkPushRoute(page));
-  }
-
-  // ── Admin panel ────────────────────────────────────────────────────
-
-  void _handleVersionTap() {
-    final now = DateTime.now();
-    if (now.difference(_lastTapAt).inMilliseconds > 2000) {
-      _versionTapCount = 0;
-    }
-    _lastTapAt = now;
-    _versionTapCount++;
-    if (_versionTapCount >= 15) {
-      _versionTapCount = 0;
-      _promptAdminPassword();
-    }
-  }
-
-  void _promptAdminPassword() {
-    final ctrl = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(AppL10n.t('admin_access_title')),
-        content: TextField(
-          controller: ctrl,
-          obscureText: true,
-          autofocus: true,
-          decoration: InputDecoration(
-            labelText: AppL10n.t('admin_password_label'),
-            border: const OutlineInputBorder(),
-          ),
-          onSubmitted: (_) => _checkAdminPassword(ctx, ctrl.text),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text(AppL10n.t('cancel')),
-          ),
-          FilledButton(
-            onPressed: () => _checkAdminPassword(ctx, ctrl.text),
-            child: Text(AppL10n.t('admin_login')),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _checkAdminPassword(BuildContext dialogCtx, String input) {
-    final hash = sha256Hex(input);
-    if (hash != AppSettings.instance.adminPasswordHash) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(AppL10n.t('admin_wrong_password')),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-    Navigator.pop(dialogCtx);
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const AdminScreen()),
-    );
   }
 
   // ── Child linked-device restricted settings ────────────────────────
