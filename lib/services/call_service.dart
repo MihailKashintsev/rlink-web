@@ -32,31 +32,10 @@ class CallService {
   CallService._();
   static final CallService instance = CallService._();
 
-  static const _iceServers = <String, dynamic>{
-    'iceServers': [
-      // Google STUN (may be blocked in RU — kept as fallback)
-      {'urls': 'stun:stun.l.google.com:19302'},
-      {'urls': 'stun:stun1.l.google.com:19302'},
-      // Cloudflare STUN — works in RU
-      {'urls': 'stun:stun.cloudflare.com:3478'},
-      // OpenRelay free TURN — allows connectivity behind symmetric NAT
-      {
-        'urls': 'turn:openrelay.metered.ca:80',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-      {
-        'urls': 'turn:openrelay.metered.ca:443',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-      {
-        'urls': 'turns:openrelay.metered.ca:443',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-    ],
-  };
+  static const _turnHost = String.fromEnvironment('TURN_HOST', defaultValue: '');
+  static const _turnUser = String.fromEnvironment('TURN_USER', defaultValue: '');
+  static const _turnPassword =
+      String.fromEnvironment('TURN_PASSWORD', defaultValue: '');
 
   final _uuid = const Uuid();
   final ValueNotifier<CallSessionInfo?> incomingCall = ValueNotifier(null);
@@ -80,6 +59,35 @@ class CallService {
       phase.value == CallPhase.ringing ||
       phase.value == CallPhase.connecting ||
       phase.value == CallPhase.connected;
+
+  Map<String, dynamic> _iceConfig() {
+    final servers = <Map<String, dynamic>>[
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {'urls': 'stun:stun.cloudflare.com:3478'},
+    ];
+    final host = _turnHost.trim();
+    final user = _turnUser.trim();
+    final pass = _turnPassword.trim();
+    if (host.isNotEmpty && user.isNotEmpty && pass.isNotEmpty) {
+      servers.addAll(<Map<String, dynamic>>[
+        {
+          'urls': <String>[
+            'turn:$host:3478?transport=udp',
+            'turn:$host:3478?transport=tcp',
+          ],
+          'username': user,
+          'credential': pass,
+        },
+        {
+          'urls': <String>['turns:$host:5349?transport=tcp'],
+          'username': user,
+          'credential': pass,
+        },
+      ]);
+    }
+    return <String, dynamic>{'iceServers': servers};
+  }
 
   void bindSignaling() {
     GossipRouter.instance.onCallSignal = _onSignal;
@@ -223,7 +231,7 @@ class CallService {
 
   Future<void> _ensurePeerConnection() async {
     if (_pc != null) return;
-    final pc = await createPeerConnection(_iceServers);
+    final pc = await createPeerConnection(_iceConfig());
     _pc = pc;
 
     pc.onIceCandidate = (candidate) async {
