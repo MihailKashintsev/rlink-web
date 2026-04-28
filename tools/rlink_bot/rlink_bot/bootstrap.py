@@ -100,27 +100,8 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def run_echo_forever(config_path: Path) -> None:
-    """Читает конфиг после claim, подключается и шлёт echo на DM."""
-    cfg = load_config(config_path)
-    keys_path = Path(cfg["keys_path"]).expanduser().resolve()
-    relay = str(cfg.get("relay_url") or DEFAULT_RELAY_WS).strip()
-    keys = BotKeys.from_json_dict(json.loads(keys_path.read_text(encoding="utf-8")))
-    handle = str(cfg.get("handle") or "bot")[:32]
-    nick = "@" + handle if not handle.startswith("@") else handle[:64]
-
-    sess = RelayBotSession(relay, keys)
-    print("Connecting", relay)
-
-    def on_dm(sender: str, text: str) -> None:
-        print(f"[DM {sender[:8]}] {text!r}")
-        try:
-            sess.send_dm(sender, f"echo: {text}")
-        except Exception as e:
-            print("[reply error]", e)
-
-    try:
-        sess.connect(nick=nick)
-        print("Echo mode — Ctrl+C to stop.")
-        sess.recv_loop(on_dm, log=lambda m: print(m))
-    finally:
-        sess.close()
+    _ = config_path
+    raise RuntimeError(
+        "Echo mode is disabled in this repository. "
+        "Use tools/rlink_help_bot instead."
+    )

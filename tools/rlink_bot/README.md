@@ -23,15 +23,12 @@
    ```
    В stdout один раз — **API token**; рядом появится `rlink_bot_config.json`.
 
-3. **Онлайн** (echo для проверки):
+3. **Онлайн**:
+   echo-режим в этом репозитории отключён. Используйте только `tools/rlink_help_bot`:
    ```bash
-  python -m rlink_bot run --file rlink_bot_config.json
+   cd tools/rlink_help_bot
+   python -m rlink_help_bot --config rlink_help_bot_config.json
    ```
-   либо `run --file bot_keys.json` — тогда **relay** и **@ник** подхватываются из `rlink_bot_config.json`, если он лежит рядом с файлом ключей.
-
-`run` и `example_echo_bot.py` специально работают в **echo-режиме**. Для бота со смысловыми ответами используйте собственную логику (пример: `tools/rlink_help_bot`).
-
-**Ещё проще:** в репозитории **`example_echo_bot.py`** — вставьте код Lib в переменную `RELAY_CLAIM` в начале файла и запустите `python example_echo_bot.py` из каталога `tools/rlink_bot` (после `pip install -e .`).
 
 Команда **`claim`** — то же, что **`onboard`**, но с явным **`--relay`** по умолчанию из переменной окружения `RLINK_RELAY_URL` (если нужен другой сервер).
 

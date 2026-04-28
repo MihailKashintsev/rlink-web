@@ -101,86 +101,18 @@ def cmd_code(_args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    p = _keys_path(args)
-    if not p.exists():
-        print(f"Missing file {p}", file=sys.stderr)
-        return 1
-    relay = args.relay.strip()
-    nick = args.nick
-
-    try:
-        top = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"Bad JSON in {p}: {e}", file=sys.stderr)
-        return 1
-    if not isinstance(top, dict):
-        print(f"Expected JSON object in {p}", file=sys.stderr)
-        return 1
-
-    # После onboard удобно вызывать: run --file rlink_bot_config.json
-    cfg: dict | None = None
-    keys_json_path = p
-    if "keys_path" in top and "ed25519_private_hex" not in top:
-        cfg = top
-        keys_json_path = Path(str(top["keys_path"])).expanduser().resolve()
-    else:
-        cfg_path = p.parent / "rlink_bot_config.json"
-        if cfg_path.exists():
-            try:
-                maybe = json.loads(cfg_path.read_text(encoding="utf-8"))
-                if isinstance(maybe, dict) and maybe.get("keys_path"):
-                    cfg = maybe
-            except (OSError, json.JSONDecodeError, TypeError):
-                pass
-
-    if not keys_json_path.exists():
-        print(f"Missing keys file {keys_json_path}", file=sys.stderr)
-        return 1
-    try:
-        keys = BotKeys.from_json_dict(
-            json.loads(keys_json_path.read_text(encoding="utf-8"))
-        )
-    except KeyError as e:
-        print(
-            f"{keys_json_path} is not a bot keys file (need ed25519_*). "
-            f"Use `run --file rlink_bot_config.json` after onboard, or `--file bot_keys.json`. "
-            f"Missing: {e}",
-            file=sys.stderr,
-        )
-        return 1
-
-    if cfg:
-        try:
-            r = str(cfg.get("relay_url") or "").strip()
-            if r:
-                relay = r
-            if nick is None:
-                h = cfg.get("handle")
-                if isinstance(h, str) and h.strip():
-                    hn = h.strip()
-                    nick = hn if hn.startswith("@") else ("@" + hn)
-                    nick = nick[:64]
-        except (TypeError, AttributeError):
-            pass
-    sess = RelayBotSession(relay, keys)
-    print("Connecting", relay)
-
-    def on_dm(sender: str, text: str) -> None:
-        print(f"[DM {sender[:8]}] {text!r}")
-        try:
-            sess.send_dm(sender, f"echo: {text}")
-        except Exception as e:
-            print("[reply error]", e, file=sys.stderr)
-
-    try:
-        sess.connect(nick=nick)
-        print("Registered as bot. Echo mode — Ctrl+C to stop.")
-        sess.recv_loop(on_dm, log=lambda m: print(m))
-    except KeyboardInterrupt:
-        print("bye")
-    finally:
-        sess.close()
-    return 0
+    _ = args
+    print(
+        "Echo mode is disabled in this repository.",
+        file=sys.stderr,
+    )
+    print(
+        "Use the help bot instead:\n"
+        "  cd tools/rlink_help_bot\n"
+        "  python -m rlink_help_bot --config rlink_help_bot_config.json",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def main() -> None:
@@ -234,7 +166,7 @@ def main() -> None:
 
     r = sub.add_parser(
         "run",
-        help="Connect and echo DMs; --file = bot_keys.json или rlink_bot_config.json после onboard",
+        help="Disabled: use tools/rlink_help_bot for production bot behavior",
     )
     r.add_argument(
         "--file",
