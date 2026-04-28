@@ -12,6 +12,21 @@ import websocket
 
 from rlink_bot.crypto_rlink import BotKeys, build_msg_packet, decrypt_dm
 
+# После register relay сразу шлёт снимки каталогов и presence в тот же WS;
+# их нужно пропустить, пока не дождёмся ответа на bot_claim.
+_SKIP_UNTIL_BOT_CLAIM_ACK = frozenset(
+    {
+        "channel_dir_snapshot",
+        "bot_dir_snapshot",
+        "presence",
+        "account_sync_blob",
+        "packet",
+        "pong",
+        "search_result",
+        "delivery_status",
+    }
+)
+
 
 class RelayBotSession:
     def __init__(self, relay_url: str, keys: BotKeys):
@@ -55,10 +70,25 @@ class RelayBotSession:
         if len(cid) == 32 and all(c in "0123456789abcdefABCDEF" for c in cid):
             cid = cid.lower()
         self.ws.send(json.dumps({"type": "bot_claim", "claimId": cid}))
-        raw = self.ws.recv()
-        if not isinstance(raw, str):
-            raw = raw.decode("utf-8")
-        return json.loads(raw)
+        for _ in range(2048):
+            raw = self.ws.recv()
+            if not isinstance(raw, str):
+                raw = raw.decode("utf-8")
+            msg = json.loads(raw)
+            t = msg.get("type")
+            if t in _SKIP_UNTIL_BOT_CLAIM_ACK:
+                if t == "presence":
+                    pk = (msg.get("publicKey") or "").lower()
+                    x = msg.get("x25519")
+                    if pk and isinstance(x, str) and x:
+                        self.peer_x25519[pk] = x
+                continue
+            if t == "bot_claim_ack":
+                return msg
+            if t == "error":
+                return msg
+            raise RuntimeError(f"Неожиданное сообщение relay при claim: {msg!r}")
+        raise RuntimeError("Слишком много сообщений до bot_claim_ack — проверьте relay/сеть.")
 
     def recv_loop(
         self,
@@ -82,7 +112,15 @@ class RelayBotSession:
             if t == "packet":
                 self._handle_packet(msg, on_dm, L)
                 continue
-            if t in ("pong", "registered", "search_result", "delivery_status", "channel_dir_snapshot", "bot_dir_snapshot"):
+            if t in (
+                "pong",
+                "registered",
+                "search_result",
+                "delivery_status",
+                "channel_dir_snapshot",
+                "bot_dir_snapshot",
+                "account_sync_blob",
+            ):
                 continue
             L(f"[relay] {t}")
 
