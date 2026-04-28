@@ -70,8 +70,7 @@ class LibBotService {
       'Токен API — один раз в ответ claim, сохраните.\n'
       'Пользователи ищут бота по @нику на relay.';
 
-  static const _commandsList =
-      'Список команд Lib:\n\n'
+  static const _commandsList = 'Список команд Lib:\n\n'
       '/start, /help — справка\n'
       '/mybots — список ваших ботов на relay\n'
       '/setname @ник имя — имя в каталоге\n'
@@ -85,6 +84,27 @@ class LibBotService {
       '/commands — это сообщение\n\n'
       'После /newbot на ПК: python -m rlink_bot onboard <код из Lib> --file bot_keys.json\n\n'
       'Документация по всему Rlink: Настройки → Документация.';
+
+  static const List<(String, String)> _menuButtons = [
+    ('Справка', '/help'),
+    ('Команды', '/commands'),
+    ('Мои боты', '/mybots'),
+    ('Новый бот', '/newbot my_bot'),
+    ('Удалить бота', '/delbot @'),
+    ('Памятка', '/guide'),
+  ];
+
+  String _buttonTokens(List<(String, String)> buttons) {
+    return buttons.map((b) => '[btn:${b.$1}|${b.$2}]').join(' ');
+  }
+
+  List<String> _withMenuButtons(List<String> lines) {
+    return <String>[
+      ...lines,
+      '',
+      _buttonTokens(_menuButtons),
+    ];
+  }
 
   static const _guideLines = <String>[
     'Чеклист: создать бота',
@@ -159,14 +179,14 @@ class LibBotService {
     }
 
     if (lower == '/start' || lower == '/help') {
-      return const [_help];
+      return _withMenuButtons([_help]);
     }
 
     if (lower == '/commands' ||
         lower == '/cmd' ||
         lower.startsWith('/commands ') ||
         lower.startsWith('/cmd ')) {
-      return const [_commandsList];
+      return _withMenuButtons([_commandsList]);
     }
 
     if (lower == '/cancel' || lower.startsWith('/cancel ')) {
@@ -177,7 +197,7 @@ class LibBotService {
     }
 
     if (lower == '/guide' || lower.startsWith('/guide ')) {
-      return List<String>.from(_guideLines);
+      return _withMenuButtons(List<String>.from(_guideLines));
     }
 
     if (lower == '/mybots' || lower.startsWith('/mybots ')) {
@@ -215,8 +235,7 @@ class LibBotService {
       if (h == null) {
         return const ['Некорректный ник. Допустимы a–z, 0–9, _, длина от 2.'];
       }
-      final desc =
-          parts.length > 2 ? parts.sublist(2).join(' ').trim() : '';
+      final desc = parts.length > 2 ? parts.sublist(2).join(' ').trim() : '';
       if (desc.length > 512) {
         return const ['Описание не длиннее 512 символов.'];
       }
@@ -267,7 +286,7 @@ class LibBotService {
         return const [
           'Использование: /newbot <ник>',
           'Затем отдельным сообщением — публичный Ed25519 ключ бота (64 hex), '
-          'или одной строкой: /newbot <ник> <64hex>',
+              'или одной строкой: /newbot <ник> <64hex>',
         ];
       }
       var handle = parts[1].toLowerCase().replaceAll('@', '');
@@ -289,8 +308,7 @@ class LibBotService {
         final pub = _extract64HexBotPub(parts.last);
         if (pub != null) {
           final dispParts = parts.sublist(2, parts.length - 1).join(' ').trim();
-          final displayName =
-              dispParts.isNotEmpty ? dispParts : handle;
+          final displayName = dispParts.isNotEmpty ? dispParts : handle;
           return _registerOnRelay(
             handle: handle,
             displayName: displayName,
@@ -327,9 +345,9 @@ class LibBotService {
       return _revokeOwnedBot(handleNorm: h);
     }
 
-    return const [
+    return _withMenuButtons(const [
       'Неизвестная команда. Введите /help',
-    ];
+    ]);
   }
 
   /// Ник после @ или без; только a-z, 0-9, _; длина 2–32.
@@ -441,7 +459,8 @@ class LibBotService {
       }
       lines.add('');
     }
-    lines.add('Правки: /setname, /setdesc, /setavatar, /setbanner (см. /help).');
+    lines
+        .add('Правки: /setname, /setdesc, /setavatar, /setbanner (см. /help).');
     lines.add('Удалить бота: /delbot @ник');
     return lines;
   }
@@ -485,8 +504,8 @@ class LibBotService {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(botId)) {
       return const ['Внутренняя ошибка: некорректный botId.'];
     }
-    final ack =
-        await RelayService.instance.sendBotOwnerPatch(botId: botId, changes: changes);
+    final ack = await RelayService.instance
+        .sendBotOwnerPatch(botId: botId, changes: changes);
     if (ack['ok'] == true) {
       return ['Готово: @$handleNorm обновлён на relay.'];
     }
@@ -517,7 +536,9 @@ class LibBotService {
 
     final completer = Completer<Map<String, dynamic>>();
     void listener(Map<String, dynamic> m) {
-      if (!completer.isCompleted) completer.complete(Map<String, dynamic>.from(m));
+      if (!completer.isCompleted) {
+        completer.complete(Map<String, dynamic>.from(m));
+      }
     }
 
     RelayService.instance.onBotRegisterAck = listener;
@@ -582,7 +603,8 @@ class LibBotService {
           if (err == 'handle_taken') 'Выберите другой @ник.',
           if (err == 'bad_handle')
             'Ник не принят: зарезервированное слово, недопустимые символы или длина не 2–32 (см. подсказку Lib при /newbot).',
-          if (err == 'bad_signature') 'Внутренняя ошибка подписи — попробуйте ещё раз.',
+          if (err == 'bad_signature')
+            'Внутренняя ошибка подписи — попробуйте ещё раз.',
           if (err == 'claim_code_alloc')
             'Не удалось выделить код заявки — попробуйте /newbot ещё раз.',
         ];

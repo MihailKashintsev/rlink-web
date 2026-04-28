@@ -74,10 +74,15 @@ class _User {
   final String publicKey;
   String nick;
   String x25519Key;
-  String get shortId => publicKey.length > 8 ? publicKey.substring(0, 8) : publicKey;
+  String get shortId =>
+      publicKey.length > 8 ? publicKey.substring(0, 8) : publicKey;
   DateTime connectedAt = DateTime.now();
 
-  _User({required this.ws, required this.publicKey, required this.nick, this.x25519Key = ''});
+  _User(
+      {required this.ws,
+      required this.publicKey,
+      required this.nick,
+      this.x25519Key = ''});
 }
 
 // ── Server state ────────────────────────────────────────────────
@@ -88,7 +93,8 @@ final Map<String, _User> _users = {};
 /// Rate limiting: publicKey → last N timestamps
 final Map<String, List<DateTime>> _rateLimits = {};
 const _rateWindow = Duration(seconds: 10);
-const _rateMax = 300; // max 300 messages per 10 seconds (media chunks need ~250)
+const _rateMax =
+    300; // max 300 messages per 10 seconds (media chunks need ~250)
 
 /// Opaque encrypted blobs per Ed25519 identity (список каналов + метаданные синхронизации
 /// аккаунта — клиент шифрует, relay не читает содержимое).
@@ -112,11 +118,13 @@ final String _vapidPublicKey =
 final String _vapidPrivateKeyPem =
     (Platform.environment['VAPID_PRIVATE_KEY_PEM'] ?? '').trim();
 final String _vapidSubject =
-    (Platform.environment['VAPID_SUBJECT'] ?? 'mailto:admin@rlink.local').trim();
+    (Platform.environment['VAPID_SUBJECT'] ?? 'mailto:admin@rlink.local')
+        .trim();
 
 // ── Публичный каталог каналов (подпись админа, персистентность) ──
 
 final Map<String, Map<String, dynamic>> _channelDirectory = {};
+
 /// После удаления канала из каталога — максимальный seen updatedAt (антиретрансляция).
 final Map<String, int> _channelDirTombstones = {};
 final Ed25519 _ed25519 = Ed25519();
@@ -153,7 +161,8 @@ Future<bool> _verifyChannelDirSignature(
     }
     final sigBytes = Uint8List(64);
     for (var i = 0; i < 64; i++) {
-      sigBytes[i] = int.parse(signatureHex.substring(i * 2, i * 2 + 2), radix: 16);
+      sigBytes[i] =
+          int.parse(signatureHex.substring(i * 2, i * 2 + 2), radix: 16);
     }
     final pubKey = SimplePublicKey(pubBytes, type: KeyPairType.ed25519);
     return await _ed25519.verify(
@@ -223,6 +232,7 @@ final String _relayAdminHash =
 
 final Map<String, Map<String, dynamic>> _botDirectory = {};
 final Map<String, Map<String, dynamic>> _botClaims = {};
+
 /// Канонический короткий код `AAAA-BBBB-CCCC` (верхний регистр) → 32 hex claimId.
 final Map<String, String> _botClaimCodeToClaimId = {};
 final Map<String, List<DateTime>> _botRegisterStartLimits = {};
@@ -280,7 +290,8 @@ String? _allocateUniqueBotClaimCode() {
   for (var attempt = 0; attempt < 96; attempt++) {
     final buf = StringBuffer();
     for (var j = 0; j < 12; j++) {
-      buf.write(_botClaimCodeAlphabet[rnd.nextInt(_botClaimCodeAlphabet.length)]);
+      buf.write(
+          _botClaimCodeAlphabet[rnd.nextInt(_botClaimCodeAlphabet.length)]);
     }
     final canonical = _formatBotClaimCode12(buf.toString());
     if (_botClaimCodeToClaimId.containsKey(canonical)) continue;
@@ -369,11 +380,13 @@ Future<bool> _verifyEd25519SignatureOnUtf8(
   try {
     final pubBytes = Uint8List(32);
     for (var i = 0; i < 32; i++) {
-      pubBytes[i] = int.parse(signerPubHex64.substring(i * 2, i * 2 + 2), radix: 16);
+      pubBytes[i] =
+          int.parse(signerPubHex64.substring(i * 2, i * 2 + 2), radix: 16);
     }
     final sigBytes = Uint8List(64);
     for (var i = 0; i < 64; i++) {
-      sigBytes[i] = int.parse(signatureHex.substring(i * 2, i * 2 + 2), radix: 16);
+      sigBytes[i] =
+          int.parse(signatureHex.substring(i * 2, i * 2 + 2), radix: 16);
     }
     final pubKey = SimplePublicKey(pubBytes, type: KeyPairType.ed25519);
     return await _ed25519.verify(
@@ -586,7 +599,8 @@ Future<void> _handleBotRegisterStartAsync(
     ackFail('handle_taken');
     return;
   }
-  if (_botDirectory.containsKey(botPk) && _botDirectory[botPk]!['revoked'] != true) {
+  if (_botDirectory.containsKey(botPk) &&
+      _botDirectory[botPk]!['revoked'] != true) {
     ackFail('bot_key_registered');
     return;
   }
@@ -728,7 +742,8 @@ void _handleBotClaim(_User user, Map<String, dynamic> msg) {
   };
   _persistBotDirectory();
 
-  stdout.writeln('[RLINK][Relay] bot_claim ok @$handleNorm bot=${user.shortId}');
+  stdout
+      .writeln('[RLINK][Relay] bot_claim ok @$handleNorm bot=${user.shortId}');
   ackOk({
     'apiToken': apiToken,
     'handle': handleNorm,
@@ -974,9 +989,18 @@ Future<void> _handleBotOwnerPatchAsync(
   if (obj['revoke'] == true) {
     row['revoked'] = true;
     row['updatedAt'] = nowMs;
+    // Если бот онлайн — немедленно отключаем, чтобы он исчез из presence и поиска.
+    final onlineBot = _users.remove(botId);
+    if (onlineBot != null) {
+      try {
+        onlineBot.ws.sink.close(4003, 'bot_revoked');
+      } catch (_) {}
+      _broadcastPresence(botId, false);
+    }
     _persistBotDirectory();
     _broadcastBotDirSnapshotToAll();
-    stdout.writeln('[RLINK][Relay] bot_owner_patch revoke bot=$botId owner=$owner');
+    stdout.writeln(
+        '[RLINK][Relay] bot_owner_patch revoke bot=$botId owner=$owner');
     ackOk(reqId);
     return;
   }
@@ -1199,7 +1223,8 @@ void _loadAccountBlobs() {
     decoded.forEach((k, v) {
       if (k is String && v is String) _accountBlobs[k] = v;
     });
-    stdout.writeln('[RLINK][Relay] Loaded ${_accountBlobs.length} account sync blobs');
+    stdout.writeln(
+        '[RLINK][Relay] Loaded ${_accountBlobs.length} account sync blobs');
   } catch (e) {
     stdout.writeln('[RLINK][Relay] account_blobs load: $e');
   }
@@ -1223,7 +1248,8 @@ void _loadMailbox() {
         _mailbox[recipient] = byId;
       }
     });
-    stdout.writeln('[RLINK][Relay] Loaded mailbox for ${_mailbox.length} recipients');
+    stdout.writeln(
+        '[RLINK][Relay] Loaded mailbox for ${_mailbox.length} recipients');
   } catch (e) {
     stdout.writeln('[RLINK][Relay] mailbox load: $e');
   }
@@ -1362,8 +1388,7 @@ Future<void> _notifyRecipientQueued({
   if (!_webPushConfigured) return;
   final now = DateTime.now();
   final prev = _lastPushForRecipient[recipientKey];
-  if (prev != null &&
-      now.difference(prev).inSeconds < _pushCooldownSeconds) {
+  if (prev != null && now.difference(prev).inSeconds < _pushCooldownSeconds) {
     return;
   }
   final subs = _pushSubscriptions[recipientKey];
@@ -1463,7 +1488,8 @@ void _handleMessage(_User user, dynamic raw) {
 
   if (_isBotBlockedOrRevoked(user.publicKey) && type != 'ping') {
     try {
-      user.ws.sink.add(jsonEncode({'type': 'error', 'msg': 'bot_access_denied'}));
+      user.ws.sink
+          .add(jsonEncode({'type': 'error', 'msg': 'bot_access_denied'}));
     } catch (_) {}
     return;
   }
@@ -1559,8 +1585,9 @@ void _handleAdminBotList(_User user, Map<String, dynamic> msg) {
     final blocked = m['blocked'] == true;
     final verified = m['verified'] == true;
     if (query.isNotEmpty) {
-      final hay = '$id $handle $displayName $owner ${_jsonString(m['description'])}'
-          .toLowerCase();
+      final hay =
+          '$id $handle $displayName $owner ${_jsonString(m['description'])}'
+              .toLowerCase();
       if (!hay.contains(query)) continue;
     }
     out.add({
@@ -1646,17 +1673,19 @@ void _handleAccountSyncPut(_User user, Map<String, dynamic> msg) {
   try {
     user.ws.sink.add(jsonEncode({'type': 'account_sync_ack', 'ok': true}));
   } catch (_) {}
-  print('[RLINK][Relay] account_sync_put ${user.shortId} (${data.length} chars)');
+  print(
+      '[RLINK][Relay] account_sync_put ${user.shortId} (${data.length} chars)');
 }
 
 void _handlePacket(_User sender, Map<String, dynamic> msg) {
   final toRaw = msg['to'] as String?;
   final data = msg['data'] as String?; // base64-encoded encrypted packet
   if (toRaw == null || data == null) return;
-  if (data.length > 262144) return; // 256 KB max (blob chunks double-base64 ~90 KB each)
+  if (data.length > 262144)
+    return; // 256 KB max (blob chunks double-base64 ~90 KB each)
   final to = toRaw.toLowerCase();
-  final relayMsgId =
-      (msg['msgId'] as String?) ?? 'pkt_${DateTime.now().microsecondsSinceEpoch}';
+  final relayMsgId = (msg['msgId'] as String?) ??
+      'pkt_${DateTime.now().microsecondsSinceEpoch}';
 
   final envelope = <String, dynamic>{
     'type': 'packet',
@@ -1683,7 +1712,8 @@ void _handlePacket(_User sender, Map<String, dynamic> msg) {
   }
   try {
     recipient.ws.sink.add(jsonEncode(envelope));
-    print('[RLINK][Relay] Packet: ${sender.shortId} → ${recipient.shortId} (${data.length} chars)');
+    print(
+        '[RLINK][Relay] Packet: ${sender.shortId} → ${recipient.shortId} (${data.length} chars)');
   } catch (e) {
     print('[RLINK][Relay] Packet forward failed: $e');
     sender.ws.sink.add(jsonEncode({
@@ -1713,7 +1743,8 @@ void _handleBroadcast(_User sender, Map<String, dynamic> msg) {
       sent++;
     } catch (_) {}
   }
-  print('[RLINK][Relay] Broadcast from ${sender.shortId}: ${data.length} chars → $sent peers');
+  print(
+      '[RLINK][Relay] Broadcast from ${sender.shortId}: ${data.length} chars → $sent peers');
 }
 
 void _handleBlob(_User sender, Map<String, dynamic> msg) {
@@ -1733,7 +1764,8 @@ void _handleBlob(_User sender, Map<String, dynamic> msg) {
 
   final recipient = _users[to];
   if (recipient == null) {
-    unawaited(_notifyRecipientQueued(recipientKey: to, senderKey: sender.publicKey));
+    unawaited(
+        _notifyRecipientQueued(recipientKey: to, senderKey: sender.publicKey));
     sender.ws.sink.add(jsonEncode({
       'type': 'delivery_status',
       'to': to,
@@ -1745,7 +1777,8 @@ void _handleBlob(_User sender, Map<String, dynamic> msg) {
   try {
     recipient.ws.sink.add(jsonEncode(forwarded));
     final dataLen = (msg['data'] as String?)?.length ?? 0;
-    print('[RLINK][Relay] Blob forwarded: ${sender.publicKey.substring(0, 8)} → ${to.substring(0, 8)} ($dataLen chars)');
+    print(
+        '[RLINK][Relay] Blob forwarded: ${sender.publicKey.substring(0, 8)} → ${to.substring(0, 8)} ($dataLen chars)');
   } catch (e) {
     print('[RLINK][Relay] Blob forward failed: $e');
     sender.ws.sink.add(jsonEncode({
@@ -1799,6 +1832,7 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
   for (final user in _users.values) {
     if (results.length >= 20) break;
     if (user.publicKey == requester.publicKey) continue;
+    if (_isBotBlockedOrRevoked(user.publicKey)) continue;
     if (seenKeys.contains(user.publicKey)) continue;
     final nickLower = user.nick.toLowerCase();
     final shortLower = user.shortId.toLowerCase();
@@ -1820,7 +1854,8 @@ void _handleSearch(_User requester, Map<String, dynamic> msg) {
     'type': 'search_result',
     'results': results,
   }));
-  print('[RLINK][Relay] Search "$query" by ${requester.publicKey.substring(0, 8)}: ${results.length} results');
+  print(
+      '[RLINK][Relay] Search "$query" by ${requester.publicKey.substring(0, 8)}: ${results.length} results');
 }
 
 // ── WebSocket handler ───────────────────────────────────────────
@@ -1840,7 +1875,8 @@ shelf.Handler _wsHandler() {
           try {
             final msg = jsonDecode(raw) as Map<String, dynamic>;
             if (msg['type'] != 'register') {
-              ws.sink.add(jsonEncode({'type': 'error', 'msg': 'register_first'}));
+              ws.sink
+                  .add(jsonEncode({'type': 'error', 'msg': 'register_first'}));
               return;
             }
             final publicKeyRaw = msg['publicKey'] as String?;
@@ -1856,10 +1892,13 @@ shelf.Handler _wsHandler() {
             // Disconnect previous connection for same key
             final prev = _users[publicKey];
             if (prev != null) {
-              try { prev.ws.sink.close(); } catch (_) {}
+              try {
+                prev.ws.sink.close();
+              } catch (_) {}
             }
 
-            user = _User(ws: ws, publicKey: publicKey, nick: nick, x25519Key: x25519Key);
+            user = _User(
+                ws: ws, publicKey: publicKey, nick: nick, x25519Key: x25519Key);
             _users[publicKey] = user!;
             if (_isBotBlockedOrRevoked(publicKey)) {
               try {
@@ -1913,7 +1952,8 @@ shelf.Handler _wsHandler() {
             // Notify other users about this new user
             _broadcastPresence(publicKey, true);
 
-            stdout.writeln('[+] ${nick.isEmpty ? shortId : nick} connected (${_users.length} online)');
+            stdout.writeln(
+                '[+] ${nick.isEmpty ? shortId : nick} connected (${_users.length} online)');
           } catch (e) {
             ws.sink.add(jsonEncode({'type': 'error', 'msg': 'bad_register'}));
           }
@@ -1931,7 +1971,8 @@ shelf.Handler _wsHandler() {
           final detail = cc == null
               ? ''
               : ' [closeCode=$cc${cr == null || cr.isEmpty ? '' : ', $cr'}]';
-          stdout.writeln('[-] $id disconnected (${_users.length} online)$detail');
+          stdout
+              .writeln('[-] $id disconnected (${_users.length} online)$detail');
         }
       },
       onError: (e) {
@@ -1973,7 +2014,8 @@ shelf.Response _jsonResponse(Map<String, dynamic> body, {int status = 200}) {
       'content-type': 'application/json',
       'access-control-allow-origin': '*',
       'access-control-allow-methods': 'GET,POST,OPTIONS',
-      'access-control-allow-headers': 'content-type, authorization, x-admin-hash',
+      'access-control-allow-headers':
+          'content-type, authorization, x-admin-hash',
     },
   );
 }
@@ -1997,7 +2039,8 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
       headers: {
         'access-control-allow-origin': '*',
         'access-control-allow-methods': 'GET,POST,OPTIONS',
-        'access-control-allow-headers': 'content-type, authorization, x-admin-hash',
+        'access-control-allow-headers':
+            'content-type, authorization, x-admin-hash',
       },
     );
   }
@@ -2009,7 +2052,8 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
   }
   if (request.url.path == 'push/subscribe' && request.method == 'POST') {
     if (!_webPushConfigured) {
-      return _jsonResponse({'ok': false, 'error': 'push_not_configured'}, status: 503);
+      return _jsonResponse({'ok': false, 'error': 'push_not_configured'},
+          status: 503);
     }
     try {
       final raw = await request.readAsString();
@@ -2021,12 +2065,14 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
           (decoded['publicKey'] as String?)?.trim().toLowerCase() ?? '';
       final subRaw = decoded['subscription'];
       if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(publicKey) || subRaw is! Map) {
-        return _jsonResponse({'ok': false, 'error': 'bad_request'}, status: 400);
+        return _jsonResponse({'ok': false, 'error': 'bad_request'},
+            status: 400);
       }
       final endpoint = (subRaw['endpoint'] as String?)?.trim() ?? '';
       final keysRaw = subRaw['keys'];
       if (endpoint.isEmpty || keysRaw is! Map) {
-        return _jsonResponse({'ok': false, 'error': 'bad_subscription'}, status: 400);
+        return _jsonResponse({'ok': false, 'error': 'bad_subscription'},
+            status: 400);
       }
       final p256dh = _normalizeB64Url((keysRaw['p256dh'] as String?) ?? '');
       final auth = _normalizeB64Url((keysRaw['auth'] as String?) ?? '');
@@ -2042,15 +2088,18 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
       });
       return _jsonResponse({'ok': true});
     } catch (_) {
-      return _jsonResponse({'ok': false, 'error': 'invalid_payload'}, status: 400);
+      return _jsonResponse({'ok': false, 'error': 'invalid_payload'},
+          status: 400);
     }
   }
   if (request.url.path == 'health') {
-    final peers = _users.values.map((u) => {
-      'shortId': u.shortId,
-      'nick': u.nick,
-      'connectedAt': u.connectedAt.toIso8601String(),
-    }).toList();
+    final peers = _users.values
+        .map((u) => {
+              'shortId': u.shortId,
+              'nick': u.nick,
+              'connectedAt': u.connectedAt.toIso8601String(),
+            })
+        .toList();
     return _jsonResponse({
       'status': 'ok',
       'online': _users.length,
@@ -2065,13 +2114,15 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
   // ── HTTP Bot API (метаданные; сообщения только WS + E2E) ─────────
   if (request.url.path.startsWith('bot-api/v1/') && request.method == 'POST') {
     final botId = _botIdFromBearerApiToken(
-      request.headers['authorization'] ?? request.headers['Authorization'] ?? '',
+      request.headers['authorization'] ??
+          request.headers['Authorization'] ??
+          '',
     );
     if (botId == null) {
       return _jsonResponse({'ok': false, 'error': 'unauthorized'}, status: 401);
     }
     final row = _botDirectory[botId];
-  if (row == null || row['revoked'] == true || row['blocked'] == true) {
+    if (row == null || row['revoked'] == true || row['blocked'] == true) {
       return _jsonResponse({'ok': false, 'error': 'not_found'}, status: 404);
     }
     try {
@@ -2088,11 +2139,15 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
             row['webhookUrl'] = '';
           } else {
             final u = Uri.tryParse(url);
-            if (u == null || !u.hasScheme || (u.scheme != 'https' && u.scheme != 'http')) {
-              return _jsonResponse({'ok': false, 'error': 'bad_url'}, status: 400);
+            if (u == null ||
+                !u.hasScheme ||
+                (u.scheme != 'https' && u.scheme != 'http')) {
+              return _jsonResponse({'ok': false, 'error': 'bad_url'},
+                  status: 400);
             }
             if (url.length > 2048) {
-              return _jsonResponse({'ok': false, 'error': 'url_too_long'}, status: 400);
+              return _jsonResponse({'ok': false, 'error': 'url_too_long'},
+                  status: 400);
             }
             row['webhookUrl'] = url;
           }
@@ -2105,7 +2160,8 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
         case 'setMyDescription':
           final d = (decoded['description'] as String?)?.trim() ?? '';
           if (d.length > 512) {
-            return _jsonResponse({'ok': false, 'error': 'description_too_long'}, status: 400);
+            return _jsonResponse({'ok': false, 'error': 'description_too_long'},
+                status: 400);
           }
           row['description'] = d;
           _persistBotDirectory();
@@ -2114,7 +2170,8 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
         case 'setMyName':
           final n = (decoded['displayName'] as String?)?.trim() ?? '';
           if (n.isEmpty || n.length > 64) {
-            return _jsonResponse({'ok': false, 'error': 'bad_display_name'}, status: 400);
+            return _jsonResponse({'ok': false, 'error': 'bad_display_name'},
+                status: 400);
           }
           row['displayName'] = n;
           _persistBotDirectory();
@@ -2123,7 +2180,8 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
         case 'setMyAvatarUrl':
           final u = (decoded['url'] as String?)?.trim() ?? '';
           if (!_isAllowedBotMediaUrl(u)) {
-            return _jsonResponse({'ok': false, 'error': 'bad_url'}, status: 400);
+            return _jsonResponse({'ok': false, 'error': 'bad_url'},
+                status: 400);
           }
           row['avatarUrl'] = u;
           _persistBotDirectory();
@@ -2132,7 +2190,8 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
         case 'setMyBannerUrl':
           final bu = (decoded['url'] as String?)?.trim() ?? '';
           if (!_isAllowedBotMediaUrl(bu)) {
-            return _jsonResponse({'ok': false, 'error': 'bad_url'}, status: 400);
+            return _jsonResponse({'ok': false, 'error': 'bad_url'},
+                status: 400);
           }
           row['bannerUrl'] = bu;
           _persistBotDirectory();
@@ -2144,10 +2203,12 @@ Future<shelf.Response> _infoHandler(shelf.Request request) async {
           _persistBotDirectory();
           return _jsonResponse({'ok': true, 'apiToken': apiToken});
         default:
-          return _jsonResponse({'ok': false, 'error': 'unknown_action'}, status: 404);
+          return _jsonResponse({'ok': false, 'error': 'unknown_action'},
+              status: 404);
       }
     } catch (_) {
-      return _jsonResponse({'ok': false, 'error': 'invalid_payload'}, status: 400);
+      return _jsonResponse({'ok': false, 'error': 'invalid_payload'},
+          status: 400);
     }
   }
 
@@ -2165,10 +2226,7 @@ Future<void> main() async {
   _loadBotDirectory();
 
   // Cascade: try WebSocket first, then HTTP info
-  final handler = shelf.Cascade()
-      .add(_wsHandler())
-      .add(_infoHandler)
-      .handler;
+  final handler = shelf.Cascade().add(_wsHandler()).add(_infoHandler).handler;
 
   final server = await io.serve(
     handler,
