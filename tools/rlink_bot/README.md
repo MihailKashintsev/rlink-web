@@ -25,9 +25,9 @@
 
 3. **Онлайн** (echo для проверки):
    ```bash
-   python -m rlink_bot run --file bot_keys.json
+   python -m rlink_bot run --file rlink_bot_config.json
    ```
-   Команда `run` подхватит **relay** и **@ник** из `rlink_bot_config.json`, если файл лежит рядом с ключами.
+   либо `run --file bot_keys.json` — тогда **relay** и **@ник** подхватываются из `rlink_bot_config.json`, если он лежит рядом с файлом ключей.
 
 **Ещё проще:** в репозитории **`example_echo_bot.py`** — вставьте код Lib в переменную `RELAY_CLAIM` в начале файла и запустите `python example_echo_bot.py` из каталога `tools/rlink_bot` (после `pip install -e .`).
 

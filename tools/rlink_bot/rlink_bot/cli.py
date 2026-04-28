@@ -103,15 +103,54 @@ def cmd_code(_args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     p = _keys_path(args)
     if not p.exists():
-        print(f"Missing keys file {p}", file=sys.stderr)
+        print(f"Missing file {p}", file=sys.stderr)
         return 1
-    keys = BotKeys.from_json_dict(json.loads(p.read_text(encoding="utf-8")))
     relay = args.relay.strip()
     nick = args.nick
-    cfg_path = p.parent / "rlink_bot_config.json"
-    if cfg_path.exists():
+
+    try:
+        top = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"Bad JSON in {p}: {e}", file=sys.stderr)
+        return 1
+    if not isinstance(top, dict):
+        print(f"Expected JSON object in {p}", file=sys.stderr)
+        return 1
+
+    # После onboard удобно вызывать: run --file rlink_bot_config.json
+    cfg: dict | None = None
+    keys_json_path = p
+    if "keys_path" in top and "ed25519_private_hex" not in top:
+        cfg = top
+        keys_json_path = Path(str(top["keys_path"])).expanduser().resolve()
+    else:
+        cfg_path = p.parent / "rlink_bot_config.json"
+        if cfg_path.exists():
+            try:
+                maybe = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if isinstance(maybe, dict) and maybe.get("keys_path"):
+                    cfg = maybe
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
+
+    if not keys_json_path.exists():
+        print(f"Missing keys file {keys_json_path}", file=sys.stderr)
+        return 1
+    try:
+        keys = BotKeys.from_json_dict(
+            json.loads(keys_json_path.read_text(encoding="utf-8"))
+        )
+    except KeyError as e:
+        print(
+            f"{keys_json_path} is not a bot keys file (need ed25519_*). "
+            f"Use `run --file rlink_bot_config.json` after onboard, or `--file bot_keys.json`. "
+            f"Missing: {e}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if cfg:
         try:
-            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             r = str(cfg.get("relay_url") or "").strip()
             if r:
                 relay = r
@@ -121,7 +160,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     hn = h.strip()
                     nick = hn if hn.startswith("@") else ("@" + hn)
                     nick = nick[:64]
-        except (OSError, json.JSONDecodeError, TypeError):
+        except (TypeError, AttributeError):
             pass
     sess = RelayBotSession(relay, keys)
     print("Connecting", relay)
@@ -193,8 +232,15 @@ def main() -> None:
         help="Print a random claimCode-style string (demo only)",
     ).set_defaults(func=cmd_code)
 
-    r = sub.add_parser("run", help="Connect and echo DMs (needs peers x25519 via presence)")
-    r.add_argument("--file", default="rlink_bot_keys.json")
+    r = sub.add_parser(
+        "run",
+        help="Connect and echo DMs; --file = bot_keys.json или rlink_bot_config.json после onboard",
+    )
+    r.add_argument(
+        "--file",
+        default="rlink_bot_keys.json",
+        help="Ключи бота (JSON) или rlink_bot_config.json из onboard",
+    )
     r.add_argument("--relay", default=DEFAULT_RELAY)
     r.add_argument("--nick", default=None)
     r.set_defaults(func=cmd_run)
