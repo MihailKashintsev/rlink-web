@@ -62,6 +62,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 ///   • `bot_claim` — после `register` **от ключа бота** с `claimId` (32 hex) или тем же
 ///     значением в поле `claimId`: короткий код `AAAA-BBBB-CCCC` (см. `claimCode` в ack);
 ///     relay создаёт запись, возвращает `apiToken` один раз (хеш хранится на диске).
+///   • `bot_owner_list` / `bot_owner_patch` — подписанный JSON владельца: список своих
+///     ботов и правка метаданных (имя, описание, avatar/banner URL); см. ack с `reqId`.
 ///   • `bot_dir_snapshot` после register; поиск дополняется зарегистрированными ботами.
 /// ═══════════════════════════════════════════════════════════════════
 
@@ -212,12 +214,18 @@ const _botHandleMax = 32;
 const _botHandleMin = 2;
 const _botRegisterStartWindow = Duration(minutes: 10);
 const _botRegisterStartMax = 60;
+const _botOwnerListRateWindow = Duration(minutes: 1);
+const _botOwnerListRateMax = 45;
+const _botOwnerPatchRateWindow = Duration(minutes: 1);
+const _botOwnerPatchRateMax = 45;
 
 final Map<String, Map<String, dynamic>> _botDirectory = {};
 final Map<String, Map<String, dynamic>> _botClaims = {};
 /// Канонический короткий код `AAAA-BBBB-CCCC` (верхний регистр) → 32 hex claimId.
 final Map<String, String> _botClaimCodeToClaimId = {};
 final Map<String, List<DateTime>> _botRegisterStartLimits = {};
+final Map<String, List<DateTime>> _botOwnerListRateLimits = {};
+final Map<String, List<DateTime>> _botOwnerPatchRateLimits = {};
 
 final Set<String> _reservedBotHandles = {
   'lib',
@@ -313,6 +321,24 @@ bool _checkBotRegisterStartRate(String ownerPub) {
   final times = _botRegisterStartLimits.putIfAbsent(ownerPub, () => []);
   times.removeWhere((t) => now.difference(t) > _botRegisterStartWindow);
   if (times.length >= _botRegisterStartMax) return false;
+  times.add(now);
+  return true;
+}
+
+bool _checkBotOwnerListRate(String ownerPub) {
+  final now = DateTime.now();
+  final times = _botOwnerListRateLimits.putIfAbsent(ownerPub, () => []);
+  times.removeWhere((t) => now.difference(t) > _botOwnerListRateWindow);
+  if (times.length >= _botOwnerListRateMax) return false;
+  times.add(now);
+  return true;
+}
+
+bool _checkBotOwnerPatchRate(String ownerPub) {
+  final now = DateTime.now();
+  final times = _botOwnerPatchRateLimits.putIfAbsent(ownerPub, () => []);
+  times.removeWhere((t) => now.difference(t) > _botOwnerPatchRateWindow);
+  if (times.length >= _botOwnerPatchRateMax) return false;
   times.add(now);
   return true;
 }
@@ -689,6 +715,294 @@ void _handleBotClaim(_User user, Map<String, dynamic> msg) {
     'botId': botPk,
     'displayName': claim['displayName'],
   });
+}
+
+void _handleBotOwnerList(_User user, Map<String, dynamic> msg) {
+  unawaited(_handleBotOwnerListAsync(user, msg));
+}
+
+Future<void> _handleBotOwnerListAsync(
+  _User user,
+  Map<String, dynamic> msg,
+) async {
+  void ackFail(String err, String reqId) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_owner_list_ack',
+        'ok': false,
+        'error': err,
+        'reqId': reqId,
+      }));
+    } catch (_) {}
+  }
+
+  void ackOk(List<Map<String, dynamic>> bots, String reqId) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_owner_list_ack',
+        'ok': true,
+        'bots': bots,
+        'reqId': reqId,
+      }));
+    } catch (_) {}
+  }
+
+  final payloadJson = msg['payload'] as String?;
+  final signatureHex = msg['signature'] as String?;
+  if (payloadJson == null ||
+      payloadJson.isEmpty ||
+      payloadJson.length > 4096 ||
+      signatureHex == null ||
+      signatureHex.length != 128) {
+    ackFail('bad_request', '');
+    return;
+  }
+
+  Map<String, dynamic> obj;
+  try {
+    obj = jsonDecode(payloadJson) as Map<String, dynamic>;
+  } catch (_) {
+    ackFail('bad_json', '');
+    return;
+  }
+
+  final reqId = (obj['reqId'] as String?)?.trim() ?? '';
+  if (reqId.length > 64) {
+    ackFail('bad_request', '');
+    return;
+  }
+
+  if (obj['v'] != 1) {
+    ackFail('bad_version', reqId);
+    return;
+  }
+
+  final owner = (obj['owner'] as String?)?.toLowerCase().trim() ?? '';
+  if (owner != user.publicKey) {
+    ackFail('owner_mismatch', reqId);
+    return;
+  }
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(owner)) {
+    ackFail('bad_request', reqId);
+    return;
+  }
+
+  final ts = (obj['ts'] as num?)?.toInt() ?? 0;
+  final nowMs = DateTime.now().millisecondsSinceEpoch;
+  if ((nowMs - ts).abs() > const Duration(minutes: 10).inMilliseconds) {
+    ackFail('stale_ts', reqId);
+    return;
+  }
+
+  if (!_checkBotOwnerListRate(owner)) {
+    ackFail('rate_limited', reqId);
+    return;
+  }
+
+  final sigOk = await _verifyEd25519SignatureOnUtf8(
+    payloadJson,
+    signatureHex,
+    owner,
+  );
+  if (!sigOk) {
+    ackFail('bad_signature', reqId);
+    return;
+  }
+
+  final bots = <Map<String, dynamic>>[];
+  for (final m in _botDirectory.values) {
+    if (m['revoked'] == true) continue;
+    final op = (m['ownerEd25519Pub'] as String?)?.toLowerCase() ?? '';
+    if (op != owner) continue;
+    final id = m['botId'] as String? ?? '';
+    final handle = m['handle'] as String? ?? '';
+    if (id.isEmpty || handle.isEmpty) continue;
+    bots.add({
+      'botId': id,
+      'handle': handle,
+      'displayName': m['displayName'] ?? handle,
+      'description': m['description'] ?? '',
+      'avatarUrl': m['avatarUrl'] ?? '',
+      'bannerUrl': m['bannerUrl'] ?? '',
+    });
+  }
+  bots.sort((a, b) => (a['handle'] as String)
+      .toLowerCase()
+      .compareTo((b['handle'] as String).toLowerCase()));
+  ackOk(bots, reqId);
+}
+
+void _handleBotOwnerPatch(_User user, Map<String, dynamic> msg) {
+  unawaited(_handleBotOwnerPatchAsync(user, msg));
+}
+
+Future<void> _handleBotOwnerPatchAsync(
+  _User user,
+  Map<String, dynamic> msg,
+) async {
+  void ackFail(String err, String reqId) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_owner_patch_ack',
+        'ok': false,
+        'error': err,
+        'reqId': reqId,
+      }));
+    } catch (_) {}
+  }
+
+  void ackOk(String reqId) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_owner_patch_ack',
+        'ok': true,
+        'reqId': reqId,
+      }));
+    } catch (_) {}
+  }
+
+  final payloadJson = msg['payload'] as String?;
+  final signatureHex = msg['signature'] as String?;
+  if (payloadJson == null ||
+      payloadJson.isEmpty ||
+      payloadJson.length > 8192 ||
+      signatureHex == null ||
+      signatureHex.length != 128) {
+    ackFail('bad_request', '');
+    return;
+  }
+
+  Map<String, dynamic> obj;
+  try {
+    obj = jsonDecode(payloadJson) as Map<String, dynamic>;
+  } catch (_) {
+    ackFail('bad_json', '');
+    return;
+  }
+
+  final reqId = (obj['reqId'] as String?)?.trim() ?? '';
+  if (reqId.length > 64) {
+    ackFail('bad_request', '');
+    return;
+  }
+
+  if (obj['v'] != 1) {
+    ackFail('bad_version', reqId);
+    return;
+  }
+
+  final owner = (obj['owner'] as String?)?.toLowerCase().trim() ?? '';
+  if (owner != user.publicKey) {
+    ackFail('owner_mismatch', reqId);
+    return;
+  }
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(owner)) {
+    ackFail('bad_request', reqId);
+    return;
+  }
+
+  final botId = (obj['botId'] as String?)?.toLowerCase().trim() ?? '';
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(botId)) {
+    ackFail('bad_bot_id', reqId);
+    return;
+  }
+
+  final ts = (obj['ts'] as num?)?.toInt() ?? 0;
+  final nowMs = DateTime.now().millisecondsSinceEpoch;
+  if ((nowMs - ts).abs() > const Duration(minutes: 10).inMilliseconds) {
+    ackFail('stale_ts', reqId);
+    return;
+  }
+
+  final hasChange = obj.containsKey('displayName') ||
+      obj.containsKey('description') ||
+      obj.containsKey('avatarUrl') ||
+      obj.containsKey('bannerUrl') ||
+      obj['clearAvatar'] == true ||
+      obj['clearBanner'] == true;
+  if (!hasChange) {
+    ackFail('empty_patch', reqId);
+    return;
+  }
+
+  if (!_checkBotOwnerPatchRate(owner)) {
+    ackFail('rate_limited', reqId);
+    return;
+  }
+
+  final sigOk = await _verifyEd25519SignatureOnUtf8(
+    payloadJson,
+    signatureHex,
+    owner,
+  );
+  if (!sigOk) {
+    ackFail('bad_signature', reqId);
+    return;
+  }
+
+  final row = _botDirectory[botId];
+  if (row == null || row['revoked'] == true) {
+    ackFail('not_found', reqId);
+    return;
+  }
+  if ((row['ownerEd25519Pub'] as String?)?.toLowerCase() != owner) {
+    ackFail('not_owner', reqId);
+    return;
+  }
+
+  var changed = false;
+
+  if (obj.containsKey('displayName')) {
+    final n = (obj['displayName'] as String?)?.trim() ?? '';
+    if (n.isEmpty || n.length > 64) {
+      ackFail('bad_display_name', reqId);
+      return;
+    }
+    row['displayName'] = n;
+    changed = true;
+  }
+  if (obj.containsKey('description')) {
+    final d = (obj['description'] as String?)?.trim() ?? '';
+    if (d.length > 512) {
+      ackFail('description_too_long', reqId);
+      return;
+    }
+    row['description'] = d;
+    changed = true;
+  }
+
+  if (obj['clearAvatar'] == true) {
+    row['avatarUrl'] = '';
+    changed = true;
+  } else if (obj.containsKey('avatarUrl')) {
+    final u = (obj['avatarUrl'] as String?)?.trim() ?? '';
+    if (!_isAllowedBotMediaUrl(u)) {
+      ackFail('bad_url', reqId);
+      return;
+    }
+    row['avatarUrl'] = u;
+    changed = true;
+  }
+
+  if (obj['clearBanner'] == true) {
+    row['bannerUrl'] = '';
+    changed = true;
+  } else if (obj.containsKey('bannerUrl')) {
+    final bu = (obj['bannerUrl'] as String?)?.trim() ?? '';
+    if (!_isAllowedBotMediaUrl(bu)) {
+      ackFail('bad_url', reqId);
+      return;
+    }
+    row['bannerUrl'] = bu;
+    changed = true;
+  }
+
+  if (changed) {
+    _persistBotDirectory();
+    _broadcastBotDirSnapshotToAll();
+    stdout.writeln('[RLINK][Relay] bot_owner_patch bot=$botId owner=$owner');
+  }
+  ackOk(reqId);
 }
 
 int _dirUpdatedAt(Map<String, dynamic> m) =>
@@ -1119,7 +1433,9 @@ void _handleMessage(_User user, dynamic raw) {
   // Blobs и каталог каналов / боты не считаем в общий flood лимит.
   if (type != 'blob' &&
       type != 'channel_dir_put' &&
-      type != 'bot_register_start') {
+      type != 'bot_register_start' &&
+      type != 'bot_owner_list' &&
+      type != 'bot_owner_patch') {
     if (!_checkRate(user.publicKey)) {
       user.ws.sink.add(jsonEncode({'type': 'error', 'msg': 'rate_limited'}));
       return;
@@ -1153,6 +1469,12 @@ void _handleMessage(_User user, dynamic raw) {
       break;
     case 'bot_claim':
       _handleBotClaim(user, msg);
+      break;
+    case 'bot_owner_list':
+      _handleBotOwnerList(user, msg);
+      break;
+    case 'bot_owner_patch':
+      _handleBotOwnerPatch(user, msg);
       break;
     case 'relay_ack':
       _handleRelayAck(user, msg);

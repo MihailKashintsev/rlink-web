@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection' show LinkedHashSet;
 import 'dart:convert' show jsonDecode, jsonEncode;
 import 'dart:io';
 import 'dart:math' as math;
@@ -258,6 +259,10 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _pendingMessageCountPinSync = false;
   bool _aiThinking = false;
   StreamSubscription<List<ConnectivityResult>>? _vpnConnSub;
+
+  /// Множественный выбор пузырей: переслать / удалить.
+  bool _bulkSelectMode = false;
+  final LinkedHashSet<String> _selectedMsgIds = LinkedHashSet<String>();
 
   /// Только для GigaChat: на iOS/Android [ConnectivityResult.vpn] из connectivity_plus.
   bool _vpnProbablyActive = false;
@@ -1696,18 +1701,27 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Future<void> _runPendingForward() async {
-    final d = widget.forwardDraft;
-    if (d == null) return;
-    final m = d.message;
+  /// Пересылает одно сообщение в личный чат [targetPeerId] (как после выбора в листе).
+  /// Возвращает false при ошибке (и опционально показывает SnackBar).
+  Future<bool> _forwardMessageToPeer(
+    ChatMessage m,
+    String targetPeerId,
+    String forwardAuthorId,
+    String forwardAuthorNick,
+    String? forwardChannelId, {
+    bool reloadMessagesForTarget = true,
+    bool playSentSound = true,
+    bool showErrorSnack = true,
+  }) async {
     final myId = CryptoService.instance.publicKeyHex;
-    final fid = d.forwardAuthorId;
-    final fnk = d.originalAuthorNick;
-    final fch = d.forwardChannelId;
-    final target = _resolvedPeerId;
+    final fid = forwardAuthorId;
+    final fnk = forwardAuthorNick;
+    final fch = forwardChannelId;
+    var target = ChatStorageService.normalizeDmPeerId(targetPeerId);
     if (!_looksLikePublicKey(target)) {
       final ok = await _waitForPeerPublicKey();
-      if (!ok || !mounted) return;
+      if (!ok || !mounted) return false;
+      target = ChatStorageService.normalizeDmPeerId(_resolvedPeerId);
     }
     var x25519Key = BleService.instance.getPeerX25519Key(target);
     x25519Key ??= RelayService.instance.getPeerX25519Key(target);
@@ -1757,9 +1771,11 @@ class _ChatScreenState extends State<ChatScreen> {
         msgId,
         MessageStatus.sent,
       );
-      unawaited(
-        SoundEffectsService.instance.playAction(ActionSound.messageSent),
-      );
+      if (playSentSound) {
+        unawaited(
+          SoundEffectsService.instance.playAction(ActionSound.messageSent),
+        );
+      }
     }
 
     try {
@@ -1906,23 +1922,41 @@ class _ChatScreenState extends State<ChatScreen> {
       } else {
         await sendText(m.text.isNotEmpty ? m.text : ' ', _uuid.v4());
       }
-      if (mounted) {
+      if (reloadMessagesForTarget && mounted) {
         await ChatStorageService.instance.loadMessages(target);
-        _scrollToBottom();
+        if (target ==
+            ChatStorageService.normalizeDmPeerId(_resolvedPeerId)) {
+          _scrollToBottom();
+        }
       }
+      return true;
     } catch (e) {
-      if (mounted) {
+      if (mounted && showErrorSnack) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Пересылка: $e'), backgroundColor: Colors.red),
         );
       }
+      return false;
     }
+  }
+
+  Future<void> _runPendingForward() async {
+    final d = widget.forwardDraft;
+    if (d == null) return;
+    await _forwardMessageToPeer(
+      d.message,
+      _resolvedPeerId,
+      d.forwardAuthorId,
+      d.originalAuthorNick,
+      d.forwardChannelId,
+    );
   }
 
   static const List<(String, String)> _libQuickCommands = [
     ('Справка', '/start'),
     ('Помощь', '/help'),
     ('Все команды', '/commands'),
+    ('Мои боты', '/mybots'),
     ('Новый бот', '/newbot'),
     ('Памятка', '/guide'),
     ('Отмена', '/cancel'),
@@ -3375,6 +3409,185 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _exitBulkSelect() {
+    if (!_bulkSelectMode && _selectedMsgIds.isEmpty) return;
+    setState(() {
+      _bulkSelectMode = false;
+      _selectedMsgIds.clear();
+    });
+  }
+
+  void _enterBulkSelect(ChatMessage msg) {
+    setState(() {
+      _bulkSelectMode = true;
+      _selectedMsgIds
+        ..clear()
+        ..add(msg.id);
+    });
+  }
+
+  void _toggleBulkMessageSelection(ChatMessage msg) {
+    setState(() {
+      if (_selectedMsgIds.contains(msg.id)) {
+        _selectedMsgIds.remove(msg.id);
+        if (_selectedMsgIds.isEmpty) _bulkSelectMode = false;
+      } else {
+        _selectedMsgIds.add(msg.id);
+      }
+    });
+  }
+
+  /// В режиме выбора: долгое нажатие — выделить диапазон до этого сообщения.
+  void _bulkSelectRangeThrough(List<ChatMessage> messages, int endIndex) {
+    final selIdx = <int>[];
+    for (var j = 0; j < messages.length; j++) {
+      if (_selectedMsgIds.contains(messages[j].id)) selIdx.add(j);
+    }
+    selIdx.add(endIndex);
+    final lo = selIdx.reduce(math.min);
+    final hi = selIdx.reduce(math.max);
+    setState(() {
+      _bulkSelectMode = true;
+      for (var j = lo; j <= hi; j++) {
+        _selectedMsgIds.add(messages[j].id);
+      }
+    });
+  }
+
+  List<ChatMessage> _selectedMessagesInChatOrder(List<ChatMessage> all) {
+    return [for (final m in all) if (_selectedMsgIds.contains(m.id)) m];
+  }
+
+  Future<void> _bulkForwardFromList() async {
+    final all =
+        ChatStorageService.instance.messagesNotifier(_resolvedPeerId).value;
+    final ordered = _selectedMessagesInChatOrder(all);
+    if (ordered.isEmpty) return;
+    final picked = await showForwardDmTargetSheet(
+      context,
+      excludePeerId: _resolvedPeerId,
+    );
+    if (picked == null || !mounted) return;
+    final myId = CryptoService.instance.publicKeyHex;
+    var okCount = 0;
+    var failCount = 0;
+    for (var i = 0; i < ordered.length; i++) {
+      final m = ordered[i];
+      final last = i == ordered.length - 1;
+      final fid = m.isOutgoing ? myId : _resolvedPeerId;
+      final fnk = m.isOutgoing
+          ? (ProfileService.instance.profile?.nickname ?? 'Вы')
+          : widget.peerNickname;
+      final ok = await _forwardMessageToPeer(
+        m,
+        picked.peerId,
+        fid,
+        fnk,
+        m.forwardFromChannelId,
+        reloadMessagesForTarget: false,
+        playSentSound: last,
+        showErrorSnack: false,
+      );
+      if (ok) {
+        okCount++;
+      } else {
+        failCount++;
+      }
+    }
+    if (!mounted) return;
+    if (failCount == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Переслано сообщений: $okCount')),
+      );
+      _exitBulkSelect();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Переслано: $okCount, ошибок: $failCount',
+          ),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _bulkDeleteFromList() async {
+    final all =
+        ChatStorageService.instance.messagesNotifier(_resolvedPeerId).value;
+    final outgoing = _selectedMessagesInChatOrder(all)
+        .where((m) => m.isOutgoing)
+        .toList();
+    if (outgoing.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Удалить можно только свои сообщения'),
+          ),
+        );
+      }
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Удалить сообщения?'),
+        content: Text(
+          outgoing.length == 1
+              ? 'Сообщение исчезнет у собеседника.'
+              : 'Удалить ${outgoing.length} своих сообщений? Они исчезнут у собеседника.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    final myId = CryptoService.instance.publicKeyHex;
+    for (final m in outgoing) {
+      if (_replyToMessageId == m.id) {
+        _replyToMessageId = null;
+        _replyPreviewText = null;
+      }
+      if (_editingMessageId == m.id) {
+        _editingMessageId = null;
+        _editingPreviewText = null;
+        _controller.clear();
+      }
+      try {
+        await ChatStorageService.instance.deleteMessage(m.id);
+        if (!_savedMessagesLocalOnly) {
+          await GossipRouter.instance.sendDeleteMessage(
+            messageId: m.id,
+            senderId: myId,
+            recipientId: _resolvedPeerId,
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Ошибка удаления: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+    if (mounted) {
+      setState(() {});
+      _exitBulkSelect();
+    }
+  }
+
   Future<void> _onLongPressMessage(ChatMessage msg) async {
     final stickerSourcePath = msg.imagePath == null
         ? null
@@ -3385,6 +3598,14 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (ctx) => SafeArea(
         child: Wrap(
           children: [
+            ListTile(
+              leading: const Icon(Icons.checklist_rtl),
+              title: const Text('Выбрать'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _enterBulkSelect(msg);
+              },
+            ),
             ListTile(
               leading: const Icon(Icons.emoji_emotions),
               title: const Text('Реакция'),
@@ -3503,6 +3724,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onMessagePointerDownQuickReact(PointerDownEvent e, ChatMessage msg) {
+    if (_bulkSelectMode) return;
     if (e.kind != PointerDeviceKind.mouse) return;
     if ((e.buttons & kPrimaryButton) == 0) return;
     if (!kIsWeb &&
@@ -3622,8 +3844,42 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
+    return PopScope(
+      canPop: !_bulkSelectMode,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _bulkSelectMode && mounted) _exitBulkSelect();
+      },
+      child: Scaffold(
+        appBar: _bulkSelectMode
+            ? AppBar(
+                leading: IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: 'Отмена',
+                  onPressed: _exitBulkSelect,
+                ),
+                title: Text(
+                  _selectedMsgIds.isEmpty
+                      ? 'Выбор сообщений'
+                      : '${_selectedMsgIds.length} выбрано',
+                ),
+                actions: [
+                  IconButton(
+                    tooltip: 'Переслать',
+                    icon: const Icon(Icons.forward),
+                    onPressed: _selectedMsgIds.isEmpty
+                        ? null
+                        : () => unawaited(_bulkForwardFromList()),
+                  ),
+                  IconButton(
+                    tooltip: 'Удалить свои',
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: _selectedMsgIds.isEmpty
+                        ? null
+                        : () => unawaited(_bulkDeleteFromList()),
+                  ),
+                ],
+              )
+            : AppBar(
         titleSpacing: 0,
         title: Row(children: [
           AvatarWidget(
@@ -4097,42 +4353,99 @@ class _ChatScreenState extends State<ChatScreen> {
                                   return Column(children: [
                                     if (showDate)
                                       _DateDivider(date: msg.timestamp),
-                                    SwipeToReply(
-                                      isOutgoing: msg.isOutgoing,
-                                      onReply: () => _startReply(msg),
-                                      child: Listener(
-                                        behavior: HitTestBehavior.translucent,
-                                        onPointerDown: (e) =>
-                                            _onMessagePointerDownQuickReact(
-                                                e, msg),
-                                        child: GestureDetector(
-                                          onLongPress: () =>
-                                              _onLongPressMessage(msg),
-                                          onDoubleTap: () =>
-                                              unawaited(_quickReaction(msg)),
-                                          child: _MessageBubble(
-                                            msg: msg,
-                                            replyPreviewText:
-                                                msg.replyToMessageId == null
+                                    Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        if (_bulkSelectMode)
+                                          Material(
+                                            color: Colors.transparent,
+                                            child: InkWell(
+                                              onTap: () =>
+                                                  _toggleBulkMessageSelection(
+                                                      msg),
+                                              child: Padding(
+                                                padding: const EdgeInsets.only(
+                                                    left: 6, right: 2, top: 8),
+                                                child: Icon(
+                                                  _selectedMsgIds
+                                                          .contains(msg.id)
+                                                      ? Icons.check_circle
+                                                      : Icons
+                                                          .radio_button_unchecked,
+                                                  size: 22,
+                                                  color: _selectedMsgIds
+                                                          .contains(msg.id)
+                                                      ? Theme.of(context)
+                                                          .colorScheme
+                                                          .primary
+                                                      : Theme.of(context)
+                                                          .colorScheme
+                                                          .outline,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        Expanded(
+                                          child: SwipeToReply(
+                                            enabled: !_bulkSelectMode,
+                                            isOutgoing: msg.isOutgoing,
+                                            onReply: () => _startReply(msg),
+                                            child: Listener(
+                                              behavior:
+                                                  HitTestBehavior.translucent,
+                                              onPointerDown: _bulkSelectMode
+                                                  ? null
+                                                  : (e) =>
+                                                      _onMessagePointerDownQuickReact(
+                                                          e, msg),
+                                              child: GestureDetector(
+                                                behavior: HitTestBehavior
+                                                    .deferToChild,
+                                                onTap: _bulkSelectMode
+                                                    ? () =>
+                                                        _toggleBulkMessageSelection(
+                                                            msg)
+                                                    : null,
+                                                onLongPress: _bulkSelectMode
+                                                    ? () =>
+                                                        _bulkSelectRangeThrough(
+                                                            messages, i)
+                                                    : () =>
+                                                        _onLongPressMessage(msg),
+                                                onDoubleTap: _bulkSelectMode
                                                     ? null
-                                                    : messageTextById[
-                                                        msg.replyToMessageId],
-                                            onDownloadImage:
-                                                _saveImageToGallery,
-                                            onCollabPersist: _patchSharedCollab,
-                                            onForwardContextTap:
-                                                _onForwardContextTap,
-                                            onRequestMissingMedia:
-                                                _onRequestMissingDmMedia,
-                                            playbackThread: messages,
-                                            playbackIndex: i,
-                                            highlightSlashCommands: _isAiBot,
-                                            onSlashCommandTap: _isAiBot
-                                                ? _onSlashCommandFromBubble
-                                                : null,
+                                                    : () => unawaited(
+                                                        _quickReaction(msg)),
+                                                child: _MessageBubble(
+                                                  msg: msg,
+                                                  replyPreviewText:
+                                                      msg.replyToMessageId ==
+                                                              null
+                                                          ? null
+                                                          : messageTextById[
+                                                              msg.replyToMessageId],
+                                                  onDownloadImage:
+                                                      _saveImageToGallery,
+                                                  onCollabPersist:
+                                                      _patchSharedCollab,
+                                                  onForwardContextTap:
+                                                      _onForwardContextTap,
+                                                  onRequestMissingMedia:
+                                                      _onRequestMissingDmMedia,
+                                                  playbackThread: messages,
+                                                  playbackIndex: i,
+                                                  highlightSlashCommands:
+                                                      _isAiBot,
+                                                  onSlashCommandTap: _isAiBot
+                                                      ? _onSlashCommandFromBubble
+                                                      : null,
+                                                ),
+                                              ),
+                                            ),
                                           ),
                                         ),
-                                      ),
+                                      ],
                                     ),
                                   ]);
                                 },
@@ -4168,6 +4481,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
+            if (!_bulkSelectMode) ...[
             if (_editingMessageId != null || _replyToMessageId != null)
               Padding(
                 padding:
@@ -4287,6 +4601,7 @@ class _ChatScreenState extends State<ChatScreen> {
               onHoldRecordingLockChanged: _onHoldRecordingLockChanged,
               onHoldVideoLockedPauseToggle: _toggleDmHoldVideoPause,
             ),
+            ],
           ]),
           if (_dmHoldVideoCam != null)
             ValueListenableBuilder<bool>(
@@ -4349,6 +4664,7 @@ class _ChatScreenState extends State<ChatScreen> {
               },
             ),
         ],
+      ),
       ),
     );
   }

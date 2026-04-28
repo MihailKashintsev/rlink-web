@@ -18,8 +18,13 @@ class LibBotService {
       'Lib — регистратор ботов (аналог BotFather; переписки с ботами — E2E).\n\n'
       'Полная инструкция по приложению и ботам: Настройки → Документация (RU / EN).\n\n'
       'Команды (см. также /commands):\n'
-      '• /newbot <ник> — затем одним сообщением публичный ключ бота Ed25519 (64 hex). '
-      'Ключ: на машине бота `python -m rlink_bot keys init` и `keys show-pub`.\n'
+      '• /mybots — ваши боты на relay (ник, имя, описание)\n'
+      '• /setname @ник новое_имя — отображаемое имя (1–64 символа)\n'
+      '• /setdesc @ник текст — описание (до 512; пустой текст — очистить)\n'
+      '• /setavatar @ник <url> — URL аватара (http/https); без URL — сбросить\n'
+      '• /setbanner @ник <url> — баннер; без URL — сбросить\n'
+      '• /newbot <ник> — затем **в чат Lib** одним сообщением публичный ключ бота Ed25519 (64 hex). '
+      'Ключ копируют с ПК: `python -m rlink_bot keys show-pub` (в терминал ключ вводить не нужно).\n'
       '• Или одной строкой: /newbot <ник> <64hex>\n'
       '• /cancel — отменить ожидание ключа\n'
       '• /guide — краткая памятка\n\n'
@@ -31,7 +36,12 @@ class LibBotService {
 
   static const _commandsList =
       'Список команд Lib:\n\n'
-      '/start, /help — справка по регистрации ботов\n'
+      '/start, /help — справка\n'
+      '/mybots — список ваших ботов на relay\n'
+      '/setname @ник имя — имя в каталоге\n'
+      '/setdesc @ник текст — описание (пусто = очистить)\n'
+      '/setavatar @ник [url] — аватар по URL или сброс без url\n'
+      '/setbanner @ник [url] — баннер или сброс\n'
       '/newbot <ник> — новый бот (см. кнопки под полем ввода)\n'
       '/cancel — отменить ожидание публичного ключа\n'
       '/guide — короткий чеклист создания бота\n'
@@ -56,12 +66,21 @@ class LibBotService {
     _awaitingDisplayName = '';
   }
 
+  /// 64 hex подряд из вставки (игнорирует префиксы вроде «Ed25519…», пробелы, переводы строк).
+  String? _extract64HexBotPub(String raw) {
+    final hexRun = raw.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+    if (hexRun.length != 64) return null;
+    if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hexRun)) return null;
+    return hexRun.toLowerCase();
+  }
+
   Future<List<String>> handleUserTurn(String text) async {
     final t = text.trim();
     final lower = t.toLowerCase();
 
     if (_awaitingBotPubForHandle != null) {
-      if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(t)) {
+      final extracted = _extract64HexBotPub(t);
+      if (extracted != null) {
         final handle = _awaitingBotPubForHandle!;
         final disp = _awaitingDisplayName;
         _awaitingBotPubForHandle = null;
@@ -69,8 +88,30 @@ class LibBotService {
         return _registerOnRelay(
           handle: handle,
           displayName: disp,
-          botPubHex: t.toLowerCase(),
+          botPubHex: extracted,
         );
+      }
+      final oneLine = t.trim().replaceAll(RegExp(r'\s'), '');
+      if (RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(oneLine)) {
+        _awaitingBotPubForHandle = null;
+        _awaitingDisplayName = '';
+        return const [
+          'Похоже на **claimId** (32 hex) из ответа Lib, а не на публичный ключ бота.',
+          'claimId и claimCode используются **только на ПК**: `python -m rlink_bot onboard …`',
+          'В чат Lib нужно отправить **64 hex** публичного ключа (`keys show-pub`).',
+          'Начните снова: /newbot ваш_ник',
+        ];
+      }
+      final claimFlat = oneLine.toUpperCase().replaceAll(RegExp(r'[-_]'), '');
+      if (claimFlat.length == 12 &&
+          RegExp(r'^[23456789ABCDEFGHJKMNPRSTWXYZ]{12}$').hasMatch(claimFlat)) {
+        _awaitingBotPubForHandle = null;
+        _awaitingDisplayName = '';
+        return const [
+          'Похоже на **claimCode** из ответа Lib, а не на публичный ключ бота.',
+          'Короткий код нужен **на ПК** в `onboard`, в чат Lib его вставлять не нужно.',
+          'Сюда — **64 hex** публичного ключа бота. Снова: /newbot ваш_ник',
+        ];
       }
       _awaitingBotPubForHandle = null;
       _awaitingDisplayName = '';
@@ -102,6 +143,87 @@ class LibBotService {
       return List<String>.from(_guideLines);
     }
 
+    if (lower == '/mybots' || lower.startsWith('/mybots ')) {
+      return _myBotsLines();
+    }
+
+    if (lower.startsWith('/setname')) {
+      final parts = t.split(RegExp(r'\s+'));
+      if (parts.length < 3) {
+        return const [
+          'Использование: /setname @ник новое_имя',
+          'Пример: /setname @mybot Книжный маг',
+        ];
+      }
+      final h = _parseHandleArg(parts[1]);
+      if (h == null) {
+        return const ['Некорректный ник. Допустимы a–z, 0–9, _, длина от 2.'];
+      }
+      final name = parts.sublist(2).join(' ').trim();
+      if (name.isEmpty || name.length > 64) {
+        return const ['Имя: от 1 до 64 символов.'];
+      }
+      return _patchOwnedBot(handleNorm: h, changes: {'displayName': name});
+    }
+
+    if (lower.startsWith('/setdesc')) {
+      final parts = t.split(RegExp(r'\s+'));
+      if (parts.length < 2) {
+        return const [
+          'Использование: /setdesc @ник [текст описания]',
+          'Без текста после ника — очистить описание.',
+        ];
+      }
+      final h = _parseHandleArg(parts[1]);
+      if (h == null) {
+        return const ['Некорректный ник. Допустимы a–z, 0–9, _, длина от 2.'];
+      }
+      final desc =
+          parts.length > 2 ? parts.sublist(2).join(' ').trim() : '';
+      if (desc.length > 512) {
+        return const ['Описание не длиннее 512 символов.'];
+      }
+      return _patchOwnedBot(handleNorm: h, changes: {'description': desc});
+    }
+
+    if (lower.startsWith('/setavatar')) {
+      final parts = t.split(RegExp(r'\s+'));
+      if (parts.length < 2) {
+        return const [
+          'Использование: /setavatar @ник <url>',
+          'Только @ник — сбросить аватар.',
+        ];
+      }
+      final h = _parseHandleArg(parts[1]);
+      if (h == null) {
+        return const ['Некорректный ник. Допустимы a–z, 0–9, _, длина от 2.'];
+      }
+      if (parts.length == 2) {
+        return _patchOwnedBot(handleNorm: h, changes: {'clearAvatar': true});
+      }
+      final url = parts.sublist(2).join(' ').trim();
+      return _patchOwnedBot(handleNorm: h, changes: {'avatarUrl': url});
+    }
+
+    if (lower.startsWith('/setbanner')) {
+      final parts = t.split(RegExp(r'\s+'));
+      if (parts.length < 2) {
+        return const [
+          'Использование: /setbanner @ник <url>',
+          'Только @ник — сбросить баннер.',
+        ];
+      }
+      final h = _parseHandleArg(parts[1]);
+      if (h == null) {
+        return const ['Некорректный ник. Допустимы a–z, 0–9, _, длина от 2.'];
+      }
+      if (parts.length == 2) {
+        return _patchOwnedBot(handleNorm: h, changes: {'clearBanner': true});
+      }
+      final url = parts.sublist(2).join(' ').trim();
+      return _patchOwnedBot(handleNorm: h, changes: {'bannerUrl': url});
+    }
+
     if (lower.startsWith('/newbot')) {
       final parts = t.split(RegExp(r'\s+'));
       if (parts.length < 2) {
@@ -117,15 +239,15 @@ class LibBotService {
         return const ['Ник слишком короткий. Допустимы a-z, 0-9, _.'];
       }
       if (parts.length >= 3) {
-        final last = parts.last;
-        if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(last)) {
+        final pub = _extract64HexBotPub(parts.last);
+        if (pub != null) {
           final dispParts = parts.sublist(2, parts.length - 1).join(' ').trim();
           final displayName =
               dispParts.isNotEmpty ? dispParts : handle;
           return _registerOnRelay(
             handle: handle,
             displayName: displayName,
-            botPubHex: last.toLowerCase(),
+            botPubHex: pub,
           );
         }
       }
@@ -138,13 +260,145 @@ class LibBotService {
         'Отображаемое имя: $displayName',
         '',
         'Следующим сообщением пришлите **публичный** ключ Ed25519 бота (64 hex).',
-        'На ПК с ботом: `python -m rlink_bot keys init` → `python -m rlink_bot keys show-pub`',
+        'Вставьте ключ **сюда, в этот чат с Lib** (не только в терминал).',
+        'На ПК: `python -m rlink_bot keys show-pub` — скопируйте одну строку из вывода.',
       ];
     }
 
     return const [
       'Неизвестная команда. Введите /help',
     ];
+  }
+
+  /// Ник после @ или без; только a-z, 0-9, _; длина 2–32.
+  String? _parseHandleArg(String raw) {
+    var h = raw.trim().toLowerCase();
+    if (h.startsWith('@')) h = h.substring(1);
+    h = h.replaceAll(RegExp(r'[^a-z0-9_]'), '');
+    if (h.length < 2 || h.length > 32) return null;
+    return h;
+  }
+
+  String _ownerListErr(Map<String, dynamic> ack) {
+    final e = ack['error']?.toString() ?? 'unknown';
+    switch (e) {
+      case 'offline':
+        return 'Relay не подключён.';
+      case 'timeout':
+        return 'Таймаут ответа relay. Проверьте соединение и попробуйте снова.';
+      case 'rate_limited':
+        return 'Слишком частые запросы к relay. Подождите немного.';
+      case 'bad_signature':
+      case 'stale_ts':
+        return 'Запрос отклонён relay ($e). Попробуйте ещё раз.';
+      default:
+        return 'Ошибка relay: $e';
+    }
+  }
+
+  String _ownerPatchErr(Map<String, dynamic> ack) {
+    final e = ack['error']?.toString() ?? 'unknown';
+    switch (e) {
+      case 'offline':
+        return 'Relay не подключён.';
+      case 'timeout':
+        return 'Таймаут ответа relay.';
+      case 'not_found':
+        return 'Бот не найден в каталоге relay.';
+      case 'not_owner':
+        return 'Этот бот привязан к другому владельцу.';
+      case 'bad_display_name':
+        return 'Некорректное имя (1–64 символа, не пустое).';
+      case 'description_too_long':
+        return 'Описание не длиннее 512 символов.';
+      case 'bad_url':
+        return 'Некорректный URL (нужны http или https, длина до 2048).';
+      case 'rate_limited':
+        return 'Слишком частые запросы к relay. Подождите немного.';
+      case 'empty_patch':
+        return 'Пустое изменение.';
+      default:
+        return 'Ошибка relay: $e';
+    }
+  }
+
+  Future<(List<Map<String, dynamic>>, String?)> _loadMyBots() async {
+    final ack = await RelayService.instance.sendBotOwnerList();
+    if (ack['ok'] != true) {
+      return (<Map<String, dynamic>>[], _ownerListErr(ack));
+    }
+    final raw = ack['bots'];
+    if (raw is! List) {
+      return (<Map<String, dynamic>>[], 'Некорректный ответ relay (bots).');
+    }
+    final out = <Map<String, dynamic>>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      out.add(Map<String, dynamic>.from(item));
+    }
+    return (out, null);
+  }
+
+  Future<List<String>> _myBotsLines() async {
+    if (!RelayService.instance.isConnected) {
+      return const ['Relay не подключён.'];
+    }
+    final (bots, err) = await _loadMyBots();
+    if (err != null) return [err];
+    if (bots.isEmpty) {
+      return const [
+        'У вас пока нет ботов на этом relay.',
+        'Создать: /newbot ваш_ник',
+      ];
+    }
+    final lines = <String>['Ваши боты на relay (${bots.length}):', ''];
+    for (final b in bots) {
+      final h = b['handle'] as String? ?? '';
+      final dn = b['displayName'] as String? ?? h;
+      final d = (b['description'] as String?)?.trim() ?? '';
+      lines.add('@$h — $dn');
+      if (d.isNotEmpty) {
+        final short = d.length > 120 ? '${d.substring(0, 117)}…' : d;
+        lines.add('  $short');
+      }
+      lines.add('');
+    }
+    lines.add('Правки: /setname, /setdesc, /setavatar, /setbanner (см. /help).');
+    return lines;
+  }
+
+  Future<List<String>> _patchOwnedBot({
+    required String handleNorm,
+    required Map<String, dynamic> changes,
+  }) async {
+    if (!RelayService.instance.isConnected) {
+      return const ['Relay не подключён.'];
+    }
+    final (bots, err) = await _loadMyBots();
+    if (err != null) return [err];
+    Map<String, dynamic>? row;
+    for (final b in bots) {
+      if ((b['handle'] as String?)?.toLowerCase() == handleNorm) {
+        row = b;
+        break;
+      }
+    }
+    if (row == null) {
+      return [
+        'Бот @$handleNorm не найден среди ваших на relay.',
+        'Список: /mybots',
+      ];
+    }
+    final botId = (row['botId'] as String?) ?? '';
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(botId)) {
+      return const ['Внутренняя ошибка: некорректный botId.'];
+    }
+    final ack =
+        await RelayService.instance.sendBotOwnerPatch(botId: botId, changes: changes);
+    if (ack['ok'] == true) {
+      return ['Готово: @$handleNorm обновлён на relay.'];
+    }
+    return [_ownerPatchErr(ack)];
   }
 
   Future<List<String>> _registerOnRelay({
@@ -188,10 +442,16 @@ class LibBotService {
       };
       final payloadJson = jsonEncode(payloadObj);
       final sig = await CryptoService.instance.signUtf8Message(payloadJson);
-      await RelayService.instance.sendBotRegisterStart(
+      final sent = await RelayService.instance.sendBotRegisterStart(
         payloadJson: payloadJson,
         signatureHex: sig,
       );
+      if (!sent) {
+        return const [
+          'Запрос на relay не отправлен (нет WebSocket или ошибка сети).',
+          'Проверьте, что relay подключён (интернет / настройки), и повторите /newbot.',
+        ];
+      }
       final ack = await completer.future.timeout(
         const Duration(seconds: 45),
         onTimeout: () => <String, dynamic>{
@@ -203,6 +463,15 @@ class LibBotService {
         final err = ack['error']?.toString() ?? 'unknown';
         return [
           'Relay отклонил регистрацию: $err',
+          if (err == 'timeout') ...[
+            '',
+            'Relay: ${RelayService.instance.serverUrl ?? RelayService.defaultServerUrl}',
+            '',
+            'За 45 с не пришёл ответ (bot_register_ack). Чаще всего на этом URL **ещё не задеплоена** текущая версия relay из репозитория (ветка с `bot_register_start` в server.dart) — сервер тогда **молча игнорирует** запрос.',
+            'Что сделать: обновить/задеплоить `relay_server` на хост, который обслуживает этот WebSocket, либо временно поднять свой relay для теста.',
+            '',
+            'У вас в скриншоте шаги верные: ключ в чат Lib после /newbot — так и должно быть.',
+          ],
           if (err == 'handle_taken') 'Выберите другой @ник.',
           if (err == 'bad_signature') 'Внутренняя ошибка подписи — попробуйте ещё раз.',
           if (err == 'claim_code_alloc')

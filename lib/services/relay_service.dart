@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -137,6 +138,8 @@ class RelayService with WidgetsBindingObserver {
 
   /// Ответ relay на `bot_register_start` (Lib / регистрация бота).
   void Function(Map<String, dynamic> msg)? onBotRegisterAck;
+
+  final Map<String, Completer<Map<String, dynamic>>> _botOwnerAckCompleters = {};
 
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
@@ -857,7 +860,28 @@ class RelayService with WidgetsBindingObserver {
           break;
 
         case 'bot_register_ack':
-          onBotRegisterAck?.call(msg);
+          // Не вызывать колбэки синхронно из WebSocket listen: иначе await в Lib
+          // (регистрация бота / owner RPC) продолжается внутри RX-стека и при
+          // повторной отправке по тому же каналу возможен дедлок/«зависание» UI.
+          final botRegCb = onBotRegisterAck;
+          if (botRegCb != null) {
+            final copy = Map<String, dynamic>.from(msg);
+            scheduleMicrotask(() => botRegCb(copy));
+          }
+          break;
+
+        case 'bot_owner_list_ack':
+        case 'bot_owner_patch_ack':
+          final rid = msg['reqId']?.toString() ?? '';
+          if (rid.isNotEmpty) {
+            final c = _botOwnerAckCompleters.remove(rid);
+            if (c != null && !c.isCompleted) {
+              final copy = Map<String, dynamic>.from(msg);
+              scheduleMicrotask(() {
+                if (!c.isCompleted) c.complete(copy);
+              });
+            }
+          }
           break;
 
         case 'bot_dir_snapshot':
@@ -914,21 +938,161 @@ class RelayService with WidgetsBindingObserver {
   }
 
   /// Регистрация нового бота на relay (подписанный JSON владельца + публичный ключ будущего бота).
-  Future<void> sendBotRegisterStart({
+  /// [false] — сокет не готов, неверная длина полей или ошибка отправки (см. лог).
+  Future<bool> sendBotRegisterStart({
     required String payloadJson,
     required String signatureHex,
   }) async {
-    if (!isConnected) return;
-    if (payloadJson.isEmpty || payloadJson.length > 8192) return;
-    if (signatureHex.length != 128) return;
+    if (!isConnected) return false;
+    if (payloadJson.isEmpty || payloadJson.length > 8192) return false;
+    if (signatureHex.length != 128) return false;
+    final ch = _channel;
+    if (ch == null) return false;
     try {
-      await _safeSend({
+      ch.sink.add(jsonEncode({
         'type': 'bot_register_start',
         'payload': payloadJson,
         'signature': signatureHex,
-      }, context: 'bot_register_start');
+      }));
+      return true;
     } catch (e) {
       debugPrint('[RLINK][Relay] bot_register_start failed: $e');
+      if (!_intentionalClose && !_disposed) {
+        unawaited(reconnect());
+      }
+      return false;
+    }
+  }
+
+  static String _newBotOwnerReqId() {
+    final r = Random.secure();
+    final b = StringBuffer();
+    for (var i = 0; i < 24; i++) {
+      b.write(r.nextInt(16).toRadixString(16));
+    }
+    return b.toString();
+  }
+
+  /// Список ботов relay, зарегистрированных на текущий Ed25519-ключ (для Lib).
+  Future<Map<String, dynamic>> sendBotOwnerList() async {
+    if (!isConnected) {
+      return {'ok': false, 'error': 'offline'};
+    }
+    final owner = CryptoService.instance.publicKeyHex.toLowerCase();
+    if (owner.length != 64) {
+      return {'ok': false, 'error': 'no_keys'};
+    }
+    final reqId = _newBotOwnerReqId();
+    final c = Completer<Map<String, dynamic>>();
+    _botOwnerAckCompleters[reqId] = c;
+    try {
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final payloadObj = <String, dynamic>{
+        'v': 1,
+        'owner': owner,
+        'ts': ts,
+        'reqId': reqId,
+      };
+      final payloadJson = jsonEncode(payloadObj);
+      final sig = await CryptoService.instance.signUtf8Message(payloadJson);
+      if (sig.length != 128) {
+        _botOwnerAckCompleters.remove(reqId);
+        return {'ok': false, 'error': 'sign_failed'};
+      }
+      await _safeSend({
+        'type': 'bot_owner_list',
+        'payload': payloadJson,
+        'signature': sig,
+      }, context: 'bot_owner_list');
+      return await c.future.timeout(
+        const Duration(seconds: 45),
+        onTimeout: () {
+          _botOwnerAckCompleters.remove(reqId);
+          return {'ok': false, 'error': 'timeout'};
+        },
+      );
+    } catch (e) {
+      _botOwnerAckCompleters.remove(reqId);
+      debugPrint('[RLINK][Relay] bot_owner_list failed: $e');
+      return {'ok': false, 'error': e.toString()};
+    }
+  }
+
+  /// Правка метаданных бота на relay (владелец; те же поля, что HTTP Bot API).
+  Future<Map<String, dynamic>> sendBotOwnerPatch({
+    required String botId,
+    Map<String, dynamic>? changes,
+  }) async {
+    if (!isConnected) {
+      return {'ok': false, 'error': 'offline'};
+    }
+    final id = botId.toLowerCase().trim();
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) {
+      return {'ok': false, 'error': 'bad_bot_id'};
+    }
+    const allowed = <String>{
+      'displayName',
+      'description',
+      'avatarUrl',
+      'bannerUrl',
+      'clearAvatar',
+      'clearBanner',
+    };
+    final ch = changes ?? const <String, dynamic>{};
+    if (ch.isEmpty) {
+      return {'ok': false, 'error': 'empty_patch'};
+    }
+    for (final k in ch.keys) {
+      if (!allowed.contains(k)) {
+        return {'ok': false, 'error': 'bad_field'};
+      }
+    }
+
+    final owner = CryptoService.instance.publicKeyHex.toLowerCase();
+    if (owner.length != 64) {
+      return {'ok': false, 'error': 'no_keys'};
+    }
+    final reqId = _newBotOwnerReqId();
+    final c = Completer<Map<String, dynamic>>();
+    _botOwnerAckCompleters[reqId] = c;
+    try {
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final payloadObj = <String, dynamic>{
+        'v': 1,
+        'owner': owner,
+        'botId': id,
+        'ts': ts,
+        'reqId': reqId,
+      };
+      for (final e in ch.entries) {
+        payloadObj[e.key] = e.value;
+      }
+      final payloadJson = jsonEncode(payloadObj);
+      if (payloadJson.length > 8192) {
+        _botOwnerAckCompleters.remove(reqId);
+        return {'ok': false, 'error': 'payload_too_large'};
+      }
+      final sig = await CryptoService.instance.signUtf8Message(payloadJson);
+      if (sig.length != 128) {
+        _botOwnerAckCompleters.remove(reqId);
+        return {'ok': false, 'error': 'sign_failed'};
+      }
+      await _safeSend({
+        'type': 'bot_owner_patch',
+        'payload': payloadJson,
+        'signature': sig,
+      }, context: 'bot_owner_patch');
+      return await c.future.timeout(
+        const Duration(seconds: 45),
+        onTimeout: () {
+          _botOwnerAckCompleters.remove(reqId);
+          return {'ok': false, 'error': 'timeout'};
+        },
+      );
+    } catch (e) {
+      _botOwnerAckCompleters.remove(reqId);
+      debugPrint('[RLINK][Relay] bot_owner_patch failed: $e');
+      return {'ok': false, 'error': e.toString()};
     }
   }
 
