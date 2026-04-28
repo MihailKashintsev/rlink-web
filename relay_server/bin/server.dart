@@ -1434,6 +1434,7 @@ void _handleMessage(_User user, dynamic raw) {
   if (type != 'blob' &&
       type != 'channel_dir_put' &&
       type != 'bot_register_start' &&
+      type != 'bot_claim' &&
       type != 'bot_owner_list' &&
       type != 'bot_owner_patch') {
     if (!_checkRate(user.publicKey)) {

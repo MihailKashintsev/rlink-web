@@ -50,7 +50,11 @@ class RelayBotSession:
 
     def claim(self, claim_id: str) -> dict[str, Any]:
         assert self.ws
-        self.ws.send(json.dumps({"type": "bot_claim", "claimId": claim_id.lower().strip()}))
+        # claimCode: только нормализация пробелов/дефисов; 32 hex — lower.
+        cid = claim_id.strip()
+        if len(cid) == 32 and all(c in "0123456789abcdefABCDEF" for c in cid):
+            cid = cid.lower()
+        self.ws.send(json.dumps({"type": "bot_claim", "claimId": cid}))
         raw = self.ws.recv()
         if not isinstance(raw, str):
             raw = raw.decode("utf-8")

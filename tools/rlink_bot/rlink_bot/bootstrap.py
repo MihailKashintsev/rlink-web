@@ -71,8 +71,13 @@ def claim_and_save_config(
     finally:
         sess.close()
 
+    if ack.get("type") != "bot_claim_ack":
+        raise RuntimeError(
+            f"Неожиданный ответ relay (ожидался bot_claim_ack): {ack!r}"
+        )
     if not ack.get("ok"):
-        raise RuntimeError(ack.get("error") or "claim_failed")
+        err = ack.get("error") or ack.get("msg")
+        raise RuntimeError(err if err else f"claim ok=false: {ack!r}")
 
     token = ack.get("apiToken")
     handle = ack.get("handle")

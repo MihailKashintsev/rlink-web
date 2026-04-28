@@ -11,6 +11,18 @@ class LibBotService {
   LibBotService._();
   static final LibBotService instance = LibBotService._();
 
+  /// Совпадает с `_reservedBotHandles` на relay (`server.dart`).
+  static const Set<String> _reservedRelayBotHandles = {
+    'lib',
+    'gigachat',
+    'admin',
+    'support',
+    'rlink',
+    'system',
+    'botfather',
+    'rendergames',
+  };
+
   String? _awaitingBotPubForHandle;
   String _awaitingDisplayName = '';
 
@@ -237,6 +249,16 @@ class LibBotService {
       handle = handle.replaceAll(RegExp(r'[^a-z0-9_]'), '');
       if (handle.length < 2) {
         return const ['Ник слишком короткий. Допустимы a-z, 0-9, _.'];
+      }
+      if (handle.length > 32) {
+        return const ['Ник не длиннее 32 символов.'];
+      }
+      if (_reservedRelayBotHandles.contains(handle)) {
+        return [
+          'Ник @$handle зарезервирован на relay (служебные имена, как у бренда и системных ботов).',
+          'Выберите другой, например: rlink_help, my_shop_bot.',
+          'Список зарезервированных: ${_reservedRelayBotHandles.join(", ")}.',
+        ];
       }
       if (parts.length >= 3) {
         final pub = _extract64HexBotPub(parts.last);
@@ -473,6 +495,8 @@ class LibBotService {
             'У вас в скриншоте шаги верные: ключ в чат Lib после /newbot — так и должно быть.',
           ],
           if (err == 'handle_taken') 'Выберите другой @ник.',
+          if (err == 'bad_handle')
+            'Ник не принят: зарезервированное слово, недопустимые символы или длина не 2–32 (см. подсказку Lib при /newbot).',
           if (err == 'bad_signature') 'Внутренняя ошибка подписи — попробуйте ещё раз.',
           if (err == 'claim_code_alloc')
             'Не удалось выделить код заявки — попробуйте /newbot ещё раз.',

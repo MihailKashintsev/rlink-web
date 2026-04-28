@@ -71,9 +71,7 @@ class RelayService with WidgetsBindingObserver {
   /// Один раз навешиваем lifecycle-наблюдатель.
   bool _lifecycleAttached = false;
 
-  /// Default public relay server.
-  /// Захардкожен — пользователь не может переопределить через настройки
-  /// (см. serverUrl getter и connect() ниже).
+  /// Публичный relay (Tuna: https://rlink.ru.tuna.am → приложение подключается по wss).
   static const defaultServerUrl = 'wss://rlink.ru.tuna.am';
   static const List<String> fallbackServerUrls = <String>[
     defaultServerUrl,
@@ -160,9 +158,8 @@ class RelayService with WidgetsBindingObserver {
   final ValueNotifier<int> botDirectoryVersion = ValueNotifier(0);
 
   bool get isConnected => state.value == RelayState.connected;
-  /// URL сервера всегда захардкожен в defaultServerUrl.
-  /// Любое значение в AppSettings.relayServerUrl игнорируется,
-  /// чтобы клиенты не могли подключаться к чужим relay.
+
+  /// URL ретранслятора для UI и web-push (всегда [defaultServerUrl]).
   String? get serverUrl => defaultServerUrl;
 
   Future<void> _safeSend(

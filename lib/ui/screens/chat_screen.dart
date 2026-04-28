@@ -38,6 +38,7 @@ import '../../services/channel_service.dart';
 import '../../services/call_service.dart';
 import '../../services/connection_transport.dart';
 import '../../services/device_link_sync_service.dart';
+import '../../services/dm_compose_draft_service.dart';
 import '../../services/ether_service.dart';
 import '../../services/group_service.dart';
 import '../../services/outbound_dm_text.dart';
@@ -263,6 +264,12 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Множественный выбор пузырей: переслать / удалить.
   bool _bulkSelectMode = false;
   final LinkedHashSet<String> _selectedMsgIds = LinkedHashSet<String>();
+
+  Timer? _draftPersistDebounce;
+
+  /// true с первой строки [dispose]: до [super.dispose] [mounted] ещё true,
+  /// поэтому async (Lib/GigaChat и т.д.) нельзя вызывать [setState] без этой проверки.
+  bool _tearingDown = false;
 
   /// Только для GigaChat: на iOS/Android [ConnectivityResult.vpn] из connectivity_plus.
   bool _vpnProbablyActive = false;
@@ -615,6 +622,7 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     }
     _controller.addListener(_onTyping);
+    _controller.addListener(_schedulePersistComposeDraft);
     // Следим за изменением маппингов BLE UUID → public key
     BleService.instance.peersCount.addListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.addListener(_onPeersChanged);
@@ -622,28 +630,37 @@ class _ChatScreenState extends State<ChatScreen> {
     _contactListener = () => _checkContactStatus();
     ChatStorageService.instance.contactsNotifier.addListener(_contactListener!);
     _relayBotDirectoryListener = () {
-      if (!mounted) return;
+      if (_tearingDown || !mounted) return;
       _syncHeaderPathsFromWidgetAndRelay();
-      setState(() {});
+      if (!_tearingDown && mounted) setState(() {});
       unawaited(_checkContactStatus());
     };
     RelayService.instance.botDirectoryVersion
         .addListener(_relayBotDirectoryListener!);
     // Update message status + clear uploading indicator when background upload finishes
     MediaUploadQueue.instance.onTaskCompleted = (msgId) async {
-      if (!mounted) return;
+      if (_tearingDown || !mounted) return;
       await ChatStorageService.instance
           .updateMessageStatusPreserveDelivered(msgId, MessageStatus.sent);
-      if (mounted) setState(() => _uploadingMsgIds.remove(msgId));
+      if (!_tearingDown && mounted) {
+        setState(() => _uploadingMsgIds.remove(msgId));
+      }
     };
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_tearingDown || !mounted || widget.forwardDraft != null) return;
+      unawaited(_restoreComposeDraft());
+    });
 
     if (_isAiBot) {
       unawaited(_refreshGigachatVpnFlag());
       _vpnConnSub = Connectivity().onConnectivityChanged.listen((results) {
-        if (!mounted) return;
+        if (_tearingDown || !mounted) return;
         final on = results.contains(ConnectivityResult.vpn);
         if (on != _vpnProbablyActive) {
-          setState(() => _vpnProbablyActive = on);
+          if (!_tearingDown && mounted) {
+            setState(() => _vpnProbablyActive = on);
+          }
         }
       });
     }
@@ -668,11 +685,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
       if (senderKey != _resolvedPeerId) {
         _resolvedPeerId = senderKey;
-        if (mounted) setState(() {});
+        if (!_tearingDown && mounted) setState(() {});
       }
 
       await ChatStorageService.instance.loadMessages(_resolvedPeerId);
-      if (mounted) {
+      if (!_tearingDown && mounted) {
         _recomputePinHighlight(ChatStorageService.instance
             .messagesNotifier(_resolvedPeerId)
             .value);
@@ -683,17 +700,69 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onPeersChanged() {
-    if (!mounted) return;
+    if (_tearingDown || !mounted) return;
     if (_isAiBot) return;
     final resolved = BleService.instance.resolvePublicKey(widget.peerId);
     if (resolved != _resolvedPeerId && resolved != widget.peerId) {
-      if (!mounted) return;
+      if (_tearingDown || !mounted) return;
+      final prev = _resolvedPeerId;
       setState(() => _resolvedPeerId = resolved);
+      unawaited(_migrateComposeDraftPeerKey(prev, resolved));
       // Перезагружаем сообщения под правильным публичным ключом
       ChatStorageService.instance.loadMessages(_resolvedPeerId);
     }
     // Key may have just resolved — re-check contact status
     unawaited(_checkContactStatus());
+  }
+
+  String _composeDraftStorageKey() =>
+      ChatStorageService.normalizeDmPeerId(_resolvedPeerId);
+
+  void _schedulePersistComposeDraft() {
+    if (_editingMessageId != null || _tearingDown) return;
+    _draftPersistDebounce?.cancel();
+    _draftPersistDebounce = Timer(const Duration(milliseconds: 450), () {
+      if (_tearingDown || !mounted) return;
+      unawaited(
+        DmComposeDraftService.instance
+            .setDraft(_composeDraftStorageKey(), _controller.text),
+      );
+    });
+  }
+
+  Future<void> _restoreComposeDraft() async {
+    if (_tearingDown || !mounted || widget.forwardDraft != null) return;
+    if (_editingMessageId != null) return;
+    final raw =
+        await DmComposeDraftService.instance.getDraft(_composeDraftStorageKey());
+    if (_tearingDown || !mounted || raw == null || raw.isEmpty) return;
+    if (_controller.text.isNotEmpty) return;
+    _controller.value = TextEditingValue(
+      text: raw,
+      selection: TextSelection.collapsed(offset: raw.length),
+    );
+    if (!_tearingDown && mounted) setState(() {});
+  }
+
+  Future<void> _migrateComposeDraftPeerKey(
+    String previousResolved,
+    String newResolved,
+  ) async {
+    final a = ChatStorageService.normalizeDmPeerId(previousResolved);
+    final b = ChatStorageService.normalizeDmPeerId(newResolved);
+    if (a == b) return;
+    final oldDraft = await DmComposeDraftService.instance.getDraft(a);
+    if (oldDraft == null || oldDraft.trim().isEmpty) return;
+    await DmComposeDraftService.instance.setDraft(a, '');
+    await DmComposeDraftService.instance.setDraft(b, oldDraft);
+    if (_tearingDown || !mounted || _editingMessageId != null) return;
+    if (_controller.text.trim().isEmpty) {
+      _controller.value = TextEditingValue(
+        text: oldDraft,
+        selection: TextSelection.collapsed(offset: oldDraft.length),
+      );
+      if (!_tearingDown && mounted) setState(() {});
+    }
   }
 
   void _onTyping() {
@@ -723,9 +792,14 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     final peerForRead = _resolvedPeerId;
+    _tearingDown = true;
+    final draftKey = ChatStorageService.normalizeDmPeerId(_resolvedPeerId);
+    final draftText = _controller.text;
     _vpnConnSub?.cancel();
     _vpnConnSub = null;
     _typingDebounce?.cancel();
+    _draftPersistDebounce?.cancel();
+    unawaited(DmComposeDraftService.instance.setDraft(draftKey, draftText));
     _sendActivity(Activity.stopped);
     // Сначала отменяем поток — иначе async-обработчик может дернуть scroll/setState
     // после dispose контроллера и сломать дерево виджетов.
@@ -736,6 +810,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     _scrollController.removeListener(_onScrollForPins);
     _controller.removeListener(_onTyping);
+    _controller.removeListener(_schedulePersistComposeDraft);
     BleService.instance.peersCount.removeListener(_onPeersChanged);
     BleService.instance.peerMappingsVersion.removeListener(_onPeersChanged);
     if (_contactListener != null) {
@@ -1406,7 +1481,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _reloadPins() async {
     final ids = await ChatStorageService.instance
         .getPinnedMessageIdsChrono(_resolvedPeerId);
-    if (!mounted) return;
+    if (_tearingDown || !mounted) return;
     setState(() {
       _pinnedIdsChrono = ids;
       _pinnedMsgIds
@@ -1418,7 +1493,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onScrollForPins() {
-    if (!mounted) return;
+    if (_tearingDown || !mounted) return;
     ScrollPosition? pos;
     try {
       pos = _scrollController.hasClients ? _scrollController.position : null;
@@ -1429,7 +1504,9 @@ class _ChatScreenState extends State<ChatScreen> {
       final awayFromBottom = pos.maxScrollExtent - pos.pixels;
       final showFab = awayFromBottom > 120;
       if (showFab != _showScrollToBottomFab) {
-        if (mounted) setState(() => _showScrollToBottomFab = showFab);
+        if (!_tearingDown && mounted) {
+          setState(() => _showScrollToBottomFab = showFab);
+        }
       }
     }
     final msgs =
@@ -1438,10 +1515,12 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _recomputePinHighlight(List<ChatMessage> messages) {
-    if (!mounted) return;
+    if (_tearingDown || !mounted) return;
     if (_pinnedIdsChrono.isEmpty) {
       if (_pinBarHighlightId != null) {
-        if (mounted) setState(() => _pinBarHighlightId = null);
+        if (!_tearingDown && mounted) {
+          setState(() => _pinBarHighlightId = null);
+        }
       }
       return;
     }
@@ -1469,7 +1548,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     bestId ??= _pinnedIdsChrono.isNotEmpty ? _pinnedIdsChrono.last : null;
     if (bestId != _pinBarHighlightId) {
-      if (mounted) setState(() => _pinBarHighlightId = bestId);
+      if (!_tearingDown && mounted) {
+        setState(() => _pinBarHighlightId = bestId);
+      }
     }
   }
 
@@ -2024,7 +2105,7 @@ class _ChatScreenState extends State<ChatScreen> {
           );
         }
         await ChatStorageService.instance.editMessage(targetId, text);
-        if (!mounted) return;
+        if (_tearingDown || !mounted) return;
         _controller.clear();
         _cancelEdit();
         return;
@@ -2045,10 +2126,12 @@ class _ChatScreenState extends State<ChatScreen> {
           ChatStorageService.normalizeDmPeerId(targetPeerId);
       final lat = _pendingLat;
       final lng = _pendingLng;
-      setState(() {
-        _pendingLat = null;
-        _pendingLng = null;
-      });
+      if (!_tearingDown && mounted) {
+        setState(() {
+          _pendingLat = null;
+          _pendingLng = null;
+        });
+      }
 
       var x25519Key =
           BleService.instance.getPeerX25519Key(canonicalTargetPeerId);
@@ -2065,6 +2148,7 @@ class _ChatScreenState extends State<ChatScreen> {
           'mode=${AppSettings.instance.connectionMode}');
 
       for (var i = 0; i < parts.length; i++) {
+        if (_tearingDown || !mounted) break;
         final chunk = parts[i];
         final isFirst = i == 0;
         msgId = _uuid.v4();
@@ -2080,6 +2164,7 @@ class _ChatScreenState extends State<ChatScreen> {
           status: MessageStatus.sending,
         );
         await ChatStorageService.instance.saveMessage(msg);
+        if (_tearingDown || !mounted) break;
 
         if (!_savedMessagesLocalOnly && !_isAiBot) {
           if (x25519Key != null && x25519Key.isNotEmpty) {
@@ -2117,21 +2202,28 @@ class _ChatScreenState extends State<ChatScreen> {
           msgId,
           MessageStatus.sent,
         );
+        if (_tearingDown || !mounted) break;
       }
+
+      if (_tearingDown || !mounted) return;
 
       await ChatStorageService.instance.loadMessages(canonicalTargetPeerId);
       _scrollToBottom();
 
-      if (mounted) {
+      if (!_tearingDown && mounted) {
         setState(() {
           _replyToMessageId = null;
           _replyPreviewText = null;
         });
       }
 
-      if (widget.peerId == kGigachatBotPeerId) {
+      if (!_tearingDown &&
+          mounted &&
+          widget.peerId == kGigachatBotPeerId) {
         unawaited(_completeGigachatReply());
-      } else if (widget.peerId == kLibBotPeerId) {
+      } else if (!_tearingDown &&
+          mounted &&
+          widget.peerId == kLibBotPeerId) {
         unawaited(_completeLibReply(text));
       }
     } catch (e) {
@@ -2147,16 +2239,16 @@ class _ChatScreenState extends State<ChatScreen> {
         SnackBar(content: Text('Ошибка: $e'), backgroundColor: Colors.red),
       );
     } finally {
-      if (mounted) setState(() => _isSending = false);
+      if (!_tearingDown && mounted) setState(() => _isSending = false);
     }
   }
 
   Future<void> _completeGigachatReply() async {
-    if (!mounted) return;
+    if (_tearingDown || !mounted) return;
     setState(() => _aiThinking = true);
     try {
       final reply = await GigachatService.instance.completeAfterUserMessage();
-      if (!mounted) return;
+      if (_tearingDown || !mounted) return;
       final botMsg = ChatMessage(
         id: _uuid.v4(),
         peerId: kGigachatBotPeerId,
@@ -2167,15 +2259,15 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       await ChatStorageService.instance.saveMessage(botMsg);
       await ChatStorageService.instance.loadMessages(kGigachatBotPeerId);
-      if (mounted) _scrollToBottom();
+      if (!_tearingDown && mounted) _scrollToBottom();
     } on GigachatException catch (e) {
-      if (mounted) {
+      if (!_tearingDown && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(e.message), backgroundColor: Colors.red),
         );
       }
     } catch (e) {
-      if (mounted) {
+      if (!_tearingDown && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('GigaChat: $e'),
@@ -2184,18 +2276,19 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() => _aiThinking = false);
+      if (!_tearingDown && mounted) setState(() => _aiThinking = false);
     }
   }
 
   Future<void> _completeLibReply(String userText) async {
-    if (!mounted) return;
+    if (_tearingDown || !mounted) return;
     setState(() => _aiThinking = true);
     try {
       final lines = await LibBotService.instance.handleUserTurn(userText);
-      if (!mounted) return;
+      if (_tearingDown || !mounted) return;
       final now = DateTime.now();
       for (final line in lines) {
+        if (_tearingDown || !mounted) return;
         final botMsg = ChatMessage(
           id: _uuid.v4(),
           peerId: kLibBotPeerId,
@@ -2206,16 +2299,17 @@ class _ChatScreenState extends State<ChatScreen> {
         );
         await ChatStorageService.instance.saveMessage(botMsg);
       }
+      if (_tearingDown || !mounted) return;
       await ChatStorageService.instance.loadMessages(kLibBotPeerId);
-      if (mounted) _scrollToBottom();
+      if (!_tearingDown && mounted) _scrollToBottom();
     } catch (e) {
-      if (mounted) {
+      if (!_tearingDown && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Lib: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
-      if (mounted) setState(() => _aiThinking = false);
+      if (!_tearingDown && mounted) setState(() => _aiThinking = false);
     }
   }
 
@@ -3248,7 +3342,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     } finally {
       _sendActivity(Activity.stopped);
-      if (mounted) setState(() => _isSending = false);
+      if (!_tearingDown && mounted) setState(() => _isSending = false);
     }
   }
 
@@ -3256,14 +3350,14 @@ class _ChatScreenState extends State<ChatScreen> {
   /// register its id so the "Загружается..." bar appears.
   Future<void> _saveAndTrack(ChatMessage msg, {required bool wasQueued}) async {
     await ChatStorageService.instance.saveMessage(msg);
-    if (wasQueued && mounted) {
+    if (wasQueued && !_tearingDown && mounted) {
       setState(() => _uploadingMsgIds.add(msg.id));
     }
   }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (_tearingDown || !mounted) return;
       try {
         if (!_scrollController.hasClients) return;
         _scrollController.animateTo(
@@ -3286,7 +3380,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _preserveScrollAfterComposerResize(double? distFromBottom) {
     if (distFromBottom == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (_tearingDown || !mounted) return;
       try {
         if (!_scrollController.hasClients) return;
         final pos = _scrollController.position;
@@ -3300,10 +3394,12 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _refreshGigachatVpnFlag() async {
     try {
       final results = await Connectivity().checkConnectivity();
-      if (!mounted) return;
+      if (_tearingDown || !mounted) return;
       final on = results.contains(ConnectivityResult.vpn);
       if (on != _vpnProbablyActive) {
-        setState(() => _vpnProbablyActive = on);
+        if (!_tearingDown && mounted) {
+          setState(() => _vpnProbablyActive = on);
+        }
       }
     } catch (_) {
       // Desktop / неподдерживаемая платформа — плашку не показываем.
@@ -3847,7 +3943,14 @@ class _ChatScreenState extends State<ChatScreen> {
     return PopScope(
       canPop: !_bulkSelectMode,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && _bulkSelectMode && mounted) _exitBulkSelect();
+        if (didPop) return;
+        if (_bulkSelectMode && mounted) {
+          // Не вызывать setState синхронно из колбэка pop — элемент может быть
+          // уже в процессе деактивации (красный экран _elements.contains).
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _exitBulkSelect();
+          });
+        }
       },
       child: Scaffold(
         appBar: _bulkSelectMode
@@ -4324,7 +4427,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           _pendingMessageCountPinSync = true;
                           WidgetsBinding.instance.addPostFrameCallback((_) {
                             _pendingMessageCountPinSync = false;
-                            if (!mounted) return;
+                            if (_tearingDown || !mounted) return;
                             final live = ChatStorageService.instance
                                 .messagesNotifier(_resolvedPeerId)
                                 .value
@@ -4350,7 +4453,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                   final showDate = i == 0 ||
                                       !_sameDay(messages[i - 1].timestamp,
                                           msg.timestamp);
-                                  return Column(children: [
+                                  return Column(
+                                    key: ValueKey<String>('dmrow_${msg.id}'),
+                                    children: [
                                     if (showDate)
                                       _DateDivider(date: msg.timestamp),
                                     Row(

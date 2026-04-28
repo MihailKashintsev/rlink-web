@@ -10,11 +10,14 @@ class SwipeToReply extends StatefulWidget {
     required this.isOutgoing,
     required this.onReply,
     required this.child,
+    this.enabled = true,
   });
 
   final bool isOutgoing;
   final VoidCallback onReply;
   final Widget child;
+  /// Если false — только [child], без свайпа (например режим выбора сообщений).
+  final bool enabled;
 
   @override
   State<SwipeToReply> createState() => _SwipeToReplyState();
@@ -37,6 +40,22 @@ class _SwipeToReplyState extends State<SwipeToReply>
   VoidCallback? _tweenListener;
 
   @override
+  void didUpdateWidget(SwipeToReply oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Режим выбора отключает свайп: обрываем жест/анимацию, иначе слушатель
+    // тика может вызвать setState уже в «обрезанном» дереве → _elements.contains.
+    if (oldWidget.enabled && !widget.enabled) {
+      _snap.stop();
+      if (_tweenListener != null) {
+        _tween?.removeListener(_tweenListener!);
+        _tweenListener = null;
+      }
+      _tween = null;
+      _dx = 0;
+    }
+  }
+
+  @override
   void dispose() {
     _tearDown = true;
     _snap.stop();
@@ -50,7 +69,7 @@ class _SwipeToReplyState extends State<SwipeToReply>
   }
 
   void _beginSnap(double from) {
-    if (_tearDown) return;
+    if (_tearDown || !widget.enabled) return;
     _snap.stop();
     if (_tweenListener != null) {
       _tween?.removeListener(_tweenListener!);
@@ -68,7 +87,7 @@ class _SwipeToReplyState extends State<SwipeToReply>
   }
 
   void _onUpdate(DragUpdateDetails d) {
-    if (_tearDown) return;
+    if (_tearDown || !widget.enabled) return;
     _snap.stop();
     if (_tweenListener != null) {
       _tween?.removeListener(_tweenListener!);
@@ -84,7 +103,7 @@ class _SwipeToReplyState extends State<SwipeToReply>
   }
 
   void _onEnd(DragEndDetails d) {
-    if (_tearDown) return;
+    if (_tearDown || !widget.enabled) return;
     final vx = d.velocity.pixelsPerSecond.dx;
     final distOk =
         widget.isOutgoing ? _dx <= -_trigger : _dx >= _trigger;
@@ -98,6 +117,7 @@ class _SwipeToReplyState extends State<SwipeToReply>
 
   @override
   Widget build(BuildContext context) {
+    if (!widget.enabled) return widget.child;
     final cs = Theme.of(context).colorScheme;
     final t = (_dx.abs() / _max).clamp(0.0, 1.0);
     return GestureDetector(
@@ -105,7 +125,7 @@ class _SwipeToReplyState extends State<SwipeToReply>
       onHorizontalDragUpdate: _onUpdate,
       onHorizontalDragEnd: _onEnd,
       onHorizontalDragCancel: () {
-        if (!_tearDown) _beginSnap(_dx);
+        if (!_tearDown && widget.enabled) _beginSnap(_dx);
       },
       child: Stack(
         clipBehavior: Clip.none,

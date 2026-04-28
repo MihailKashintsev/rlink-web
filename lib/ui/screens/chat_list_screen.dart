@@ -12,6 +12,7 @@ import '../../services/chat_inbox_service.dart';
 import '../../services/ble_service.dart';
 import '../../services/channel_service.dart';
 import '../../services/chat_storage_service.dart';
+import '../../services/dm_compose_draft_service.dart';
 import '../../services/crypto_service.dart';
 import '../../services/ether_service.dart';
 import '../../services/group_service.dart';
@@ -826,6 +827,22 @@ class _MeTab extends StatelessWidget {
 
 enum _ChatItemType { personal, group, channel }
 
+/// Превью строки в списке чатов: при несохранённом вводе — «Черновик: …» вместо последнего сообщения.
+String _dmChatListPreviewOrDraft(
+  String peerId,
+  String lastMessagePreview,
+  Map<String, String> drafts,
+) {
+  final pid = ChatStorageService.normalizeDmPeerId(peerId);
+  final d = drafts[pid];
+  if (d == null || d.trim().isEmpty) return lastMessagePreview;
+  final oneLine = d.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+  if (oneLine.isEmpty) return lastMessagePreview;
+  final short =
+      oneLine.length > 52 ? '${oneLine.substring(0, 52)}…' : oneLine;
+  return 'Черновик: $short';
+}
+
 class _UnifiedChatsTab extends StatefulWidget {
   final String searchQuery;
   const _UnifiedChatsTab({this.searchQuery = ''});
@@ -846,6 +863,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
   VoidCallback? _contactListener; // fires when contactsNotifier updates
   VoidCallback? _readStateListener;
   VoidCallback? _settingsListener;
+  VoidCallback? _draftRevisionListener;
   late final VoidCallback _inboxListener;
 
   @override
@@ -880,6 +898,9 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         .addListener(_readStateListener!);
     _settingsListener = () => _debouncedLoad();
     AppSettings.instance.addListener(_settingsListener!);
+    _draftRevisionListener = () => _debouncedLoad();
+    DmComposeDraftService.instance.revision
+        .addListener(_draftRevisionListener!);
   }
 
   void _debouncedLoad() {
@@ -918,6 +939,10 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     if (_settingsListener != null) {
       AppSettings.instance.removeListener(_settingsListener!);
     }
+    if (_draftRevisionListener != null) {
+      DmComposeDraftService.instance.revision
+          .removeListener(_draftRevisionListener!);
+    }
     ChatInboxService.instance.removeListener(_inboxListener);
     super.dispose();
   }
@@ -941,6 +966,8 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         ? await ChannelService.instance.getChannelUnreadCounts()
         : <String, int>{};
 
+    final dmDrafts = await DmComposeDraftService.instance.getAllDrafts();
+
     // 1) Личные чаты
     final summaries = await ChatStorageService.instance.getChatSummaries();
     final summaryIds = <String>{};
@@ -957,7 +984,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         avatarColor: s.avatarColor ?? 0xFF607D8B,
         avatarEmoji: s.avatarEmoji ?? '',
         avatarImagePath: s.avatarImagePath,
-        lastMessage: s.displayText,
+        lastMessage: _dmChatListPreviewOrDraft(s.peerId, s.displayText, dmDrafts),
         lastTime: s.timestamp,
         isOnline: showOnline && transports.isNotEmpty,
         onlineTransports: transports,
@@ -984,7 +1011,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         avatarColor: c.avatarColor,
         avatarEmoji: c.avatarEmoji,
         avatarImagePath: c.avatarImagePath,
-        lastMessage: '',
+        lastMessage: _dmChatListPreviewOrDraft(c.publicKeyHex, '', dmDrafts),
         lastTime: c.addedAt,
         isOnline: showOnline && transports.isNotEmpty,
         onlineTransports: transports,
@@ -1066,6 +1093,8 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
           : AppL10n.t('chat_saved_messages_empty');
       final savedTime =
           savedLast?.timestamp ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final savedLine =
+          _dmChatListPreviewOrDraft(myId, savedPreview, dmDrafts);
       items.insert(
         0,
         _ChatItem(
@@ -1076,7 +1105,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
           avatarColor: 0xFF26A69A,
           avatarEmoji: '⭐',
           avatarImagePath: null,
-          lastMessage: savedPreview,
+          lastMessage: savedLine,
           lastTime: savedTime,
           isOnline: false,
           onlineTransports: const [],
