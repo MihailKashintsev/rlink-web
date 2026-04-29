@@ -8,6 +8,7 @@ import 'crypto_service.dart';
 import 'gossip_router.dart';
 import 'chat_storage_service.dart';
 import 'notification_service.dart';
+import 'relay_service.dart';
 import 'sound_effects_service.dart';
 
 enum CallPhase { idle, ringing, connecting, connected, ended, failed }
@@ -31,6 +32,8 @@ class CallSessionInfo {
 class CallService {
   CallService._();
   static final CallService instance = CallService._();
+  static const Duration _ringingTimeoutDuration = Duration(seconds: 60);
+  static const Duration _connectingTimeoutDuration = Duration(seconds: 35);
 
   static const _turnHost = String.fromEnvironment('TURN_HOST', defaultValue: '');
   static const _turnUser = String.fromEnvironment('TURN_USER', defaultValue: '');
@@ -52,6 +55,8 @@ class CallService {
   bool _videoEnabled = true;
   bool _acceptedAwaitingOffer = false;
   Timer? _connectTimeout;
+  DateTime _phaseSince = DateTime.now();
+  static final RegExp _pubKeyHex64 = RegExp(r'^[0-9a-f]{64}$');
 
   MediaStream? remoteStream;
 
@@ -59,6 +64,11 @@ class CallService {
       phase.value == CallPhase.ringing ||
       phase.value == CallPhase.connecting ||
       phase.value == CallPhase.connected;
+
+  void _setPhase(CallPhase next) {
+    phase.value = next;
+    _phaseSince = DateTime.now();
+  }
 
   Map<String, dynamic> _iceConfig() {
     final servers = <Map<String, dynamic>>[
@@ -86,6 +96,25 @@ class CallService {
         },
       ]);
     }
+    // Fallback TURNs keep call setup reliable when self-hosted TURN is
+    // temporarily unreachable/misconfigured in production.
+    servers.addAll(<Map<String, dynamic>>[
+      {
+        'urls': 'turn:openrelay.metered.ca:80',
+        'username': 'openrelayproject',
+        'credential': 'openrelayproject',
+      },
+      {
+        'urls': 'turn:openrelay.metered.ca:443',
+        'username': 'openrelayproject',
+        'credential': 'openrelayproject',
+      },
+      {
+        'urls': 'turns:openrelay.metered.ca:443',
+        'username': 'openrelayproject',
+        'credential': 'openrelayproject',
+      },
+    ]);
     return <String, dynamic>{'iceServers': servers};
   }
 
@@ -100,29 +129,36 @@ class CallService {
     if (isBusy) {
       throw StateError('busy');
     }
+    final recipientKey = _resolveRecipientKey(peerId);
+    if (recipientKey == null) {
+      throw StateError('invalid_recipient');
+    }
+    if (!RelayService.instance.isConnected) {
+      throw StateError('peer_offline');
+    }
     final callId = _uuid.v4();
     _activeCallId = callId;
-    _activePeerId = peerId;
+    _activePeerId = recipientKey;
     _videoEnabled = video;
     await SoundEffectsService.instance.stopIncomingRingtone();
     // Show "ringing" while waiting for callee to accept.
     // Transitions to connecting when 'accept' signal arrives.
-    phase.value = CallPhase.ringing;
+    _setPhase(CallPhase.ringing);
     await _ensurePeerConnection();
     await _ensureLocalStream();
 
-    await _sendSignal(peerId, callId, 'invite', {
-      'video': video,
+    await _sendSignal(recipientKey, callId, 'invite', {
+      'video': _videoEnabled,
       'audio': true,
     });
     await _createAndSendOffer();
-    _armConnectTimeout();
+    _armRingingTimeout();
 
     return CallSessionInfo(
       callId: callId,
       peerId: peerId,
       incoming: false,
-      videoEnabled: video,
+      videoEnabled: _videoEnabled,
       audioEnabled: true,
     );
   }
@@ -137,7 +173,7 @@ class CallService {
     _activePeerId = session.peerId;
     _videoEnabled = session.videoEnabled;
     await SoundEffectsService.instance.stopIncomingRingtone();
-    phase.value = CallPhase.connecting;
+    _setPhase(CallPhase.connecting);
 
     await _ensurePeerConnection();
     await _ensureLocalStream();
@@ -251,7 +287,7 @@ class CallService {
       if (event.streams.isNotEmpty) {
         remoteStream = event.streams.first;
         _connectTimeout?.cancel();
-        phase.value = CallPhase.connected;
+        _setPhase(CallPhase.connected);
         unawaited(SoundEffectsService.instance.playAction(ActionSound.callConnected));
       }
     };
@@ -266,7 +302,7 @@ class CallService {
       } else if (state ==
           RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         _connectTimeout?.cancel();
-        phase.value = CallPhase.connected;
+        _setPhase(CallPhase.connected);
         unawaited(SoundEffectsService.instance.playAction(ActionSound.callConnected));
       }
     };
@@ -274,17 +310,47 @@ class CallService {
 
   Future<void> _ensureLocalStream() async {
     if (_localStream != null) return;
-    final media = await navigator.mediaDevices.getUserMedia({
-      'audio': true,
-      'video': _videoEnabled,
-    });
-    _localStream = media;
-    final pc = _pc;
-    if (pc != null) {
-      for (final track in media.getTracks()) {
-        await pc.addTrack(track, media);
+    try {
+      final media = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': _videoEnabled,
+      });
+      _localStream = media;
+      final pc = _pc;
+      if (pc != null) {
+        for (final track in media.getTracks()) {
+          await pc.addTrack(track, media);
+        }
+      }
+      return;
+    } catch (e) {
+      debugPrint('[RLINK][Call] getUserMedia primary failed: $e');
+    }
+
+    if (_videoEnabled) {
+      // iOS devices can fail or crash during camera bootstrap on some plugin/device
+      // combinations. Fallback to audio-only instead of aborting the call flow.
+      try {
+        final media = await navigator.mediaDevices.getUserMedia({
+          'audio': true,
+          'video': false,
+        });
+        _videoEnabled = false;
+        _localStream = media;
+        final pc = _pc;
+        if (pc != null) {
+          for (final track in media.getTracks()) {
+            await pc.addTrack(track, media);
+          }
+        }
+        debugPrint('[RLINK][Call] Fallback to audio-only stream.');
+        return;
+      } catch (e) {
+        debugPrint('[RLINK][Call] getUserMedia audio fallback failed: $e');
       }
     }
+
+    throw StateError('media_init_failed');
   }
 
   Future<void> _onSignal(
@@ -293,8 +359,21 @@ class CallService {
     String signalType,
     Map<String, dynamic> payload,
   ) async {
+    final f8 = fromId.length >= 8 ? fromId.substring(0, 8) : fromId;
+    debugPrint('[RLINK][Call][RX] $signalType call=$callId from=$f8');
     switch (signalType) {
       case 'invite':
+        if (isBusy && _activeCallId != callId) {
+          final staleBusy = (phase.value == CallPhase.ringing ||
+                  phase.value == CallPhase.connecting) &&
+              DateTime.now().difference(_phaseSince) > const Duration(seconds: 70);
+          if (staleBusy) {
+            debugPrint(
+              '[RLINK][Call] dropping stale busy state: call=${_activeCallId ?? '-'} phase=${phase.value}',
+            );
+            await _cleanup(CallPhase.idle);
+          }
+        }
         if (isBusy && _activeCallId != callId) {
           await _sendSignal(fromId, callId, 'busy');
           break;
@@ -319,7 +398,7 @@ class CallService {
           audioEnabled: payload['audio'] != false,
         );
         incomingCall.value = info;
-        phase.value = CallPhase.ringing;
+        _setPhase(CallPhase.ringing);
         unawaited(SoundEffectsService.instance.startIncomingRingtone());
         break;
       case 'offer':
@@ -335,7 +414,8 @@ class CallService {
       case 'accept':
         // Callee accepted — move to connecting phase, then resend offer.
         if (_activeCallId == callId && _activePeerId == fromId) {
-          phase.value = CallPhase.connecting;
+          _setPhase(CallPhase.connecting);
+          _armConnectTimeout();
           if (_lastLocalOffer != null) {
             await _sendSignal(fromId, callId, 'offer', _lastLocalOffer!);
           }
@@ -348,6 +428,9 @@ class CallService {
           if (sdp != null && type != null) {
             await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));
             await _flushPendingIce(callId);
+            if (phase.value == CallPhase.connecting) {
+              _armConnectTimeout();
+            }
           }
         }
         break;
@@ -369,6 +452,9 @@ class CallService {
         }
         try {
           await _addIceCandidate(icePayload);
+          if (phase.value == CallPhase.connecting) {
+            _armConnectTimeout();
+          }
         } catch (_) {
           _pendingIce
               .putIfAbsent(callId, () => <Map<String, dynamic>>[])
@@ -391,6 +477,8 @@ class CallService {
   ]) async {
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isEmpty) return;
+    final r8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : recipientId;
+    debugPrint('[RLINK][Call][TX] $signalType call=$callId to=$r8');
     await GossipRouter.instance.sendCallSignal(
       fromId: myId,
       recipientId: recipientId,
@@ -398,6 +486,19 @@ class CallService {
       signalType: signalType,
       payload: payload,
     );
+  }
+
+  String? _resolveRecipientKey(String peerId) {
+    final trimmed = peerId.trim().toLowerCase();
+    if (_pubKeyHex64.hasMatch(trimmed)) return trimmed;
+    if (trimmed.length >= 8) {
+      final byPrefix = RelayService.instance.findPeerByPrefix(trimmed);
+      if (byPrefix != null) {
+        final key = byPrefix.trim().toLowerCase();
+        if (_pubKeyHex64.hasMatch(key)) return key;
+      }
+    }
+    return null;
   }
 
   Future<void> _cleanup(CallPhase endPhase) async {
@@ -422,16 +523,30 @@ class CallService {
     _acceptedAwaitingOffer = false;
     _pendingOffers.clear();
     _pendingIce.clear();
-    phase.value = endPhase;
+    _setPhase(endPhase);
   }
 
   void _armConnectTimeout() {
     _connectTimeout?.cancel();
-    _connectTimeout = Timer(const Duration(seconds: 25), () {
+    _connectTimeout = Timer(_connectingTimeoutDuration, () {
       if (phase.value == CallPhase.connected ||
           phase.value == CallPhase.ended) {
         return;
       }
+      debugPrint(
+        '[RLINK][Call] connect timeout: call=${_activeCallId ?? '-'} phase=${phase.value}',
+      );
+      unawaited(_cleanup(CallPhase.failed));
+    });
+  }
+
+  void _armRingingTimeout() {
+    _connectTimeout?.cancel();
+    _connectTimeout = Timer(_ringingTimeoutDuration, () {
+      if (phase.value != CallPhase.ringing) return;
+      debugPrint(
+        '[RLINK][Call] ringing timeout: call=${_activeCallId ?? '-'} phase=${phase.value}',
+      );
       unawaited(_cleanup(CallPhase.failed));
     });
   }
