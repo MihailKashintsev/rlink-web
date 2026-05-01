@@ -64,6 +64,9 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 ///     relay создаёт запись, возвращает `apiToken` один раз (хеш хранится на диске).
 ///   • `bot_owner_list` / `bot_owner_patch` — подписанный JSON владельца: список своих
 ///     ботов и правка метаданных (имя, описание, avatar/banner URL); см. ack с `reqId`.
+///   • `bot_info_get` + `reqId` / `handle` → `bot_info_result` (публичные поля + `commands`).
+///   • `bot_commands_set` — либо `apiToken` + `commands` (сессия от ключа бота), либо
+///     подписанный JSON владельца (`v`, `owner`, `botId`, `commands`, `ts`, `reqId`).
 ///   • `bot_dir_snapshot` после register; поиск дополняется зарегистрированными ботами.
 /// ═══════════════════════════════════════════════════════════════════
 
@@ -94,7 +97,10 @@ final Map<String, _User> _users = {};
 final Map<String, List<DateTime>> _rateLimits = {};
 const _rateWindow = Duration(seconds: 10);
 const _rateMax =
-    300; // max 300 messages per 10 seconds (media chunks need ~250)
+    5000; // 5000 msgs / 10s — было 200, при таком лимите подписчики канала
+// не получали полный набор chunks для фото/стикеров/видео (типичный пост
+// ≈ сотни–тысячи 90-байтовых кусков). Каждый пакет очень маленький, поэтому
+// поднятие лимита безопасно (≈5 кб/с per user в худшем случае).
 
 /// Opaque encrypted blobs per Ed25519 identity (список каналов + метаданные синхронизации
 /// аккаунта — клиент шифрует, relay не читает содержимое).
@@ -105,7 +111,11 @@ final Map<String, String> _accountBlobs = {};
 final Map<String, Map<String, Map<String, dynamic>>> _mailbox = {};
 
 const _mailboxFile = 'relay_mailbox.json';
-const _mailboxMaxPerRecipient = 5000;
+const _mailboxMaxPerRecipient = 300; // ~150 KB per recipient at ~500 B/msg
+
+/// Debounce timer for mailbox persistence — avoids writing to disk on
+/// every packet (which caused 97%+ CPU and 37 GB/hour block I/O).
+Timer? _mailboxPersistTimer;
 
 /// Stored Web Push subscriptions by recipient public key.
 final Map<String, List<Map<String, dynamic>>> _pushSubscriptions = {};
@@ -411,6 +421,8 @@ void _loadBotDirectory() {
       final m = Map<String, dynamic>.from(item);
       final id = (m['botId'] as String?)?.toLowerCase();
       if (id == null || !RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) continue;
+      m['commands'] = _parseBotCommandsInput(m['commands']) ??
+          <Map<String, dynamic>>[];
       _botDirectory[id] = m;
     }
     stdout.writeln(
@@ -449,6 +461,7 @@ void _sendBotDirSnapshot(WebSocketChannel ws) {
       'bannerUrl': m['bannerUrl'] ?? '',
       'verified': m['verified'] == true,
       'blocked': m['blocked'] == true,
+      'commands': _commandsForPublicRow(m),
     });
   }
   if (out.isEmpty) return;
@@ -482,6 +495,236 @@ bool _isBotBlockedOrRevoked(String botId) {
   final row = _botDirectory[botId];
   if (row == null) return false;
   return row['revoked'] == true || row['blocked'] == true;
+}
+
+String? _normalizeBotHandleQuery(String raw) {
+  var s = raw.trim().toLowerCase();
+  if (s.startsWith('@')) s = s.substring(1);
+  s = s.replaceAll(RegExp(r'[^a-z0-9_]'), '');
+  if (s.length < 2 || s.length > 32) return null;
+  return s;
+}
+
+/// Публичный список команд из строки каталога (для snapshot / bot_info).
+List<Map<String, dynamic>> _commandsForPublicRow(Map<String, dynamic> row) {
+  final raw = row['commands'];
+  final parsed = _parseBotCommandsInput(raw);
+  return parsed ?? const <Map<String, dynamic>>[];
+}
+
+/// Возвращает `null`, если список невалиден.
+List<Map<String, dynamic>>? _parseBotCommandsInput(dynamic raw) {
+  if (raw == null) return const <Map<String, dynamic>>[];
+  if (raw is! List) return null;
+  if (raw.length > 32) return null;
+  final out = <Map<String, dynamic>>[];
+  for (final item in raw) {
+    if (item is! Map) return null;
+    final cmd = _jsonString(item['cmd']).trim();
+    final desc = _jsonString(item['desc']).trim();
+    if (cmd.isEmpty || cmd.length > 64) return null;
+    if (!cmd.startsWith('/')) return null;
+    if (!RegExp(r'^/[a-z0-9_]{1,63}$').hasMatch(cmd)) return null;
+    if (desc.length > 256) return null;
+    out.add({'cmd': cmd, 'desc': desc});
+  }
+  return out;
+}
+
+Map<String, dynamic>? _botRowByHandleNorm(String handleNorm) {
+  for (final m in _botDirectory.values) {
+    if (m['revoked'] == true) continue;
+    final h = (m['handle'] as String?)?.toLowerCase() ?? '';
+    if (h == handleNorm) return m;
+  }
+  return null;
+}
+
+void _handleBotInfoGet(_User user, Map<String, dynamic> msg) {
+  final reqId = _jsonString(msg['reqId']).trim();
+  void send(Map<String, dynamic> body) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_info_result',
+        'reqId': reqId,
+        ...body,
+      }));
+    } catch (_) {}
+  }
+
+  final hNorm = _normalizeBotHandleQuery(_jsonString(msg['handle']));
+  if (hNorm == null) {
+    send({'ok': false, 'error': 'bad_handle', 'handle': _jsonString(msg['handle'])});
+    return;
+  }
+  final row = _botRowByHandleNorm(hNorm);
+  if (row == null) {
+    send({'ok': false, 'error': 'not_found', 'handle': hNorm});
+    return;
+  }
+  final id = (row['botId'] as String?)?.toLowerCase() ?? '';
+  if (id.length != 64) {
+    send({'ok': false, 'error': 'not_found', 'handle': hNorm});
+    return;
+  }
+  final handle = _jsonString(row['handle']);
+  final dn = _jsonString(row['displayName']).trim();
+  final desc = _jsonString(row['description']).trim();
+  send({
+    'ok': true,
+    'handle': handle.isEmpty ? hNorm : handle,
+    'displayName': dn.isEmpty ? handle : dn,
+    'description': desc,
+    'verified': row['verified'] == true,
+    'botPublicKey': id,
+    'avatarUrl': _jsonString(row['avatarUrl']).trim(),
+    'bannerUrl': _jsonString(row['bannerUrl']).trim(),
+    'commands': _commandsForPublicRow(row),
+  });
+}
+
+void _handleBotCommandsSet(_User user, Map<String, dynamic> msg) {
+  unawaited(_handleBotCommandsSetAsync(user, msg));
+}
+
+Future<void> _handleBotCommandsSetAsync(
+  _User user,
+  Map<String, dynamic> msg,
+) async {
+  void ack(bool ok, String err, String reqId) {
+    try {
+      user.ws.sink.add(jsonEncode({
+        'type': 'bot_commands_set_ack',
+        'ok': ok,
+        if (!ok) 'error': err,
+        'reqId': reqId,
+      }));
+    } catch (_) {}
+  }
+
+  final reqId = _jsonString(msg['reqId']).trim();
+  final payloadJson = msg['payload'] as String?;
+  final signatureHex = msg['signature'] as String?;
+
+  if (payloadJson != null &&
+      payloadJson.isNotEmpty &&
+      payloadJson.length <= 16384 &&
+      signatureHex != null &&
+      signatureHex.length == 128) {
+    Map<String, dynamic> obj;
+    try {
+      obj = jsonDecode(payloadJson) as Map<String, dynamic>;
+    } catch (_) {
+      ack(false, 'bad_json', '');
+      return;
+    }
+    final rid = _jsonString(obj['reqId']).trim();
+    if (rid.length > 64) {
+      ack(false, 'bad_request', rid);
+      return;
+    }
+    if (obj['v'] != 1) {
+      ack(false, 'bad_version', rid);
+      return;
+    }
+    final owner = _jsonString(obj['owner']).toLowerCase().trim();
+    if (owner != user.publicKey || !RegExp(r'^[0-9a-f]{64}$').hasMatch(owner)) {
+      ack(false, 'owner_mismatch', rid);
+      return;
+    }
+    final botId = _jsonString(obj['botId']).toLowerCase().trim();
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(botId)) {
+      ack(false, 'bad_bot_id', rid);
+      return;
+    }
+    final ts = (obj['ts'] as num?)?.toInt() ?? 0;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if ((nowMs - ts).abs() > const Duration(minutes: 10).inMilliseconds) {
+      ack(false, 'stale_ts', rid);
+      return;
+    }
+    if (!obj.containsKey('commands')) {
+      ack(false, 'missing_commands', rid);
+      return;
+    }
+    if (!_checkBotOwnerPatchRate(owner)) {
+      ack(false, 'rate_limited', rid);
+      return;
+    }
+    final sigOk = await _verifyEd25519SignatureOnUtf8(
+      payloadJson,
+      signatureHex,
+      owner,
+    );
+    if (!sigOk) {
+      ack(false, 'bad_signature', rid);
+      return;
+    }
+    final row = _botDirectory[botId];
+    if (row == null || row['revoked'] == true) {
+      ack(false, 'not_found', rid);
+      return;
+    }
+    if ((row['ownerEd25519Pub'] as String?)?.toLowerCase() != owner) {
+      ack(false, 'not_owner', rid);
+      return;
+    }
+    final parsed = _parseBotCommandsInput(obj['commands']);
+    if (parsed == null) {
+      ack(false, 'bad_commands', rid);
+      return;
+    }
+    row['commands'] = parsed;
+    row['updatedAt'] = nowMs;
+    _persistBotDirectory();
+    _broadcastBotDirSnapshotToAll();
+    stdout.writeln('[RLINK][Relay] bot_commands_set owner=$owner bot=$botId n=${parsed.length}');
+    ack(true, '', rid);
+    return;
+  }
+
+  final apiToken = msg['apiToken'] as String?;
+  if (apiToken == null || apiToken.isEmpty) {
+    ack(false, 'bad_request', reqId);
+    return;
+  }
+  final tokenHash = _sha256HexUtf8(apiToken);
+  String? botId;
+  for (final e in _botDirectory.entries) {
+    if (e.value['revoked'] == true) continue;
+    if ((e.value['apiTokenHash'] as String?) == tokenHash) {
+      botId = e.key;
+      break;
+    }
+  }
+  if (botId == null) {
+    ack(false, 'bad_token', reqId);
+    return;
+  }
+  if (user.publicKey != botId) {
+    ack(false, 'wrong_connection', reqId);
+    return;
+  }
+  if (!_checkBotOwnerPatchRate(botId)) {
+    ack(false, 'rate_limited', reqId);
+    return;
+  }
+  final parsed = _parseBotCommandsInput(msg['commands']);
+  if (parsed == null) {
+    ack(false, 'bad_commands', reqId);
+    return;
+  }
+  final row = _botDirectory[botId];
+  if (row == null || row['revoked'] == true) {
+    ack(false, 'not_found', reqId);
+    return;
+  }
+  row['commands'] = parsed;
+  row['updatedAt'] = DateTime.now().millisecondsSinceEpoch;
+  _persistBotDirectory();
+  _broadcastBotDirSnapshotToAll();
+  stdout.writeln('[RLINK][Relay] bot_commands_set apiToken bot=$botId n=${parsed.length}');
+  ack(true, '', reqId);
 }
 
 String _jsonString(dynamic v) => v == null ? '' : v.toString();
@@ -739,6 +982,7 @@ void _handleBotClaim(_User user, Map<String, dynamic> msg) {
     'bannerUrl': '',
     'verified': false,
     'blocked': false,
+    'commands': <Map<String, dynamic>>[],
   };
   _persistBotDirectory();
 
@@ -1255,12 +1499,18 @@ void _loadMailbox() {
   }
 }
 
+/// Schedule a mailbox write 3 seconds after the last change.
+/// Multiple rapid changes collapse into a single disk write.
 void _persistMailbox() {
-  try {
-    File(_mailboxFile).writeAsStringSync(jsonEncode(_mailbox));
-  } catch (e) {
-    stdout.writeln('[RLINK][Relay] mailbox save: $e');
-  }
+  _mailboxPersistTimer?.cancel();
+  _mailboxPersistTimer = Timer(const Duration(seconds: 3), () async {
+    try {
+      final data = jsonEncode(_mailbox);
+      await File(_mailboxFile).writeAsString(data);
+    } catch (e) {
+      stdout.writeln('[RLINK][Relay] mailbox save: $e');
+    }
+  });
 }
 
 void _queueForRecipient(
@@ -1470,11 +1720,9 @@ bool _checkRate(String publicKey) {
 
 void _handleMessage(_User user, dynamic raw) {
   if (raw is! String) return;
-  // 100 MB limit for blobs (voice/video/files). Большие файлы клиент
-  // всё равно режет на чанки (~90 KB каждый), так что в этот лимит
-  // упираются только крупные single-blob сообщения (длинные голосовые,
-  // большие single-shot фото/видео без чанкования).
-  if (raw.length > 100 * 1024 * 1024) return;
+  // 50 MB per-message hard limit. Client already chunks large files into
+  // ~90 KB pieces automatically, so this backstop is rarely reached.
+  if (raw.length > 50 * 1024 * 1024) return;
 
   Map<String, dynamic> msg;
   try {
@@ -1500,7 +1748,9 @@ void _handleMessage(_User user, dynamic raw) {
       type != 'bot_register_start' &&
       type != 'bot_claim' &&
       type != 'bot_owner_list' &&
-      type != 'bot_owner_patch') {
+      type != 'bot_owner_patch' &&
+      type != 'bot_info_get' &&
+      type != 'bot_commands_set') {
     if (!_checkRate(user.publicKey)) {
       user.ws.sink.add(jsonEncode({'type': 'error', 'msg': 'rate_limited'}));
       return;
@@ -1540,6 +1790,12 @@ void _handleMessage(_User user, dynamic raw) {
       break;
     case 'bot_owner_patch':
       _handleBotOwnerPatch(user, msg);
+      break;
+    case 'bot_info_get':
+      _handleBotInfoGet(user, msg);
+      break;
+    case 'bot_commands_set':
+      _handleBotCommandsSet(user, msg);
       break;
     case 'admin_bot_list':
       _handleAdminBotList(user, msg);
@@ -1966,6 +2222,7 @@ shelf.Handler _wsHandler() {
           final cc = ws.closeCode;
           final cr = ws.closeReason;
           _users.remove(user!.publicKey);
+          _rateLimits.remove(user!.publicKey); // free rate-limit memory on disconnect
           _broadcastPresence(user!.publicKey, false);
           final id = user!.nick.isEmpty ? user!.shortId : user!.nick;
           final detail = cc == null
