@@ -361,11 +361,13 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 const SizedBox(height: 16),
 
                 // ── Цвет аватара ──────────────────────────────
-                AvatarColorPicker(
-                  selected: _selectedColor,
-                  onSelected: (c) => setState(() => _selectedColor = c),
-                ),
-                const SizedBox(height: 24),
+                if (_selectedImagePath == null) ...[
+                  AvatarColorPicker(
+                    selected: _selectedColor,
+                    onSelected: (c) => setState(() => _selectedColor = c),
+                  ),
+                  const SizedBox(height: 24),
+                ],
 
                 // ── Поле имени ────────────────────────────────
                 TextField(

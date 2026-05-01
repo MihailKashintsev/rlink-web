@@ -86,7 +86,7 @@ class VoiceService {
     _audioSessionConfigured = c;
     try {
       final session = await AudioSession.instance;
-      await session.configure(AudioSessionConfiguration(
+      await session.configure(const AudioSessionConfiguration(
         avAudioSessionCategory: AVAudioSessionCategory.playback,
         avAudioSessionCategoryOptions:
             AVAudioSessionCategoryOptions.duckOthers,
@@ -94,7 +94,7 @@ class VoiceService {
         avAudioSessionRouteSharingPolicy:
             AVAudioSessionRouteSharingPolicy.defaultPolicy,
         avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
-        androidAudioAttributes: const AndroidAudioAttributes(
+        androidAudioAttributes: AndroidAudioAttributes(
           contentType: AndroidAudioContentType.speech,
           flags: AndroidAudioFlags.none,
           usage: AndroidAudioUsage.media,
@@ -115,6 +115,9 @@ class VoiceService {
 
   /// Прогресс воспроизведения [0.0 – 1.0].
   final ValueNotifier<double> playProgress = ValueNotifier(0);
+
+  /// Полная длительность текущего трека (Duration.zero — неизвестна).
+  final ValueNotifier<Duration> playDuration = ValueNotifier(Duration.zero);
 
   /// Мини-плеер: заголовок, позиция в очереди, пауза.
   final ValueNotifier<VoicePlaybackSession?> playbackSession =
@@ -152,6 +155,31 @@ class VoiceService {
 
   /// Отменяет запись без сохранения.
   Future<void> cancelRecording() => _recorder.cancel();
+
+  /// Пауза текущей записи (если поддерживается платформой).
+  Future<void> pauseRecording() async {
+    try {
+      await _recorder.pause();
+    } catch (e) {
+      debugPrint('[Voice] pauseRecording failed: $e');
+    }
+  }
+
+  /// Продолжить запись после паузы.
+  Future<void> resumeRecording() async {
+    try {
+      await _recorder.resume();
+    } catch (e) {
+      debugPrint('[Voice] resumeRecording failed: $e');
+    }
+  }
+
+  /// Поток амплитуды микрофона (дБ). Удобно для живой волны при записи.
+  Stream<double> amplitudeStream({
+    Duration interval = const Duration(milliseconds: 80),
+  }) {
+    return _recorder.onAmplitudeChanged(interval).map((a) => a.current);
+  }
 
   Future<void> _disposePlaybackOutputs() async {
     _audioPosSub?.cancel();
@@ -242,12 +270,18 @@ class VoiceService {
   Future<void> _startAudioItem(PlaybackQueueItem item) async {
     await _ensurePlaybackAudioSession();
     _player = AudioPlayer();
+    playDuration.value = Duration.zero;
+    _player!.onDurationChanged.listen((dur) {
+      if (dur.inMilliseconds > 0) playDuration.value = dur;
+    });
     _audioPosSub = _player!.onPositionChanged.listen((pos) async {
       try {
-        final dur = await _player?.getDuration();
+        final dur = playDuration.value.inMilliseconds > 0
+            ? playDuration.value
+            : await _player?.getDuration();
         if (dur != null && dur.inMilliseconds > 0) {
-          _setProgressClamped(
-              pos.inMilliseconds / dur.inMilliseconds);
+          playDuration.value = dur;
+          _setProgressClamped(pos.inMilliseconds / dur.inMilliseconds);
         }
       } catch (e, st) {
         debugPrint('[Voice] position tick: $e\n$st');
@@ -256,7 +290,26 @@ class VoiceService {
     _audioCompleteSub = _player!.onPlayerComplete.listen((_) {
       unawaited(_advanceQueue());
     });
+    _player!.onPlayerStateChanged.listen((state) {}, onError: (e) {
+      debugPrint('[Voice] player error: $e');
+      unawaited(_advanceQueue());
+    });
     await _player!.play(DeviceFileSource(item.path));
+  }
+
+  /// Перемотка на позицию [progress] ∈ [0.0, 1.0].
+  Future<void> seekTo(double progress) async {
+    final p = progress.clamp(0.0, 1.0);
+    final dur = playDuration.value;
+    if (dur.inMilliseconds <= 0) return;
+    final target = Duration(
+        milliseconds: (p * dur.inMilliseconds).round());
+    try {
+      await _player?.seek(target);
+      _setProgressClamped(p);
+    } catch (e) {
+      debugPrint('[Voice] seek error: $e');
+    }
   }
 
   Future<void> _startVideoItem(PlaybackQueueItem item) async {
@@ -344,6 +397,7 @@ class VoiceService {
     playbackSession.value = null;
     currentlyPlaying.value = null;
     _setProgressClamped(0);
+    playDuration.value = Duration.zero;
   }
 
   void dispose() {

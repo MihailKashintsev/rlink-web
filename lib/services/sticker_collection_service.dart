@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -17,7 +18,59 @@ class StickerCollectionService {
   final ValueNotifier<int> version = ValueNotifier(0);
   static const _jsonName = 'sticker_collection.json';
   static const _packsJsonName = 'sticker_packs.json';
+  static const _defaultPackAssetPrefix = 'assets/sticker_packs/default/';
+  static const _defaultPackAssetNames = <String>[
+    'sticker_01.png',
+    'sticker_02.png',
+    'sticker_03.png',
+    'sticker_04.png',
+    'sticker_05.png',
+    'sticker_06.png',
+    'sticker_07.png',
+    'sticker_08.png',
+    'sticker_09.png',
+    'sticker_10.png',
+    'sticker_11.png',
+    'sticker_12.png',
+  ];
   final _uuid = const Uuid();
+
+  /// Инициализация коллекции и подстановка встроенного набора при пустом списке.
+  Future<void> init() async {
+    await ensureInitialized();
+    await _seedDefaultPackIfEmpty();
+  }
+
+  Future<void> _seedDefaultPackIfEmpty() async {
+    final packs = await _readPacks();
+    if (packs.isNotEmpty) return;
+
+    final docs = await getApplicationDocumentsDirectory();
+    final imgDir = Directory(p.join(docs.path, 'images'));
+    if (!imgDir.existsSync()) imgDir.createSync(recursive: true);
+
+    final rels = <String>[];
+    for (final name in _defaultPackAssetNames) {
+      try {
+        final data =
+            await rootBundle.load('$_defaultPackAssetPrefix$name');
+        final destName =
+            'stk_default_${name.replaceAll('.png', '').replaceAll('.webp', '')}${p.extension(name)}';
+        final dest = File(p.join(imgDir.path, destName));
+        await dest.writeAsBytes(data.buffer.asUint8List());
+        rels.add(p.join('images', destName));
+      } catch (e, st) {
+        debugPrint('[Stickers] default asset $name: $e\n$st');
+      }
+    }
+    if (rels.isEmpty) return;
+
+    await createPack(
+      title: 'Rlink',
+      relPaths: rels,
+    );
+    debugPrint('[Stickers] seeded default pack (${rels.length} files)');
+  }
 
   Future<File> _jsonFile() async {
     final d = await getApplicationDocumentsDirectory();

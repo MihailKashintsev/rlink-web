@@ -71,19 +71,23 @@ class RelayService with WidgetsBindingObserver {
   /// Один раз навешиваем lifecycle-наблюдатель.
   bool _lifecycleAttached = false;
 
-  /// Публичный relay (Tuna: https://rlink.ru.tuna.am → приложение подключается по wss).
-  static const defaultServerUrl = 'wss://rlink.ru.tuna.am';
+  /// Публичный relay (VPS FirstByte, MSK — wss через nginx).
+  static const defaultServerUrl = 'wss://185.244.172.90.nip.io';
   static const List<String> fallbackServerUrls = <String>[
     defaultServerUrl,
-    'wss://ru.tuna.am',
   ];
 
   WebSocketChannel? _channel;
+  Stream<dynamic>? _channelStream;
   StreamSubscription? _subscription;
   Timer? _pingTimer;
   Timer? _reconnectTimer;
   bool _disposed = false;
   bool _intentionalClose = false;
+  bool _reconnectInProgress = false;
+  DateTime _lastReconnectRequestAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
+  int _connectEpoch = 0;
 
   /// Current connection state
   final ValueNotifier<RelayState> state = ValueNotifier(RelayState.disconnected);
@@ -139,12 +143,28 @@ class RelayService with WidgetsBindingObserver {
 
   final Map<String, Completer<Map<String, dynamic>>> _botOwnerAckCompleters = {};
   final Map<String, Completer<Map<String, dynamic>>> _adminBotAckCompleters = {};
+  final Map<String, Completer<Map<String, dynamic>>> _botInfoAckCompleters = {};
+  final Map<String, Completer<Map<String, dynamic>>> _botCommandsSetAckCompleters =
+      {};
 
   /// Peer X25519 keys discovered via relay
   final Map<String, String> _peerX25519Keys = {};
 
   /// Ed25519 ключи из последнего `bot_dir_snapshot` (сторонние боты relay).
   final Set<String> _relayCatalogBotIds = <String>{};
+
+  /// `botId` (lower) → handle из последнего снимка каталога.
+  final Map<String, String> _relayBotHandleById = {};
+
+  /// `botId` (lower) → verified.
+  final Map<String, bool> _relayBotVerifiedById = {};
+
+  /// `botId` (lower) → список `{'cmd','desc'}` из снимка / `fetchBotInfo`.
+  final Map<String, List<Map<String, String>>> _relayBotCommandsById = {};
+
+  /// Кэш `fetchBotInfo` по нормализованному handle (без @).
+  final Map<String, Map<String, dynamic>> _botInfoCache = {};
+  final Map<String, DateTime> _botInfoCacheExpires = {};
 
   /// Публичные URL аватар/баннер ботов (каталог relay).
   final Map<String, String> _relayBotAvatarUrl = {};
@@ -213,6 +233,196 @@ class RelayService with WidgetsBindingObserver {
     return k.length == 64 && _relayCatalogBotIds.contains(k);
   }
 
+  /// Handle из `bot_dir_snapshot` (нижний регистр), если бот в каталоге.
+  String? relayCatalogBotHandle(String publicKey) {
+    final k = publicKey.trim().toLowerCase();
+    if (k.length != 64) return null;
+    return _relayBotHandleById[k];
+  }
+
+  bool relayCatalogBotVerified(String publicKey) {
+    final k = publicKey.trim().toLowerCase();
+    if (k.length != 64) return false;
+    return _relayBotVerifiedById[k] ?? false;
+  }
+
+  /// Команды для автодополнения и UI (копия).
+  List<Map<String, String>> relayCatalogBotCommands(String publicKey) {
+    final k = publicKey.trim().toLowerCase();
+    if (k.length != 64) return const [];
+    final raw = _relayBotCommandsById[k];
+    if (raw == null || raw.isEmpty) return const [];
+    return raw
+        .map((e) => Map<String, String>.from(e))
+        .toList(growable: false);
+  }
+
+  static String _normalizeBotInfoHandle(String raw) {
+    var s = raw.trim().toLowerCase();
+    if (s.startsWith('@')) s = s.substring(1);
+    s = s.replaceAll(RegExp(r'[^a-z0-9_]'), '');
+    return s;
+  }
+
+  List<Map<String, String>> _parseSnapshotBotCommands(dynamic raw) {
+    if (raw is! List) return const [];
+    final out = <Map<String, String>>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final cmd = (item['cmd'] as String?)?.trim() ?? '';
+      final desc = (item['desc'] as String?)?.trim() ?? '';
+      if (cmd.isEmpty || !cmd.startsWith('/')) continue;
+      out.add({'cmd': cmd, 'desc': desc});
+      if (out.length >= 32) break;
+    }
+    return out;
+  }
+
+  void _mergeBotInfoIntoRelayMaps(Map<String, dynamic> info) {
+    final id = (info['botPublicKey'] as String?)?.toLowerCase().trim() ?? '';
+    if (id.length != 64) return;
+    final h = (info['handle'] as String?)?.trim() ?? '';
+    if (h.isNotEmpty) {
+      _relayBotHandleById[id] = h.toLowerCase();
+    }
+    final v = _relayJsonBool(info['verified']);
+    if (v != null) {
+      _relayBotVerifiedById[id] = v;
+    }
+    final cmds = info['commands'];
+    if (cmds is List) {
+      final parsed = _parseSnapshotBotCommands(cmds);
+      if (parsed.isNotEmpty) {
+        _relayBotCommandsById[id] = parsed;
+      } else {
+        _relayBotCommandsById.remove(id);
+      }
+    }
+    final av = (info['avatarUrl'] as String?)?.trim() ?? '';
+    final bn = (info['bannerUrl'] as String?)?.trim() ?? '';
+    _applyRelayBotVisualFromSnapshot(id, av, bn);
+    botDirectoryVersion.value++;
+  }
+
+  /// Публичная информация о боте по @handle (кэш 60 с). `null` — офлайн / не найден.
+  Future<Map<String, dynamic>?> fetchBotInfo(String handle) async {
+    final h = _normalizeBotInfoHandle(handle);
+    if (h.length < 2 || h.length > 32) return null;
+    final now = DateTime.now();
+    final exp = _botInfoCacheExpires[h];
+    final cached = _botInfoCache[h];
+    if (cached != null && exp != null && now.isBefore(exp)) {
+      return Map<String, dynamic>.from(cached);
+    }
+    if (!isConnected) return cached != null ? Map<String, dynamic>.from(cached) : null;
+    final reqId = _newBotOwnerReqId();
+    final c = Completer<Map<String, dynamic>>();
+    _botInfoAckCompleters[reqId] = c;
+    try {
+      await _safeSend({
+        'type': 'bot_info_get',
+        'handle': h,
+        'reqId': reqId,
+      }, context: 'bot_info_get');
+      final ack = await c.future.timeout(
+        const Duration(seconds: 15),
+        onTimeout: () {
+          final cc = _botInfoAckCompleters.remove(reqId);
+          if (cc != null && !cc.isCompleted) {
+            cc.complete(<String, dynamic>{'ok': false, 'error': 'timeout'});
+          }
+          return <String, dynamic>{'ok': false, 'error': 'timeout'};
+        },
+      );
+      if (ack['ok'] == true) {
+        final copy = Map<String, dynamic>.from(ack);
+        _botInfoCache[h] = copy;
+        _botInfoCacheExpires[h] = now.add(const Duration(seconds: 60));
+        _mergeBotInfoIntoRelayMaps(copy);
+        return copy;
+      }
+      return null;
+    } catch (e) {
+      _botInfoAckCompleters.remove(reqId);
+      debugPrint('[RLINK][Relay] fetchBotInfo: $e');
+      return null;
+    }
+  }
+
+  /// Владелец: задать список slash-команд бота на relay (подписанный JSON).
+  Future<Map<String, dynamic>> sendBotCommandsSetOwner({
+    required String botId,
+    required List<Map<String, String>> commands,
+  }) async {
+    if (!isConnected) {
+      return {'ok': false, 'error': 'offline'};
+    }
+    final id = botId.toLowerCase().trim();
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) {
+      return {'ok': false, 'error': 'bad_bot_id'};
+    }
+    if (commands.length > 32) {
+      return {'ok': false, 'error': 'too_many_commands'};
+    }
+    for (final e in commands) {
+      final cmd = (e['cmd'] ?? '').trim().toLowerCase();
+      final desc = (e['desc'] ?? '').trim();
+      if (cmd.isEmpty ||
+          cmd.length > 64 ||
+          !RegExp(r'^/[a-z0-9_]{1,63}$').hasMatch(cmd) ||
+          desc.length > 256) {
+        return {'ok': false, 'error': 'bad_command_entry'};
+      }
+    }
+    final owner = CryptoService.instance.publicKeyHex.toLowerCase();
+    if (owner.length != 64) {
+      return {'ok': false, 'error': 'no_keys'};
+    }
+    final reqId = _newBotOwnerReqId();
+    final c = Completer<Map<String, dynamic>>();
+    _botCommandsSetAckCompleters[reqId] = c;
+    try {
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final payloadObj = <String, dynamic>{
+        'v': 1,
+        'owner': owner,
+        'botId': id,
+        'ts': ts,
+        'reqId': reqId,
+        'commands': commands,
+      };
+      final payloadJson = jsonEncode(payloadObj);
+      if (payloadJson.length > 16384) {
+        _botCommandsSetAckCompleters.remove(reqId);
+        return {'ok': false, 'error': 'payload_too_large'};
+      }
+      final sig = await CryptoService.instance.signUtf8Message(payloadJson);
+      if (sig.length != 128) {
+        _botCommandsSetAckCompleters.remove(reqId);
+        return {'ok': false, 'error': 'sign_failed'};
+      }
+      await _safeSend({
+        'type': 'bot_commands_set',
+        'payload': payloadJson,
+        'signature': sig,
+      }, context: 'bot_commands_set_owner');
+      return await c.future.timeout(
+        const Duration(seconds: 45),
+        onTimeout: () {
+          final cc = _botCommandsSetAckCompleters.remove(reqId);
+          if (cc != null && !cc.isCompleted) {
+            cc.complete(<String, dynamic>{'ok': false, 'error': 'timeout'});
+          }
+          return <String, dynamic>{'ok': false, 'error': 'timeout'};
+        },
+      );
+    } catch (e) {
+      _botCommandsSetAckCompleters.remove(reqId);
+      debugPrint('[RLINK][Relay] sendBotCommandsSetOwner: $e');
+      return {'ok': false, 'error': e.toString()};
+    }
+  }
+
   void _applyRelayBotVisualFromSnapshot(String idLower, String avatarUrl, String bannerUrl) {
     final a = avatarUrl.trim();
     final b = bannerUrl.trim();
@@ -261,6 +471,7 @@ class RelayService with WidgetsBindingObserver {
   Future<void> connect() async {
     if (state.value == RelayState.connected ||
         state.value == RelayState.connecting) { return; }
+    final connectEpoch = ++_connectEpoch;
 
     // Режим «только Bluetooth» — relay не используем.
     if (AppSettings.instance.connectionMode < 1) {
@@ -299,8 +510,16 @@ class RelayService with WidgetsBindingObserver {
           await warmupRelayWebSession(httpBase);
         }
         debugPrint('[RLINK][Relay] Connecting to $url');
-        _channel = WebSocketChannel.connect(Uri.parse(url));
-        await _channel!.ready;
+        final ws = WebSocketChannel.connect(Uri.parse(url));
+        await ws.ready;
+        if (connectEpoch != _connectEpoch) {
+          try {
+            await ws.sink.close();
+          } catch (_) {}
+          return;
+        }
+        _channel = ws;
+        _channelStream = ws.stream.asBroadcastStream();
         connectedUrl = url;
         break;
       } catch (e) {
@@ -308,6 +527,7 @@ class RelayService with WidgetsBindingObserver {
           await _channel?.sink.close();
         } catch (_) {}
         _channel = null;
+        _channelStream = null;
         lastConnectError = Exception('$url: $e');
       }
     }
@@ -325,7 +545,19 @@ class RelayService with WidgetsBindingObserver {
     try {
 
       // Listen for messages
-      _subscription = _channel!.stream.listen(
+      final stream = _channelStream;
+      if (stream == null) {
+        throw StateError('relay_stream_not_initialized');
+      }
+      if (connectEpoch != _connectEpoch) {
+        try {
+          await _channel?.sink.close();
+        } catch (_) {}
+        _channel = null;
+        _channelStream = null;
+        return;
+      }
+      _subscription = stream.listen(
         _onMessage,
         onDone: _onDisconnected,
         onError: (e) {
@@ -385,22 +617,43 @@ class RelayService with WidgetsBindingObserver {
 
   /// Force reconnect — disconnect and reconnect immediately.
   Future<void> reconnect() async {
+    final now = DateTime.now();
+    if (_reconnectInProgress) {
+      _relayTrace('[RLINK][Relay] Reconnect skipped: already in progress');
+      return;
+    }
+    if (now.difference(_lastReconnectRequestAt) <
+        const Duration(seconds: 2)) {
+      _relayTrace('[RLINK][Relay] Reconnect skipped: throttled');
+      return;
+    }
+    _lastReconnectRequestAt = now;
+    _reconnectInProgress = true;
     _relayTrace('[RLINK][Relay] Force reconnect requested');
-    _intentionalClose = true;
-    _pingTimer?.cancel();
-    _reconnectTimer?.cancel();
-    _subscription?.cancel();
-    _chunkQueue.clear();
-    _draining = false;
-    try { _channel?.sink.close(); } catch (_) {}
-    _channel = null;
-    state.value = RelayState.disconnected;
-    _intentionalClose = false;
-    await connect();
+    try {
+      _intentionalClose = true;
+      _connectEpoch++;
+      _pingTimer?.cancel();
+      _reconnectTimer?.cancel();
+      await _subscription?.cancel();
+      _chunkQueue.clear();
+      _draining = false;
+      try {
+        await _channel?.sink.close();
+      } catch (_) {}
+      _channel = null;
+      _channelStream = null;
+      state.value = RelayState.disconnected;
+      _intentionalClose = false;
+      await connect();
+    } finally {
+      _reconnectInProgress = false;
+    }
   }
 
   void disconnect() {
     _intentionalClose = true;
+    _connectEpoch++;
     _pingTimer?.cancel();
     _reconnectTimer?.cancel();
     _subscription?.cancel();
@@ -408,6 +661,7 @@ class RelayService with WidgetsBindingObserver {
     _draining = false;
     try { _channel?.sink.close(); } catch (_) {}
     _channel = null;
+    _channelStream = null;
     state.value = RelayState.disconnected;
     lastError.value = null;
     _relayTrace('[RLINK][Relay] Disconnected');
@@ -420,6 +674,7 @@ class RelayService with WidgetsBindingObserver {
     _pingTimer?.cancel();
     _subscription?.cancel();
     _channel = null;
+    _channelStream = null;
     _chunkQueue.clear();
     _draining = false;
     state.value = RelayState.disconnected;
@@ -428,6 +683,18 @@ class RelayService with WidgetsBindingObserver {
         : ' (closeCode=$cc${cr == null || cr.isEmpty ? '' : ', $cr'})';
     _relayTrace('[RLINK][Relay] Disconnected$detail');
     lastError.value = 'Соединение закрыто$detail';
+    for (final c in _botInfoAckCompleters.values) {
+      if (!c.isCompleted) {
+        c.complete(<String, dynamic>{'ok': false, 'error': 'disconnected'});
+      }
+    }
+    _botInfoAckCompleters.clear();
+    for (final c in _botCommandsSetAckCompleters.values) {
+      if (!c.isCompleted) {
+        c.complete(<String, dynamic>{'ok': false, 'error': 'disconnected'});
+      }
+    }
+    _botCommandsSetAckCompleters.clear();
     if (!_intentionalClose && !_disposed) {
       _scheduleReconnect();
     }
@@ -904,6 +1171,32 @@ class RelayService with WidgetsBindingObserver {
           }
           break;
 
+        case 'bot_info_result':
+          final infoRid = msg['reqId']?.toString() ?? '';
+          if (infoRid.isNotEmpty) {
+            final c = _botInfoAckCompleters.remove(infoRid);
+            if (c != null && !c.isCompleted) {
+              final copy = Map<String, dynamic>.from(msg);
+              scheduleMicrotask(() {
+                if (!c.isCompleted) c.complete(copy);
+              });
+            }
+          }
+          break;
+
+        case 'bot_commands_set_ack':
+          final cmdRid = msg['reqId']?.toString() ?? '';
+          if (cmdRid.isNotEmpty) {
+            final c = _botCommandsSetAckCompleters.remove(cmdRid);
+            if (c != null && !c.isCompleted) {
+              final copy = Map<String, dynamic>.from(msg);
+              scheduleMicrotask(() {
+                if (!c.isCompleted) c.complete(copy);
+              });
+            }
+          }
+          break;
+
         case 'bot_dir_snapshot':
           _applyBotDirectorySnapshot(msg['bots'] as List<dynamic>?);
           break;
@@ -1201,6 +1494,9 @@ class RelayService with WidgetsBindingObserver {
   void _applyBotDirectorySnapshot(List<dynamic>? bots) {
     if (bots == null) return;
     _relayCatalogBotIds.clear();
+    _relayBotHandleById.clear();
+    _relayBotVerifiedById.clear();
+    _relayBotCommandsById.clear();
     if (bots.isEmpty) {
       botDirectoryVersion.value++;
       debugPrint('[RLINK][Relay] bot_dir_snapshot empty — каталог ботов очищен');
@@ -1213,6 +1509,15 @@ class RelayService with WidgetsBindingObserver {
       final x = (m['x25519Pub'] as String?)?.trim() ?? '';
       if (id.length != 64 || x.isEmpty) continue;
       _relayCatalogBotIds.add(id);
+      final handleRaw = (m['handle'] as String?)?.trim() ?? '';
+      if (handleRaw.isNotEmpty) {
+        _relayBotHandleById[id] = handleRaw.toLowerCase();
+      }
+      _relayBotVerifiedById[id] = m['verified'] == true;
+      final cmds = _parseSnapshotBotCommands(m['commands']);
+      if (cmds.isNotEmpty) {
+        _relayBotCommandsById[id] = cmds;
+      }
       _peerX25519Keys[id] = x;
       BleService.instance.registerPeerX25519Key(id, x);
       unawaited(ChatStorageService.instance.updateContactX25519Key(id, x));
@@ -1352,6 +1657,7 @@ class RelayService with WidgetsBindingObserver {
 
     _peerOnline[publicKey] = online;
     presenceVersion.value++;
+    _recomputeOnlineCountFromPresence();
 
     // Store X25519 key if provided (for E2E encryption with relay-discovered peers)
     final x25519Key = msg['x25519'] as String?;
@@ -1377,6 +1683,18 @@ class RelayService with WidgetsBindingObserver {
     if (online) {
       onPeerOnline?.call(publicKey);
     }
+  }
+
+  void _recomputeOnlineCountFromPresence() {
+    final myKey = CryptoService.instance.publicKeyHex.trim().toLowerCase();
+    var peersOnline = 0;
+    for (final entry in _peerOnline.entries) {
+      if (!entry.value) continue;
+      if (myKey.isNotEmpty && entry.key.toLowerCase() == myKey) continue;
+      peersOnline++;
+    }
+    final selfOnline = isConnected ? 1 : 0;
+    onlineCount.value = peersOnline + selfOnline;
   }
 
   /// In-flight blob chunk assemblies, keyed by msgId.
@@ -1470,10 +1788,10 @@ class RelayService with WidgetsBindingObserver {
     final to = msg['to'] as String?;
     final status = msg['status'] as String?;
     if (to == null || status == null) return;
-    if (status == 'offline') {
+    if (status == 'offline' || status == 'queued_offline') {
       _peerOnline[to] = false;
       presenceVersion.value++;
-      debugPrint('[RLINK][Relay] Delivery FAILED → ${to.substring(0, 8)} is OFFLINE');
+      debugPrint('[RLINK][Relay] Delivery FAILED → ${to.substring(0, 8)} is OFFLINE ($status)');
       onDeliveryFailed?.call(to);
     } else if (status == 'error') {
       debugPrint('[RLINK][Relay] Delivery ERROR → ${to.substring(0, 8)}');

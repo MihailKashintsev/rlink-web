@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 
 /**
  * Повышает приоритет процесса в фоне (BLE + relay + локальные уведомления),
@@ -22,8 +23,14 @@ class RlinkForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startAsFg()
-            ACTION_STOP -> stopAsFg()
+            ACTION_STOP -> {
+                // If this instance was started with startForegroundService, Android
+                // requires startForeground() to be called before stopSelf().
+                startAsFg()
+                stopAsFg()
+                return START_NOT_STICKY
+            }
+            ACTION_START, null -> startAsFg()
             else -> startAsFg()
         }
         // Keep process alive in background: Android may recreate the service after kill.
@@ -85,7 +92,7 @@ class RlinkForegroundService : Service() {
             try {
                 val restartIntent = Intent(applicationContext, RlinkForegroundService::class.java)
                     .setAction(ACTION_START)
-                startService(restartIntent)
+                ContextCompat.startForegroundService(applicationContext, restartIntent)
             } catch (_: Exception) { }
         }, 1200)
     }

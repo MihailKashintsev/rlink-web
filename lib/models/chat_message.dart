@@ -30,6 +30,8 @@ class ChatMessage {
   final String? forwardFromChannelId;
   /// JSON приглашения в канал/группу в ЛС (`kind` + поля payload), для кнопок в пузыре.
   final String? invitePayloadJson;
+  /// Карточка набора стикеров из чата (`type`: `sticker_pack`); в БД — колонка [invite_payload].
+  final Map<String, dynamic>? stickerPackPayload;
   /// Id файлов, загруженных в GigaChat (чат с ИИ); хранится как JSON-массив в БД.
   final List<String> gigachatAttachmentIds;
 
@@ -56,6 +58,7 @@ class ChatMessage {
     this.forwardFromNick,
     this.forwardFromChannelId,
     this.invitePayloadJson,
+    this.stickerPackPayload,
     this.gigachatAttachmentIds = const [],
   });
 
@@ -77,6 +80,7 @@ class ChatMessage {
     String? forwardFromNick,
     String? forwardFromChannelId,
     String? invitePayloadJson,
+    Map<String, dynamic>? stickerPackPayload,
     List<String>? gigachatAttachmentIds,
   }) =>
       ChatMessage(
@@ -103,6 +107,7 @@ class ChatMessage {
         forwardFromChannelId:
             forwardFromChannelId ?? this.forwardFromChannelId,
         invitePayloadJson: invitePayloadJson ?? this.invitePayloadJson,
+        stickerPackPayload: stickerPackPayload ?? this.stickerPackPayload,
         gigachatAttachmentIds:
             gigachatAttachmentIds ?? this.gigachatAttachmentIds,
       );
@@ -129,7 +134,9 @@ class ChatMessage {
         'forward_from_id': forwardFromId,
         'forward_from_nick': forwardFromNick,
         'forward_from_channel_id': forwardFromChannelId,
-        'invite_payload': invitePayloadJson,
+        'invite_payload': stickerPackPayload != null
+            ? jsonEncode(stickerPackPayload)
+            : invitePayloadJson,
         'gigachat_attachment_ids': gigachatAttachmentIds.isEmpty
             ? null
             : jsonEncode(gigachatAttachmentIds),
@@ -151,6 +158,22 @@ class ChatMessage {
       try {
         gigaAtt = (jsonDecode(gigaRaw) as List).cast<String>();
       } catch (_) {}
+    }
+    String? invitePayloadJson;
+    Map<String, dynamic>? stickerPackPayload;
+    final invRaw = m['invite_payload'] as String?;
+    if (invRaw != null && invRaw.isNotEmpty) {
+      try {
+        final dec = jsonDecode(invRaw);
+        if (dec is Map<String, dynamic> &&
+            dec['type'] == ChatMessage.kStickerPackPayloadType) {
+          stickerPackPayload = dec;
+        } else {
+          invitePayloadJson = invRaw;
+        }
+      } catch (_) {
+        invitePayloadJson = invRaw;
+      }
     }
     // Resolve potentially stale iOS sandbox paths for media files
     final resolve = ImageService.instance.resolveStoredPath;
@@ -178,10 +201,13 @@ class ChatMessage {
       forwardFromId: m['forward_from_id'] as String?,
       forwardFromNick: m['forward_from_nick'] as String?,
       forwardFromChannelId: m['forward_from_channel_id'] as String?,
-      invitePayloadJson: m['invite_payload'] as String?,
+      invitePayloadJson: invitePayloadJson,
+      stickerPackPayload: stickerPackPayload,
       gigachatAttachmentIds: gigaAtt,
     );
   }
+
+  static const kStickerPackPayloadType = 'sticker_pack';
 }
 
 enum MessageStatus { sending, sent, delivered, failed }

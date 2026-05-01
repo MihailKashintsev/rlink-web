@@ -186,6 +186,10 @@ class LocationMapScreen extends StatefulWidget {
 class _LocationMapScreenState extends State<LocationMapScreen> {
   static const _kFallbackLat = 55.751244;
   static const _kFallbackLng = 37.618423;
+  static const _kEnableInAppGoogle3d = bool.fromEnvironment(
+    'ENABLE_INAPP_GOOGLE_3D_MAP',
+    defaultValue: false,
+  );
 
   final _mapController = MapController();
   final _searchController = TextEditingController();
@@ -208,7 +212,8 @@ class _LocationMapScreenState extends State<LocationMapScreen> {
   String? _addressText;
   bool _google3dEnabled = true;
 
-  bool get _canUseGoogleInApp => Platform.isAndroid || Platform.isIOS;
+  bool get _canUseGoogleInApp =>
+      _kEnableInAppGoogle3d && (Platform.isAndroid || Platform.isIOS);
 
   @override
   void initState() {
@@ -609,6 +614,16 @@ class _LocationMapScreenState extends State<LocationMapScreen> {
                       fontSize: 12,
                     ),
                   ),
+                  if (!_canUseGoogleInApp) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '3D режим доступен во внешних Яндекс/Google картах',
+                      style: TextStyle(
+                        color: cs.onSurface.withValues(alpha: 0.65),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Row(
                     children: [

@@ -447,6 +447,26 @@ class MediaUploadQueue {
     debugPrint('[UploadQueue] Cleared all tasks');
   }
 
+  /// Сброс задачи(ч) по [msgId] в pending — после ошибки или ручного «Повторить».
+  Future<bool> retryTaskForMsgId(String msgId) async {
+    final db = _db;
+    if (db == null) return false;
+    final n = await db.update(
+      'upload_queue',
+      {
+        'status': UploadStatus.pending.index,
+        'retryCount': 0,
+      },
+      where: 'msgId = ?',
+      whereArgs: [msgId],
+    );
+    if (n > 0) {
+      unawaited(processQueue());
+      return true;
+    }
+    return false;
+  }
+
   /// All pending task count (for UI badges).
   Future<int> pendingCount() async {
     final db = _db;

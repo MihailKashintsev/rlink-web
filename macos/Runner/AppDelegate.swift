@@ -1,6 +1,7 @@
 import Cocoa
 import FlutterMacOS
 import CoreBluetooth
+import GoogleSignIn
 
 @main
 class AppDelegate: FlutterAppDelegate {
@@ -26,6 +27,12 @@ class AppDelegate: FlutterAppDelegate {
 
     override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return true
+    }
+
+    override func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            GIDSignIn.sharedInstance.handle(url)
+        }
     }
 
     override func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
@@ -340,353 +341,376 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
     final isAuthor = story.authorId == myId;
     final showQuickBar = AppSettings.instance.showReactionsQuickBar;
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: GestureDetector(
-        onTapDown: (details) {
-          final width = MediaQuery.of(context).size.width;
-          if (details.localPosition.dx < width / 2) {
-            _prevStory();
-          } else {
-            _nextStory();
-          }
-        },
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            // Story background — video, then image, then solid colour
-            if (story.videoPath != null &&
-                _videoCtrl != null &&
-                _videoCtrl!.value.isInitialized)
-              ClipRect(
-                child: SizedBox.expand(
-                  child: FittedBox(
-                    fit: BoxFit.cover,
-                    child: SizedBox(
-                      width: _videoCtrl!.value.size.width,
-                      height: _videoCtrl!.value.size.height,
-                      child: VideoPlayer(_videoCtrl!),
-                    ),
+    final storyCanvas = GestureDetector(
+      onTapDown: (details) {
+        final box = context.findRenderObject() as RenderBox?;
+        final width = box?.size.width ?? MediaQuery.of(context).size.width;
+        if (details.localPosition.dx < width / 2) {
+          _prevStory();
+        } else {
+          _nextStory();
+        }
+      },
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Story background — video, then image, then solid colour
+          if (story.videoPath != null &&
+              _videoCtrl != null &&
+              _videoCtrl!.value.isInitialized)
+            ClipRect(
+              child: SizedBox.expand(
+                child: FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(
+                    width: _videoCtrl!.value.size.width,
+                    height: _videoCtrl!.value.size.height,
+                    child: VideoPlayer(_videoCtrl!),
                   ),
                 ),
-              )
-            else if (story.imagePath != null &&
-                File(story.imagePath!).existsSync())
-              Image.file(File(story.imagePath!), fit: BoxFit.cover)
-            else
-              Container(color: bgColor),
+              ),
+            )
+          else if (story.imagePath != null &&
+              File(story.imagePath!).existsSync())
+            Image.file(File(story.imagePath!), fit: BoxFit.cover)
+          else
+            Container(color: bgColor),
 
-            // Dark gradient overlay at top for progress bars
-            const DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  stops: [0, 0.25],
-                  colors: [Color(0x99000000), Colors.transparent],
-                ),
+          // Dark gradient overlay at top for progress bars
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                stops: [0, 0.25],
+                colors: [Color(0x99000000), Colors.transparent],
               ),
             ),
+          ),
 
-            // Story text — positioned using textX/textY alignment from creator
-            if (story.text.isNotEmpty)
-              Align(
-                alignment: Alignment(
-                  story.textX.clamp(-1.0, 1.0),
-                  story.textY.clamp(-1.0, 1.0),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Container(
-                    constraints: const BoxConstraints(maxWidth: 320),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: (story.imagePath != null || story.videoPath != null)
-                        ? BoxDecoration(
-                            color: Colors.black.withValues(
-                              alpha: story.textBgOpacity > 0
-                                  ? story.textBgOpacity.clamp(0.0, 0.7).toDouble()
-                                  : 0.35,
-                            ),
-                            borderRadius: BorderRadius.circular(10),
-                          )
-                        : null,
-                    child: Text(
-                      story.text,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Color(story.textColor),
-                        fontSize: story.textSize.clamp(14.0, 60.0),
-                        fontWeight:
-                            story.textBold ? FontWeight.w700 : FontWeight.w500,
-                        fontStyle:
-                            story.textItalic ? FontStyle.italic : FontStyle.normal,
-                        shadows: const [
-                          Shadow(
-                            blurRadius: 8,
-                            color: Colors.black54,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
+          // Story text — positioned using textX/textY alignment from creator
+          if (story.text.isNotEmpty)
+            Align(
+              alignment: Alignment(
+                story.textX.clamp(-1.0, 1.0),
+                story.textY.clamp(-1.0, 1.0),
               ),
-
-            for (final ov in story.overlays)
-              Align(
-                alignment: Alignment(
-                  ov.x.clamp(-1.0, 1.0),
-                  ov.y.clamp(-1.0, 1.0),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Container(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: (story.imagePath != null ||
+                          story.videoPath != null)
+                      ? BoxDecoration(
+                          color: Colors.black.withValues(
+                            alpha: story.textBgOpacity > 0
+                                ? story.textBgOpacity.clamp(0.0, 0.7).toDouble()
+                                : 0.35,
+                          ),
+                          borderRadius: BorderRadius.circular(10),
+                        )
+                      : null,
                   child: Text(
-                    ov.value,
+                    story.text,
+                    textAlign: TextAlign.center,
                     style: TextStyle(
-                      fontSize: ov.size.clamp(20.0, 64.0),
+                      color: Color(story.textColor),
+                      fontSize: story.textSize.clamp(14.0, 60.0),
+                      fontWeight:
+                          story.textBold ? FontWeight.w700 : FontWeight.w500,
+                      fontStyle: story.textItalic
+                          ? FontStyle.italic
+                          : FontStyle.normal,
                       shadows: const [
-                        Shadow(blurRadius: 8, color: Colors.black54),
+                        Shadow(
+                          blurRadius: 8,
+                          color: Colors.black54,
+                        ),
                       ],
                     ),
                   ),
                 ),
               ),
+            ),
 
-            // Top: progress bars + header
-            SafeArea(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Progress bars
-                  Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    child: Row(
-                      children: List.generate(_stories.length, (i) {
-                        return Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 2),
-                            child: i < _index
-                                ? const _ProgressBar(progress: 1.0)
-                                : i == _index
-                                    ? AnimatedBuilder(
-                                        animation: _progressCtrl,
-                                        builder: (_, __) => _ProgressBar(
-                                          progress: _progressCtrl.value,
-                                        ),
-                                      )
-                                    : const _ProgressBar(progress: 0.0),
+          for (final ov in story.overlays)
+            Align(
+              alignment: Alignment(
+                ov.x.clamp(-1.0, 1.0),
+                ov.y.clamp(-1.0, 1.0),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Text(
+                  ov.value,
+                  style: TextStyle(
+                    fontSize: ov.size.clamp(20.0, 64.0),
+                    shadows: const [
+                      Shadow(blurRadius: 8, color: Colors.black54),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+          // Top: progress bars + header
+          SafeArea(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Progress bars
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  child: Row(
+                    children: List.generate(_stories.length, (i) {
+                      return Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: i < _index
+                              ? const _ProgressBar(progress: 1.0)
+                              : i == _index
+                                  ? AnimatedBuilder(
+                                      animation: _progressCtrl,
+                                      builder: (_, __) => _ProgressBar(
+                                        progress: _progressCtrl.value,
+                                      ),
+                                    )
+                                  : const _ProgressBar(progress: 0.0),
+                        ),
+                      );
+                    }),
+                  ),
+                ),
+
+                // Author header
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  child: Row(
+                    children: [
+                      Text(
+                        widget.authorName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 15,
+                          shadows: [
+                            Shadow(blurRadius: 4, color: Colors.black54)
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _timeAgo(story.createdAt),
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (isAuthor)
+                        GestureDetector(
+                          onTap: _deleteCurrentStory,
+                          child: Container(
+                            margin: const EdgeInsets.only(right: 8),
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.15),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.delete_outline,
+                                color: Colors.white, size: 20),
                           ),
-                        );
-                      }),
+                        ),
+                      GestureDetector(
+                        onTap: () => Navigator.of(context).pop(),
+                        child: const Icon(Icons.close,
+                            color: Colors.white, size: 24),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Bottom bar: reactions (author sees counter, viewer sees react button).
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              ignoring: false,
+              child: SafeArea(
+                top: false,
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [Color(0xAA000000), Colors.transparent],
                     ),
                   ),
-
-                  // Author header
-                  Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    child: Row(
-                      children: [
-                        Text(
-                          widget.authorName,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 15,
-                            shadows: [
-                              Shadow(blurRadius: 4, color: Colors.black54)
-                            ],
+                  child: Row(
+                    children: [
+                      if (isAuthor) ...[
+                        // Author: view count (tappable → shows viewer list)
+                        GestureDetector(
+                          onTap: () => _showViewersSheet(story),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.visibility_outlined,
+                                    color: Colors.white, size: 16),
+                                const SizedBox(width: 6),
+                                Text(
+                                  '${story.viewers.length}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                         const SizedBox(width: 8),
-                        Text(
-                          _timeAgo(story.createdAt),
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 13,
-                          ),
-                        ),
-                        const Spacer(),
-                        if (isAuthor)
-                          GestureDetector(
-                            onTap: _deleteCurrentStory,
-                            child: Container(
-                              margin: const EdgeInsets.only(right: 8),
-                              padding: const EdgeInsets.all(6),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.15),
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(Icons.delete_outline,
-                                  color: Colors.white, size: 20),
+                        // Author: aggregate reaction counter
+                        if (story.totalReactions > 0)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(20),
                             ),
-                          ),
-                        GestureDetector(
-                          onTap: () => Navigator.of(context).pop(),
-                          child: const Icon(Icons.close,
-                              color: Colors.white, size: 24),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // Bottom bar: reactions (author sees counter, viewer sees react button).
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: IgnorePointer(
-                ignoring: false,
-                child: SafeArea(
-                  top: false,
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.bottomCenter,
-                        end: Alignment.topCenter,
-                        colors: [Color(0xAA000000), Colors.transparent],
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        if (isAuthor) ...[
-                          // Author: view count (tappable → shows viewer list)
-                          GestureDetector(
-                            onTap: () => _showViewersSheet(story),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.14),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.visibility_outlined,
-                                      color: Colors.white, size: 16),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    '${story.viewers.length}',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
-                                    ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.favorite,
+                                    color: Colors.white, size: 16),
+                                const SizedBox(width: 6),
+                                Text(
+                                  '${story.totalReactions}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
                                   ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          // Author: aggregate reaction counter
-                          if (story.totalReactions > 0)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.14),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.favorite,
-                                      color: Colors.white, size: 16),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    '${story.totalReactions}',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          if (story.totalReactions > 0)
-                            const SizedBox(width: 10),
-                          if (story.reactions.isNotEmpty)
-                            Flexible(
-                              child: SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                child: ReactionsBar(
-                                  reactions: story.reactions,
-                                  myId: myId,
-                                  onTap: (_) {},
-                                  compact: true,
                                 ),
-                              ),
+                              ],
                             ),
-                        ] else ...[
-                          // Viewer: quick reactions + full picker
-                          Expanded(
+                          ),
+                        if (story.totalReactions > 0) const SizedBox(width: 10),
+                        if (story.reactions.isNotEmpty)
+                          Flexible(
                             child: SingleChildScrollView(
                               scrollDirection: Axis.horizontal,
-                              child: Row(
-                                children: [
-                                  if (showQuickBar)
-                                    for (final e in kQuickReactionEmojis)
-                                      GestureDetector(
-                                        onTap: () async {
-                                          _pauseStory();
-                                          await _trySendStoryReaction(e);
-                                          if (mounted) _resumeStory();
-                                        },
-                                        child: Container(
-                                          margin:
-                                              const EdgeInsets.only(right: 6),
-                                          padding: const EdgeInsets.all(6),
-                                          decoration: BoxDecoration(
-                                            color: story.reactions[e]
-                                                        ?.contains(myId) ==
-                                                    true
-                                                ? Colors.white
-                                                    .withValues(alpha: 0.28)
-                                                : Colors.white
-                                                    .withValues(alpha: 0.12),
-                                            shape: BoxShape.circle,
-                                          ),
-                                          child: Text(e,
-                                              style: const TextStyle(
-                                                  fontSize: 22)),
-                                        ),
-                                      ),
-                                  GestureDetector(
-                                    onTap: _openReactionPicker,
-                                    child: Container(
-                                      margin: EdgeInsets.only(
-                                          left: showQuickBar ? 2 : 0),
-                                      padding: const EdgeInsets.all(6),
-                                      decoration: BoxDecoration(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.12),
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: const Icon(Icons.add,
-                                          color: Colors.white, size: 22),
-                                    ),
-                                  ),
-                                ],
+                              child: ReactionsBar(
+                                reactions: story.reactions,
+                                myId: myId,
+                                onTap: (_) {},
+                                compact: true,
                               ),
                             ),
                           ),
-                        ],
+                      ] else ...[
+                        // Viewer: quick reactions + full picker
+                        Expanded(
+                          child: SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                if (showQuickBar)
+                                  for (final e in kQuickReactionEmojis)
+                                    GestureDetector(
+                                      onTap: () async {
+                                        _pauseStory();
+                                        await _trySendStoryReaction(e);
+                                        if (mounted) _resumeStory();
+                                      },
+                                      child: Container(
+                                        margin: const EdgeInsets.only(right: 6),
+                                        padding: const EdgeInsets.all(6),
+                                        decoration: BoxDecoration(
+                                          color: story.reactions[e]
+                                                      ?.contains(myId) ==
+                                                  true
+                                              ? Colors.white
+                                                  .withValues(alpha: 0.28)
+                                              : Colors.white
+                                                  .withValues(alpha: 0.12),
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: Text(e,
+                                            style:
+                                                const TextStyle(fontSize: 22)),
+                                      ),
+                                    ),
+                                GestureDetector(
+                                  onTap: _openReactionPicker,
+                                  child: Container(
+                                    margin: EdgeInsets.only(
+                                        left: showQuickBar ? 2 : 0),
+                                    padding: const EdgeInsets.all(6),
+                                    decoration: BoxDecoration(
+                                      color:
+                                          Colors.white.withValues(alpha: 0.12),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(Icons.add,
+                                        color: Colors.white, size: 22),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                       ],
-                    ),
+                    ],
                   ),
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
+      ),
+    );
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final isWide = constraints.maxWidth >= 900;
+          if (!isWide) return storyCanvas;
+          final maxFrameHeight =
+              (constraints.maxHeight - 24).clamp(300.0, 1200.0).toDouble();
+          final phoneWidthByHeight = maxFrameHeight * (9 / 19.5);
+          final frameWidth = math.min(430.0, phoneWidthByHeight).toDouble();
+          final frameHeight = frameWidth * (19.5 / 9);
+          return Center(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: SizedBox(
+                width: frameWidth,
+                height: frameHeight,
+                child: storyCanvas,
+              ),
+            ),
+          );
+        },
       ),
     );
   }

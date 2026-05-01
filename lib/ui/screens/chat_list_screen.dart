@@ -28,6 +28,7 @@ import '../../services/platform_capabilities.dart';
 import '../../services/wifi_direct_service.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/mesh_radar_widget.dart';
+import '../widgets/status_emoji_view.dart';
 import '../widgets/update_available_banner.dart';
 import '../../utils/message_preview_formatter.dart'
     show
@@ -376,9 +377,16 @@ class _ChatListScreenState extends State<ChatListScreen>
     final settings = AppSettings.instance;
     final channelsEnabled = settings.channelsEnabled;
     final childLinked = settings.isLinkedChildDevice;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
+      backgroundColor:
+          isDark ? const Color(0xFF0F0F0F) : const Color(0xFFE8E8E8),
       appBar: AppBar(
         automaticallyImplyLeading: false,
+        elevation: 0,
+        scrolledUnderElevation: 0.5,
+        backgroundColor:
+            isDark ? const Color(0xFF121212) : const Color(0xFFF2F2F2),
         title: _searchActive
             ? TextField(
                 controller: _searchController,
@@ -803,11 +811,22 @@ class _MeTab extends StatelessWidget {
                 profile.nickname,
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
-              subtitle: Text(
-                profile.statusEmoji.isEmpty
-                    ? AppL10n.t('menu_open_profile')
-                    : '${profile.statusEmoji} · ${AppL10n.t('menu_open_profile')}',
-              ),
+              subtitle: profile.statusEmoji.isEmpty
+                  ? Text(AppL10n.t('menu_open_profile'))
+                  : Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        StatusEmojiView(
+                          statusEmoji: profile.statusEmoji,
+                          fontSize: 16,
+                          style: const TextStyle(fontSize: 16),
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(AppL10n.t('menu_open_profile')),
+                        ),
+                      ],
+                    ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.push(
                 context,
@@ -830,6 +849,7 @@ enum _ChatItemType { personal, group, channel }
 
 String _dmChatListBotChipLabel(String peerId) {
   if (peerId == kLibBotPeerId) return 'Lib';
+  if (peerId == kEmojiBotPeerId) return 'Emoji';
   if (peerId == kGigachatBotPeerId) return 'ИИ';
   return 'Бот';
 }
@@ -845,8 +865,7 @@ String _dmChatListPreviewOrDraft(
   if (d == null || d.trim().isEmpty) return lastMessagePreview;
   final oneLine = d.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
   if (oneLine.isEmpty) return lastMessagePreview;
-  final short =
-      oneLine.length > 52 ? '${oneLine.substring(0, 52)}…' : oneLine;
+  final short = oneLine.length > 52 ? '${oneLine.substring(0, 52)}…' : oneLine;
   return 'Черновик: $short';
 }
 
@@ -910,8 +929,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     DmComposeDraftService.instance.revision
         .addListener(_draftRevisionListener!);
     _botDirListener = () => _debouncedLoad();
-    RelayService.instance.botDirectoryVersion
-        .addListener(_botDirListener!);
+    RelayService.instance.botDirectoryVersion.addListener(_botDirListener!);
   }
 
   void _debouncedLoad() {
@@ -983,6 +1001,11 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
 
     final dmDrafts = await DmComposeDraftService.instance.getAllDrafts();
 
+    final contacts = await ChatStorageService.instance.getContacts();
+    final contactById = <String, Contact>{
+      for (final c in contacts) c.publicKeyHex: c,
+    };
+
     // 1) Личные чаты
     final summaries = await ChatStorageService.instance.getChatSummaries();
     final summaryIds = <String>{};
@@ -999,7 +1022,9 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
         avatarColor: s.avatarColor ?? 0xFF607D8B,
         avatarEmoji: s.avatarEmoji ?? '',
         avatarImagePath: s.avatarImagePath,
-        lastMessage: _dmChatListPreviewOrDraft(s.peerId, s.displayText, dmDrafts),
+        statusEmoji: contactById[s.peerId]?.statusEmoji ?? '',
+        lastMessage:
+            _dmChatListPreviewOrDraft(s.peerId, s.displayText, dmDrafts),
         lastTime: s.timestamp,
         isOnline: showOnline && transports.isNotEmpty,
         onlineTransports: transports,
@@ -1010,7 +1035,6 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     }
 
     // 1б) Контакты без переписки — добавляем с пустым lastMessage
-    final contacts = await ChatStorageService.instance.getContacts();
     for (final c in contacts) {
       if (myId.isNotEmpty && c.publicKeyHex == myId) continue;
       if (summaryIds.contains(c.publicKeyHex)) continue;
@@ -1021,11 +1045,13 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
       items.add(_ChatItem(
         type: _ChatItemType.personal,
         id: c.publicKeyHex,
-        nickname:
-            c.nickname.isNotEmpty ? c.nickname : '${c.publicKeyHex.substring(0, 8)}...',
+        nickname: c.nickname.isNotEmpty
+            ? c.nickname
+            : '${c.publicKeyHex.substring(0, 8)}...',
         avatarColor: c.avatarColor,
         avatarEmoji: c.avatarEmoji,
         avatarImagePath: c.avatarImagePath,
+        statusEmoji: c.statusEmoji,
         lastMessage: _dmChatListPreviewOrDraft(c.publicKeyHex, '', dmDrafts),
         lastTime: c.addedAt,
         isOnline: showOnline && transports.isNotEmpty,
@@ -1108,8 +1134,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
           : AppL10n.t('chat_saved_messages_empty');
       final savedTime =
           savedLast?.timestamp ?? DateTime.fromMillisecondsSinceEpoch(0);
-      final savedLine =
-          _dmChatListPreviewOrDraft(myId, savedPreview, dmDrafts);
+      final savedLine = _dmChatListPreviewOrDraft(myId, savedPreview, dmDrafts);
       items.insert(
         0,
         _ChatItem(
@@ -1476,7 +1501,9 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
                           context,
                           icon: Icons.person_add_alt_1_rounded,
                           iconColor: Theme.of(context).colorScheme.primary,
-                          title: (e.value['nick'] as String?)?.trim().isNotEmpty ==
+                          title: (e.value['nick'] as String?)
+                                      ?.trim()
+                                      .isNotEmpty ==
                                   true
                               ? '${e.value['nick']} хочет обменяться профилем'
                               : 'Новый запрос на обмен профилем',
@@ -1702,6 +1729,8 @@ class _TelegramChatRow extends StatelessWidget {
     final subColor = theme.brightness == Brightness.dark
         ? const Color(0xFF8E8E93)
         : const Color(0xFF8E8E93);
+    final showVerifiedMark =
+        item.type == _ChatItemType.channel || item.isAiBot;
 
     return Material(
       color: Colors.transparent,
@@ -1798,15 +1827,36 @@ class _TelegramChatRow extends StatelessWidget {
                                 color: cs.primary.withValues(alpha: 0.65)),
                           ),
                         Expanded(
-                          child: Text(
-                            item.nickname,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 16,
-                              height: 1.2,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          child: Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  item.nickname,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 16,
+                                    height: 1.2,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (showVerifiedMark) ...[
+                                const SizedBox(width: 6),
+                                Icon(
+                                  Icons.verified,
+                                  size: 16,
+                                  color: Colors.blue.shade700,
+                                ),
+                              ],
+                              if (item.statusEmoji.isNotEmpty) ...[
+                                const SizedBox(width: 6),
+                                StatusEmojiView(
+                                  statusEmoji: item.statusEmoji,
+                                  fontSize: 16,
+                                ),
+                              ],
+                            ],
                           ),
                         ),
                         if (item.showPresenceStatus &&
@@ -1858,8 +1908,8 @@ class _TelegramChatRow extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 4),
-                    Text(
-                      item.lastMessage,
+                    CustomEmojiInlineText(
+                      text: item.lastMessage,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -1940,7 +1990,7 @@ class _ChatItem {
   final _ChatItemType type;
   final String
       id; // peerId for personal, groupId for group, channelId for channel
-  final String nickname, lastMessage, avatarEmoji;
+  final String nickname, lastMessage, avatarEmoji, statusEmoji;
   final int avatarColor;
   final String? avatarImagePath;
   final DateTime lastTime;
@@ -1964,6 +2014,7 @@ class _ChatItem {
     required this.avatarColor,
     required this.avatarEmoji,
     this.avatarImagePath,
+    this.statusEmoji = '',
     required this.lastMessage,
     required this.lastTime,
     required this.isOnline,
@@ -2325,128 +2376,152 @@ class _StoriesStrip extends StatelessWidget {
                   return const SizedBox.shrink();
                 }
 
-                return SizedBox(
-                  height: 96,
-                  child: ListView(
-                    scrollDirection: Axis.horizontal,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    children: [
-                      // ── Создать историю (всегда видна) ──────────────
-                      if (myProfile != null)
-                        _StoryAvatar(
-                          label: 'Создать',
-                          avatar: AvatarWidget(
-                            initials: myProfile.initials,
-                            color: myProfile.avatarColor,
-                            emoji: myProfile.avatarEmoji,
-                            imagePath: myProfile.avatarImagePath,
-                            size: 56,
-                            hasStory: false,
-                            hasUnviewedStory: false,
-                          ),
-                          showAddBadge: true,
-                          onTap: () {
+                final storiesList = ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  children: [
+                    // ── Создать историю (всегда видна) ──────────────
+                    if (myProfile != null)
+                      _StoryAvatar(
+                        label: 'Создать',
+                        avatar: AvatarWidget(
+                          initials: myProfile.initials,
+                          color: myProfile.avatarColor,
+                          emoji: myProfile.avatarEmoji,
+                          imagePath: myProfile.avatarImagePath,
+                          size: 56,
+                          hasStory: false,
+                          hasUnviewedStory: false,
+                        ),
+                        showAddBadge: true,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            rlinkPushRoute(
+                              StoryCreatorScreen(
+                                  authorId: myProfile.publicKeyHex),
+                            ),
+                          ).then((story) {
+                            if (story is StoryItem) {
+                              GossipRouter.instance.sendStory(
+                                storyId: story.id,
+                                authorId: story.authorId,
+                                text: story.text,
+                                bgColor: story.bgColor,
+                                textX: story.textX,
+                                textY: story.textY,
+                                textSize: story.textSize,
+                                textColor: story.textColor,
+                                textBold: story.textBold,
+                                textItalic: story.textItalic,
+                                textBgOpacity: story.textBgOpacity,
+                                overlays: story.overlays
+                                    .map((e) => e.toJson())
+                                    .toList(),
+                              );
+                            }
+                          });
+                        },
+                      ),
+
+                    // ── Моя история (только когда есть активные) ────
+                    if (myProfile != null &&
+                        StoryService.instance
+                            .hasActiveStory(myProfile.publicKeyHex))
+                      _StoryAvatar(
+                        label: 'Моя история',
+                        avatar: AvatarWidget(
+                          initials: myProfile.initials,
+                          color: myProfile.avatarColor,
+                          emoji: myProfile.avatarEmoji,
+                          imagePath: myProfile.avatarImagePath,
+                          size: 56,
+                          hasStory: true,
+                          hasUnviewedStory: false,
+                        ),
+                        onTap: () {
+                          final existing = StoryService.instance
+                              .storiesFor(myProfile.publicKeyHex);
+                          if (existing.isNotEmpty) {
                             Navigator.push(
                               context,
                               rlinkPushRoute(
-                                StoryCreatorScreen(
-                                    authorId: myProfile.publicKeyHex),
-                              ),
-                            ).then((story) {
-                              if (story is StoryItem) {
-                                GossipRouter.instance.sendStory(
-                                  storyId: story.id,
-                                  authorId: story.authorId,
-                                  text: story.text,
-                                  bgColor: story.bgColor,
-                                  textX: story.textX,
-                                  textY: story.textY,
-                                  textSize: story.textSize,
-                                  textColor: story.textColor,
-                                  textBold: story.textBold,
-                                  textItalic: story.textItalic,
-                                  textBgOpacity: story.textBgOpacity,
-                                  overlays:
-                                      story.overlays.map((e) => e.toJson()).toList(),
-                                );
-                              }
-                            });
-                          },
-                        ),
-
-                      // ── Моя история (только когда есть активные) ────
-                      if (myProfile != null &&
-                          StoryService.instance
-                              .hasActiveStory(myProfile.publicKeyHex))
-                        _StoryAvatar(
-                          label: 'Моя история',
-                          avatar: AvatarWidget(
-                            initials: myProfile.initials,
-                            color: myProfile.avatarColor,
-                            emoji: myProfile.avatarEmoji,
-                            imagePath: myProfile.avatarImagePath,
-                            size: 56,
-                            hasStory: true,
-                            hasUnviewedStory: false,
-                          ),
-                          onTap: () {
-                            final existing = StoryService.instance
-                                .storiesFor(myProfile.publicKeyHex);
-                            if (existing.isNotEmpty) {
-                              Navigator.push(
-                                context,
-                                rlinkPushRoute(
-                                  StoryViewerScreen(
-                                    authorId: myProfile.publicKeyHex,
-                                    authorName: 'Я',
-                                    stories: existing,
-                                  ),
+                                StoryViewerScreen(
+                                  authorId: myProfile.publicKeyHex,
+                                  authorName: 'Я',
+                                  stories: existing,
                                 ),
-                              );
-                            }
-                          },
-                        ),
-
-                      // Stories from contacts — exclude own key to avoid duplicate
-                      ...activeAuthors
-                          .where((id) => id != ownKey)
-                          .map((authorId) {
-                        final chatItem = chatItems
-                            .where((c) => c.type == _ChatItemType.personal)
-                            .cast<_ChatItem?>()
-                            .firstWhere((c) => c?.peerId == authorId,
-                                orElse: () => null);
-                        final name = chatItem?.nickname ??
-                            authorId.substring(0, authorId.length.clamp(0, 8));
-                        final stories =
-                            StoryService.instance.storiesFor(authorId);
-                        return _StoryAvatar(
-                          label: name,
-                          avatar: AvatarWidget(
-                            initials:
-                                name.isNotEmpty ? name[0].toUpperCase() : '?',
-                            color: chatItem?.avatarColor ?? 0xFF607D8B,
-                            emoji: chatItem?.avatarEmoji ?? '',
-                            imagePath: chatItem?.avatarImagePath,
-                            size: 56,
-                            hasStory: true,
-                            hasUnviewedStory: StoryService.instance
-                                .hasUnviewedStory(authorId),
-                          ),
-                          onTap: () => Navigator.push(
-                            context,
-                            rlinkPushRoute(
-                              StoryViewerScreen(
-                                authorId: authorId,
-                                authorName: name,
-                                stories: stories,
                               ),
+                            );
+                          }
+                        },
+                      ),
+
+                    // Stories from contacts — exclude own key to avoid duplicate
+                    ...activeAuthors
+                        .where((id) => id != ownKey)
+                        .map((authorId) {
+                      final chatItem = chatItems
+                          .where((c) => c.type == _ChatItemType.personal)
+                          .cast<_ChatItem?>()
+                          .firstWhere((c) => c?.peerId == authorId,
+                              orElse: () => null);
+                      final name = chatItem?.nickname ??
+                          authorId.substring(0, authorId.length.clamp(0, 8));
+                      final stories =
+                          StoryService.instance.storiesFor(authorId);
+                      return _StoryAvatar(
+                        label: name,
+                        avatar: AvatarWidget(
+                          initials:
+                              name.isNotEmpty ? name[0].toUpperCase() : '?',
+                          color: chatItem?.avatarColor ?? 0xFF607D8B,
+                          emoji: chatItem?.avatarEmoji ?? '',
+                          imagePath: chatItem?.avatarImagePath,
+                          size: 56,
+                          hasStory: true,
+                          hasUnviewedStory:
+                              StoryService.instance.hasUnviewedStory(authorId),
+                        ),
+                        onTap: () => Navigator.push(
+                          context,
+                          rlinkPushRoute(
+                            StoryViewerScreen(
+                              authorId: authorId,
+                              authorName: name,
+                              stories: stories,
                             ),
                           ),
-                        );
-                      }),
-                    ],
+                        ),
+                      );
+                    }),
+                  ],
+                );
+                final isWide = MediaQuery.of(context).size.width >= 1100;
+                if (!isWide) {
+                  return SizedBox(height: 96, child: storiesList);
+                }
+                final cs = Theme.of(context).colorScheme;
+                return SizedBox(
+                  height: 106,
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 460),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: cs.surfaceContainerHigh.withValues(alpha: 0.6),
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
+                            color: cs.outlineVariant.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(18),
+                          child: storiesList,
+                        ),
+                      ),
+                    ),
                   ),
                 );
               },

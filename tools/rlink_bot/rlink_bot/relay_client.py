@@ -24,6 +24,7 @@ _SKIP_UNTIL_BOT_CLAIM_ACK = frozenset(
         "pong",
         "search_result",
         "delivery_status",
+        "bot_commands_set_ack",
     }
 )
 
@@ -34,6 +35,7 @@ class RelayBotSession:
         self.keys = keys
         self.ws: websocket.WebSocket | None = None
         self.peer_x25519: dict[str, str] = {}
+        self.api_token: str | None = None
 
     def connect(self, nick: str | None = None) -> None:
         sslopt: dict[str, Any] = {}
@@ -84,6 +86,9 @@ class RelayBotSession:
                         self.peer_x25519[pk] = x
                 continue
             if t == "bot_claim_ack":
+                tok = msg.get("apiToken")
+                if isinstance(tok, str) and tok.strip():
+                    self.api_token = tok.strip()
                 return msg
             if t == "error":
                 return msg
@@ -120,6 +125,7 @@ class RelayBotSession:
                 "channel_dir_snapshot",
                 "bot_dir_snapshot",
                 "account_sync_blob",
+                "bot_commands_set_ack",
             ):
                 continue
             L(f"[relay] {t}")
@@ -175,3 +181,52 @@ class RelayBotSession:
             "msgId": str(uuid.uuid4()),
         }
         self.ws.send(json.dumps(out))
+
+    def set_commands(self, commands: list[tuple[str, str]]) -> dict[str, Any]:
+        """Обновить slash-команды бота на relay (`bot_commands_set` + apiToken)."""
+        assert self.ws
+        if not self.api_token:
+            raise RuntimeError(
+                "api_token отсутствует — сначала успешный claim(); "
+                "сохраните apiToken из ответа (он выдаётся один раз)."
+            )
+        if len(commands) > 32:
+            raise ValueError("Не больше 32 команд")
+        payload_cmds: list[dict[str, str]] = []
+        for pair in commands:
+            if len(pair) != 2:
+                raise ValueError("Каждый элемент: (\"/cmd\", \"описание\")")
+            cmd, desc = str(pair[0]).strip().lower(), str(pair[1]).strip()
+            if not cmd.startswith("/") or len(cmd) > 64 or len(desc) > 256:
+                raise ValueError(f"Некорректная пара команд: {pair!r}")
+            payload_cmds.append({"cmd": cmd, "desc": desc})
+        rid = uuid.uuid4().hex[:24]
+        self.ws.send(
+            json.dumps(
+                {
+                    "type": "bot_commands_set",
+                    "apiToken": self.api_token,
+                    "commands": payload_cmds,
+                    "reqId": rid,
+                }
+            )
+        )
+        for _ in range(512):
+            raw = self.ws.recv()
+            if not isinstance(raw, str):
+                raw = raw.decode("utf-8")
+            msg = json.loads(raw)
+            t = msg.get("type")
+            if t in _SKIP_UNTIL_BOT_CLAIM_ACK:
+                if t == "presence":
+                    pk = (msg.get("publicKey") or "").lower()
+                    x = msg.get("x25519")
+                    if pk and isinstance(x, str) and x:
+                        self.peer_x25519[pk] = x
+                continue
+            if t == "bot_commands_set_ack":
+                return msg
+            if t == "error":
+                return msg
+            raise RuntimeError(f"Неожиданное сообщение relay при set_commands: {msg!r}")
+        raise RuntimeError("Слишком много сообщений до bot_commands_set_ack")

@@ -121,11 +121,14 @@ dependencies:
   photo_manager: ^3.9.0
   crop_your_image: ^2.0.0
   flutter_highlight: ^0.7.0
+  highlight: ^0.7.0
   flutter_map: ^8.3.0
   latlong2: ^0.9.1
   web: ^1.1.1
   image: ^4.8.0
   google_maps_flutter: ^2.17.0
+  syncfusion_flutter_pdfviewer: ^33.2.4
+  archive: ^4.0.9
 
 dev_dependencies:
   flutter_test:
@@ -139,6 +142,7 @@ flutter:
   assets:
     - assets/branding/rlink_mark.png
     - assets/branding/rlink_icon_ai.png
+    - assets/sticker_packs/default/
 
 flutter_launcher_icons:
   android: true

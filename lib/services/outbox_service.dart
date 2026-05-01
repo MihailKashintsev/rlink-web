@@ -97,6 +97,9 @@ class OutboxService {
     }
   }
 
+  /// Повторная отправка после сбоя (тот же [ChatMessage.id]).
+  Future<void> resendOutgoing(ChatMessage msg) => _resendOne(msg);
+
   Future<void> _resendOne(ChatMessage msg) async {
     final myId = CryptoService.instance.publicKeyHex;
     if (myId.isEmpty) return;

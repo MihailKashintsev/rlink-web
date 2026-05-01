@@ -36,6 +36,10 @@ class ChannelDirectoryRelay {
       'description': ch.description,
       'driveBackup': ch.driveBackupEnabled,
       'driveBackupRev': ch.driveBackupRev,
+      if (ch.driveFileUrl != null && ch.driveFileUrl!.isNotEmpty)
+        'driveFileUrl': ch.driveFileUrl,
+      if (ch.driveKeysUrl != null && ch.driveKeysUrl!.isNotEmpty)
+        'driveKeysUrl': ch.driveKeysUrl,
       'allowModeratorsManageDriveAccount': ch.allowModeratorsManageDriveAccount,
       'isPublic': true,
       'linkAdminIds': ch.linkAdminIds,

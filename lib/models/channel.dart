@@ -39,6 +39,14 @@ class Channel {
   /// Id файла на Google Drive у админа (локально, в gossip не передаётся).
   final String? driveFileId;
 
+  /// Прямая ссылка для скачивания зашифрованного снимка с Google Drive (публичная, только чтение).
+  /// Публикуется в channel directory и gossip — подписчики могут восстановить историю без авторизации.
+  final String? driveFileUrl;
+
+  /// Публичная ссылка на JSON-файл с ключами подписчиков (каждый завёрнут в X25519).
+  /// Позволяет новому устройству получить симметричный ключ без онлайн-рассылки gossip.
+  final String? driveKeysUrl;
+
   /// Разрешить модераторам перепривязывать Google-аккаунт резерва в общих настройках.
   final bool allowModeratorsManageDriveAccount;
 
@@ -77,6 +85,8 @@ class Channel {
     this.driveBackupEnabled = false,
     this.driveBackupRev = 0,
     this.driveFileId,
+    this.driveFileUrl,
+    this.driveKeysUrl,
     this.allowModeratorsManageDriveAccount = false,
   });
 
@@ -122,6 +132,8 @@ class Channel {
         'pub': isPublic,
         if (driveBackupEnabled) 'drv': true,
         if (driveBackupRev > 0) 'drvRev': driveBackupRev,
+        if (driveFileUrl != null && driveFileUrl!.isNotEmpty) 'drvUrl': driveFileUrl,
+        if (driveKeysUrl != null && driveKeysUrl!.isNotEmpty) 'drvKUrl': driveKeysUrl,
         if (allowModeratorsManageDriveAccount) 'drvMods': true,
       };
 
@@ -157,6 +169,8 @@ class Channel {
         driveBackupEnabled: j['drv'] == true,
         driveBackupRev: (j['drvRev'] as num?)?.toInt() ?? 0,
         driveFileId: j['drvFid'] as String?,
+        driveFileUrl: j['drvUrl'] as String?,
+        driveKeysUrl: j['drvKUrl'] as String?,
         allowModeratorsManageDriveAccount: j['drvMods'] == true,
       );
 
@@ -194,6 +208,8 @@ class Channel {
     bool? driveBackupEnabled,
     int? driveBackupRev,
     String? driveFileId,
+    String? driveFileUrl,
+    String? driveKeysUrl,
     bool? allowModeratorsManageDriveAccount,
   }) =>
       Channel(
@@ -222,6 +238,8 @@ class Channel {
         driveBackupEnabled: driveBackupEnabled ?? this.driveBackupEnabled,
         driveBackupRev: driveBackupRev ?? this.driveBackupRev,
         driveFileId: driveFileId ?? this.driveFileId,
+        driveFileUrl: driveFileUrl ?? this.driveFileUrl,
+        driveKeysUrl: driveKeysUrl ?? this.driveKeysUrl,
         allowModeratorsManageDriveAccount: allowModeratorsManageDriveAccount ??
             this.allowModeratorsManageDriveAccount,
       );

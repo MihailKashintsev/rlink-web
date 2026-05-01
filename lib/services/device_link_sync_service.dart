@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
@@ -300,7 +301,10 @@ class DeviceLinkSyncService {
       if (msg.forwardFromId != null) 'ffid': msg.forwardFromId,
       if (msg.forwardFromNick != null) 'ffn': msg.forwardFromNick,
       if (msg.forwardFromChannelId != null) 'ffch': msg.forwardFromChannelId,
-      if (msg.invitePayloadJson != null) 'inv': msg.invitePayloadJson,
+      if (msg.stickerPackPayload != null)
+        'inv': jsonEncode(msg.stickerPackPayload)
+      else if (msg.invitePayloadJson != null)
+        'inv': msg.invitePayloadJson,
     };
   }
 
@@ -320,6 +324,22 @@ class DeviceLinkSyncService {
     final isOutgoing = outgoingRaw == true || outgoingRaw == 1;
     final statusIndex =
         (data['st'] as num?)?.toInt() ?? MessageStatus.delivered.index;
+    final invRaw = data['inv'] as String?;
+    String? invitePayloadJson;
+    Map<String, dynamic>? stickerPackPayload;
+    if (invRaw != null && invRaw.isNotEmpty) {
+      try {
+        final dec = jsonDecode(invRaw);
+        if (dec is Map<String, dynamic> &&
+            dec['type'] == ChatMessage.kStickerPackPayloadType) {
+          stickerPackPayload = dec;
+        } else {
+          invitePayloadJson = invRaw;
+        }
+      } catch (_) {
+        invitePayloadJson = invRaw;
+      }
+    }
     return ChatMessage(
       id: id,
       peerId: peerId,
@@ -333,7 +353,8 @@ class DeviceLinkSyncService {
       forwardFromId: data['ffid'] as String?,
       forwardFromNick: data['ffn'] as String?,
       forwardFromChannelId: data['ffch'] as String?,
-      invitePayloadJson: data['inv'] as String?,
+      invitePayloadJson: invitePayloadJson,
+      stickerPackPayload: stickerPackPayload,
     );
   }
 

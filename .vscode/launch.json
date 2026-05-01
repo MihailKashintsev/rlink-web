@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Rlink (macOS)",
+      "request": "launch",
+      "type": "dart",
+      "args": [
+        "--dart-define=TURN_HOST=185.244.172.90",
+        "--dart-define=TURN_USER=rlink",
+        "--dart-define=TURN_PASSWORD=s7yd9vLTNjhyWJr1TLfBUqhj"
+      ]
+    },
+    {
+      "name": "Rlink (iOS)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "00008120-000C4D4E349B401E",
+      "args": [
+        "--dart-define=TURN_HOST=185.244.172.90",
+        "--dart-define=TURN_USER=rlink",
+        "--dart-define=TURN_PASSWORD=s7yd9vLTNjhyWJr1TLfBUqhj"
+      ]
+    },
+    {
+      "name": "Rlink (Android)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "android",
+      "args": [
+        "--dart-define=TURN_HOST=185.244.172.90",
+        "--dart-define=TURN_USER=rlink",
+        "--dart-define=TURN_PASSWORD=s7yd9vLTNjhyWJr1TLfBUqhj"
+      ]
+    }
+  ]
+}

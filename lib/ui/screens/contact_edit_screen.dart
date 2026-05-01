@@ -245,18 +245,20 @@ class _ContactEditScreenState extends State<ContactEditScreen> {
               },
             ),
           ],
-          const SizedBox(height: 16),
-          const Text('Цвет фона',
-              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: MediaQuery.sizeOf(context).width - 32,
-            child: AvatarColorPicker(
-              selected: _color,
-              onSelected: (c) => setState(() => _color = c),
+          if (_avatarPath == null) ...[
+            const SizedBox(height: 16),
+            const Text('Цвет фона',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: MediaQuery.sizeOf(context).width - 32,
+              child: AvatarColorPicker(
+                selected: _color,
+                onSelected: (c) => setState(() => _color = c),
+              ),
             ),
-          ),
-          const SizedBox(height: 20),
+            const SizedBox(height: 20),
+          ],
           TextField(
             controller: _nickCtrl,
             decoration: const InputDecoration(

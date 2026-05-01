@@ -303,6 +303,36 @@ class GoogleDriveChannelBackup {
     }
   }
 
+  /// Делает файл доступным по ссылке (Anyone with link → viewer) и возвращает прямую ссылку для скачивания.
+  /// Вызывается сразу после [uploadOrUpdateEncryptedFile] чтобы подписчики могли скачать снимок без авторизации.
+  static Future<String?> makePublicAndGetDownloadUrl(String fileId) async {
+    try {
+      final authClient = await _driveAuthClient(interactive: true);
+      if (authClient == null) return null;
+      try {
+        final api = drive.DriveApi(authClient);
+        await api.permissions.create(
+          drive.Permission()
+            ..type = 'anyone'
+            ..role = 'reader',
+          fileId,
+        );
+        final file = await api.files.get(
+          fileId,
+          $fields: 'webContentLink',
+        ) as drive.File;
+        final url = file.webContentLink;
+        debugPrint('[RLINK][Drive] makePublic ok: $fileId → $url');
+        return url;
+      } finally {
+        authClient.close();
+      }
+    } catch (e, st) {
+      debugPrint('[RLINK][Drive] makePublic failed: $e\n$st');
+      return null;
+    }
+  }
+
   /// Удаляет файл-резерв канала на Google Drive.
   /// Возвращает true, если файл удалён или уже отсутствует.
   static Future<bool> deleteBackupFile({

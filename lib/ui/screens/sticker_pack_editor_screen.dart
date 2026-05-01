@@ -39,7 +39,7 @@ class _StickerPackEditorScreenState extends State<StickerPackEditorScreen> {
   }
 
   Future<void> _load() async {
-    await StickerCollectionService.instance.ensureInitialized();
+    await StickerCollectionService.instance.init();
     final files =
         await StickerCollectionService.instance.stickerFilesNewestFirst();
     List<String> initial = [];

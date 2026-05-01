@@ -23,6 +23,7 @@ class _CallScreenState extends State<CallScreen> {
   bool _micOn = true;
   bool _camOn = true;
   VoidCallback? _phaseListener;
+  VoidCallback? _streamListener;
 
   @override
   void initState() {
@@ -32,25 +33,53 @@ class _CallScreenState extends State<CallScreen> {
 
   Future<void> _init() async {
     await _localRenderer.initialize();
+    if (!mounted) return;
     await _remoteRenderer.initialize();
+    if (!mounted) return;
 
-    if (widget.session.incoming) {
-      await CallService.instance.acceptIncoming(widget.session);
+    try {
+      if (widget.session.incoming) {
+        await CallService.instance.acceptIncoming(widget.session);
+        if (!mounted) return;
+      }
+      final local = await CallService.instance.getLocalStream();
+      if (!mounted) return;
+      _localRenderer.srcObject = local;
+    } catch (e) {
+      debugPrint('[CallScreen] _init error: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Не удалось получить доступ к микрофону/камере')),
+      );
+      Navigator.maybeOf(context)?.maybePop();
+      return;
     }
-    final local = await CallService.instance.getLocalStream();
-    _localRenderer.srcObject = local;
+
     _remoteRenderer.srcObject = CallService.instance.remoteStream;
-    _phaseListener = () {
+
+    _streamListener = () {
       final stream = CallService.instance.remoteStream;
       if (_remoteRenderer.srcObject != stream) {
         _remoteRenderer.srcObject = stream;
         if (mounted) setState(() {});
       }
     };
+    CallService.instance.remoteStreamNotifier.addListener(_streamListener!);
+
+    _phaseListener = () {
+      if (!mounted) return;
+      final phase = CallService.instance.phase.value;
+      if (phase == CallPhase.failed || phase == CallPhase.ended) {
+        if (phase == CallPhase.failed) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text('Соединение не удалось')),
+          );
+        }
+        Navigator.maybeOf(context)?.maybePop();
+      }
+    };
     CallService.instance.phase.addListener(_phaseListener!);
-    if (mounted) {
-      setState(() {});
-    }
+    if (mounted) setState(() {});
   }
 
   @override
@@ -58,6 +87,10 @@ class _CallScreenState extends State<CallScreen> {
     if (_phaseListener != null) {
       CallService.instance.phase.removeListener(_phaseListener!);
       _phaseListener = null;
+    }
+    if (_streamListener != null) {
+      CallService.instance.remoteStreamNotifier.removeListener(_streamListener!);
+      _streamListener = null;
     }
     _localRenderer.dispose();
     _remoteRenderer.dispose();

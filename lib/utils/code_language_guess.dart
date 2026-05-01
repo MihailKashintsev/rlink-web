@@ -35,5 +35,19 @@ String guessProgrammingLanguage(String code) {
   if (lower.contains('dart:') || lower.contains('void main()')) return 'Dart';
   if (lower.contains('package:flutter')) return 'Dart/Flutter';
 
+  // PowerShell / Windows shell (в т.ч. без ```powershell — только по содержимому)
+  if (RegExp(
+        r'\b(Get-|Set-|New-|Remove-|Write-|Invoke-|Start-|Stop-|param\s*\(|'
+        r'Where-Object|ForEach-Object|\$env:[A-Za-z_][\w]*|Select-Object|'
+        r'choco\s|scoop\s|winget\s)',
+        caseSensitive: false,
+      ).hasMatch(s)) {
+    return 'PowerShell';
+  }
+  if (RegExp(r'^\s*@\s*[\[\{]', multiLine: true).hasMatch(s) &&
+      RegExp(r'\bparam\s*\(', caseSensitive: false).hasMatch(s)) {
+    return 'PowerShell';
+  }
+
   return 'Код';
 }

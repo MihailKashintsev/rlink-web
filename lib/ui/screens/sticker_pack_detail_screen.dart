@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 
 import '../../models/sticker_pack.dart';
 import '../../services/sticker_collection_service.dart';
+import '../../services/sticker_pack_dm_service.dart';
+import '../widgets/forward_target_sheet.dart';
 import 'sticker_pack_editor_screen.dart';
 
 class StickerPackDetailScreen extends StatefulWidget {
@@ -46,6 +48,16 @@ class _StickerPackDetailScreenState extends State<StickerPackDetailScreen> {
         _loading = false;
       });
     }
+  }
+
+  Future<void> _sharePack(BuildContext context, StickerPack pack) async {
+    final picked = await showForwardDmTargetSheet(context);
+    if (picked == null || !context.mounted) return;
+    await StickerPackDmService.sendPackToPeer(
+      context: context,
+      targetPeerId: picked.peerId,
+      pack: pack,
+    );
   }
 
   Future<void> _confirmDelete(BuildContext context) async {
@@ -94,6 +106,11 @@ class _StickerPackDetailScreenState extends State<StickerPackDetailScreen> {
       appBar: AppBar(
         title: Text(pack.title),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.share_outlined),
+            tooltip: 'Поделиться паком',
+            onPressed: () => unawaited(_sharePack(context, pack)),
+          ),
           IconButton(
             icon: const Icon(Icons.edit_outlined),
             onPressed: () async {

@@ -25,9 +25,11 @@ import '../../services/runtime_platform.dart';
 import '../../services/sound_effects_service.dart';
 import '../../services/web_identity_portable.dart';
 import '../screens/stickers_hub_screen.dart';
+import '../screens/emoji_hub_screen.dart';
 import '../screens/chat_screen.dart';
 import '../screens/diagnostics_screen.dart';
 import '../widgets/avatar_widget.dart';
+import '../widgets/status_emoji_view.dart';
 import '../screens/about_screen.dart';
 import '../screens/documentation_screen.dart';
 import '../screens/settings_data_page.dart';
@@ -787,58 +789,30 @@ class _AppearancePageState extends State<_AppearancePage> {
           ListTile(
             leading: Icon(Icons.touch_app_outlined, color: cs.primary),
             title: Text(AppL10n.t('settings_quick_reaction_double_tap')),
-            subtitle: Text(
-              '${AppL10n.t('settings_quick_reaction_now')}${settings.quickReactionEmoji}',
-              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-            ),
-            trailing: Text(settings.quickReactionEmoji,
-                style: const TextStyle(fontSize: 22)),
-            onTap: () async {
-              final picked = await showDialog<String>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: Text(AppL10n.t('settings_quick_reaction_title')),
-                  content: SizedBox(
-                    width: 320,
-                    child: Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      alignment: WrapAlignment.center,
-                      children: kReactionEmojis.map((e) {
-                        return InkWell(
-                          borderRadius: BorderRadius.circular(12),
-                          onTap: () => Navigator.pop(ctx, e),
-                          child: Container(
-                            width: 48,
-                            height: 48,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(
-                                color: e == settings.quickReactionEmoji
-                                    ? Theme.of(ctx).colorScheme.primary
-                                    : Theme.of(ctx)
-                                        .colorScheme
-                                        .outlineVariant,
-                                width:
-                                    e == settings.quickReactionEmoji ? 2 : 1,
-                              ),
-                            ),
-                            child: Text(e,
-                                style: const TextStyle(fontSize: 26)),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: Text(AppL10n.t('cancel')),
-                    ),
-                  ],
+            subtitle: Row(
+              children: [
+                Text(
+                  AppL10n.t('settings_quick_reaction_now'),
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                 ),
-              );
+                const SizedBox(width: 4),
+                StatusEmojiView(
+                  statusEmoji: settings.quickReactionEmoji,
+                  fontSize: 16,
+                  emptyPlaceholder: '😀',
+                  style:
+                      TextStyle(fontSize: 14, color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+            trailing: StatusEmojiView(
+              statusEmoji: settings.quickReactionEmoji,
+              fontSize: 22,
+              emptyPlaceholder: '😀',
+              style: const TextStyle(fontSize: 22),
+            ),
+            onTap: () async {
+              final picked = await showReactionPickerSheet(context);
               final e = (picked ?? '').trim();
               if (e.isNotEmpty) {
                 await settings.setQuickReactionEmoji(e);
@@ -1335,17 +1309,19 @@ class _ProfilePageState extends State<_ProfilePage> {
               leading:
                   Icon(Icons.emoji_emotions_outlined, color: cs.primary),
               title: const Text('Эмодзи-статус'),
-              subtitle: Text(
-                profile.statusEmoji.isEmpty
-                    ? 'Рядом с именем в меню; виден контактам в сети'
-                    : profile.statusEmoji,
-                style: TextStyle(
-                  fontSize: profile.statusEmoji.isEmpty ? 12 : 20,
-                  color: profile.statusEmoji.isEmpty
-                      ? cs.onSurfaceVariant
-                      : cs.onSurface,
-                ),
-              ),
+              subtitle: profile.statusEmoji.isEmpty
+                  ? Text(
+                      'Рядом с именем в меню; виден контактам в сети',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: cs.onSurfaceVariant,
+                      ),
+                    )
+                  : StatusEmojiView(
+                      statusEmoji: profile.statusEmoji,
+                      fontSize: 20,
+                      style: TextStyle(fontSize: 20, color: cs.onSurface),
+                    ),
               trailing: profile.statusEmoji.isNotEmpty
                   ? IconButton(
                       icon: const Icon(Icons.clear),
@@ -1366,6 +1342,18 @@ class _ProfilePageState extends State<_ProfilePage> {
             onTap: () => Navigator.push<void>(
               context,
               MaterialPageRoute(builder: (_) => const StickersHubScreen()),
+            ),
+          ),
+          ListTile(
+            leading: Icon(Icons.emoji_emotions, color: cs.primary),
+            title: const Text('Эмодзи'),
+            subtitle: const Text(
+              'Свои :shortcode: и бот Emoji',
+              style: TextStyle(fontSize: 12),
+            ),
+            onTap: () => Navigator.push<void>(
+              context,
+              MaterialPageRoute(builder: (_) => const EmojiHubScreen()),
             ),
           ),
           ListTile(
@@ -1405,6 +1393,7 @@ class _ProfilePageState extends State<_ProfilePage> {
   Future<void> _pickEmojiStatus(BuildContext context) async {
     final prof = ProfileService.instance.profile;
     if (prof == null) return;
+    final manualCtrl = TextEditingController(text: prof.statusEmoji);
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -1437,6 +1426,30 @@ class _ProfilePageState extends State<_ProfilePage> {
                     },
                   ),
                 ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: manualCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Свой статус',
+                  hintText: '😀 или :my_emoji:',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              FilledButton.tonal(
+                onPressed: () async {
+                  final normalized =
+                      UserProfile.normalizeStatusEmoji(manualCtrl.text);
+                  Navigator.pop(ctx);
+                  await ProfileService.instance.updateProfile(
+                    statusEmoji: normalized,
+                  );
+                  if (!context.mounted) return;
+                  setState(() {});
+                  await sendProfileToAllContacts();
+                },
+                child: const Text('Сохранить статус'),
               ),
             ],
           ),
@@ -1771,14 +1784,18 @@ class _NetworkPageState extends State<_NetworkPage> {
                         style: TextStyle(
                             fontSize: 12, color: cs.onSurfaceVariant),
                       ),
-                      trailing: connecting
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2),
-                            )
-                          : IconButton(
+                      trailing: SizedBox(
+                        width: 60,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (connecting)
+                              const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            IconButton(
                               icon: const Icon(Icons.refresh, size: 20),
                               tooltip: connected
                                   ? AppL10n.t('tool_reconnect')
@@ -1786,6 +1803,9 @@ class _NetworkPageState extends State<_NetworkPage> {
                               onPressed: () =>
                                   RelayService.instance.reconnect(),
                             ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 );

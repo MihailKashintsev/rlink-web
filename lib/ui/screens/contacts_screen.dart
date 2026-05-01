@@ -9,6 +9,7 @@ import '../../services/crypto_service.dart';
 import '../../services/profile_service.dart';
 import '../../services/relay_service.dart';
 import '../widgets/avatar_widget.dart';
+import '../widgets/status_emoji_view.dart';
 import 'chat_screen.dart';
 import 'contact_edit_screen.dart';
 
@@ -520,9 +521,6 @@ class _ContactTile extends StatelessWidget {
     final baseSub = contact.username.isNotEmpty
         ? '#${contact.username}'
         : '${contact.publicKeyHex.substring(0, contact.publicKeyHex.length.clamp(0, 16))}...';
-    final subtitle = contact.statusEmoji.isEmpty
-        ? baseSub
-        : '${contact.statusEmoji} · $baseSub';
     return ListTile(
       leading: AvatarWidget(
         initials: contact.nickname.isNotEmpty
@@ -533,12 +531,46 @@ class _ContactTile extends StatelessWidget {
         imagePath: contact.avatarImagePath,
         size: 48,
       ),
-      title: Text(contact.nickname,
-          style: const TextStyle(fontWeight: FontWeight.w500)),
-      subtitle: Text(
-        subtitle,
-        style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+      title: Row(
+        children: [
+          Flexible(
+            child: Text(contact.nickname,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w500)),
+          ),
+          if (contact.statusEmoji.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            StatusEmojiView(
+              statusEmoji: contact.statusEmoji,
+              fontSize: 16,
+            ),
+          ],
+        ],
       ),
+      subtitle: contact.statusEmoji.isEmpty
+          ? Text(
+              baseSub,
+              style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+            )
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                StatusEmojiView(
+                  statusEmoji: contact.statusEmoji,
+                  fontSize: 13,
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    baseSub,
+                    style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
         IconButton(
           icon: const Icon(Icons.edit_outlined, size: 20),

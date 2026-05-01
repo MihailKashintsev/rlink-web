@@ -33,7 +33,7 @@ class CallService {
   CallService._();
   static final CallService instance = CallService._();
   static const Duration _ringingTimeoutDuration = Duration(seconds: 60);
-  static const Duration _connectingTimeoutDuration = Duration(seconds: 35);
+  static const Duration _connectingTimeoutDuration = Duration(seconds: 50);
 
   static const _turnHost = String.fromEnvironment('TURN_HOST', defaultValue: '');
   static const _turnUser = String.fromEnvironment('TURN_USER', defaultValue: '');
@@ -55,10 +55,21 @@ class CallService {
   bool _videoEnabled = true;
   bool _acceptedAwaitingOffer = false;
   Timer? _connectTimeout;
+  Timer? _acceptResendTimer;
+  int _acceptResendAttempts = 0;
+  Timer? _offerResendTimer;
+  Timer? _iceDiagTimer;
+  int _localRelayCount = 0;
+  int _localSrflxCount = 0;
+  int _localHostCount = 0;
+  int _remoteRelayCount = 0;
+  int _remoteSrflxCount = 0;
+  int _remoteHostCount = 0;
   DateTime _phaseSince = DateTime.now();
   static final RegExp _pubKeyHex64 = RegExp(r'^[0-9a-f]{64}$');
 
   MediaStream? remoteStream;
+  final ValueNotifier<MediaStream?> remoteStreamNotifier = ValueNotifier(null);
 
   bool get isBusy =>
       phase.value == CallPhase.ringing ||
@@ -75,47 +86,60 @@ class CallService {
       {'urls': 'stun:stun.l.google.com:19302'},
       {'urls': 'stun:stun1.l.google.com:19302'},
       {'urls': 'stun:stun.cloudflare.com:3478'},
+      {'urls': 'stun:stun.nextcloud.com:443'},
     ];
     final host = _turnHost.trim();
     final user = _turnUser.trim();
     final pass = _turnPassword.trim();
     if (host.isNotEmpty && user.isNotEmpty && pass.isNotEmpty) {
-      servers.addAll(<Map<String, dynamic>>[
-        {
-          'urls': <String>[
-            'turn:$host:3478?transport=udp',
-            'turn:$host:3478?transport=tcp',
-          ],
-          'username': user,
-          'credential': pass,
-        },
-        {
-          'urls': <String>['turns:$host:5349?transport=tcp'],
-          'username': user,
-          'credential': pass,
-        },
-      ]);
+      // TURN UDP и TCP — основной транспорт; TLS не добавляем (нет сертификата).
+      servers.add(<String, dynamic>{
+        'urls': <String>[
+          'turn:$host:3478?transport=udp',
+          'turn:$host:3478?transport=tcp',
+        ],
+        'username': user,
+        'credential': pass,
+      });
+      debugPrint('[RLINK][Call] TURN configured: $host user=$user');
+    } else {
+      debugPrint('[RLINK][Call] TURN NOT configured (no dart-define). '
+          'Calls may fail between NAT devices. Run with:\n'
+          '  --dart-define=TURN_HOST=<host>\n'
+          '  --dart-define=TURN_USER=<user>\n'
+          '  --dart-define=TURN_PASSWORD=<pass>');
     }
-    // Fallback TURNs keep call setup reliable when self-hosted TURN is
-    // temporarily unreachable/misconfigured in production.
-    servers.addAll(<Map<String, dynamic>>[
-      {
-        'urls': 'turn:openrelay.metered.ca:80',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-      {
-        'urls': 'turn:openrelay.metered.ca:443',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-      {
-        'urls': 'turns:openrelay.metered.ca:443',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-    ]);
-    return <String, dynamic>{'iceServers': servers};
+    // iceCandidatePoolSize: пул кандидатов начинает собираться сразу при
+    //   createPeerConnection, а не после setLocalDescription — заметно
+    //   ускоряет старт звонка (особенно для TURN allocate).
+    // bundlePolicy/rtcpMuxPolicy: один транспортный канал для всего —
+    //   меньше работы NAT-у, быстрее ICE checks.
+    return <String, dynamic>{
+      'iceServers': servers,
+      'iceCandidatePoolSize': 4,
+      'bundlePolicy': 'max-bundle',
+      'rtcpMuxPolicy': 'require',
+      'sdpSemantics': 'unified-plan',
+    };
+  }
+
+  /// Сбор статистики типов ICE-кандидатов; вызывается через несколько секунд
+  /// после старта «connecting» — помогает отлавливать «нет relay-кандидатов»
+  /// (TURN не работает) и symmetric NAT-проблемы.
+  void _logIceCandidateSummary(int localRelay, int localSrflx, int localHost,
+      int remoteRelay, int remoteSrflx, int remoteHost) {
+    debugPrint('[RLINK][Call] ICE candidates: '
+        'local relay=$localRelay srflx=$localSrflx host=$localHost / '
+        'remote relay=$remoteRelay srflx=$remoteSrflx host=$remoteHost');
+    if (localRelay == 0 && _turnHost.trim().isNotEmpty) {
+      debugPrint('[RLINK][Call][WARN] no local relay candidates — TURN allocate '
+          'не прошёл (host=$_turnHost). Проверь UDP 3478 и порты 49160-49200.');
+    }
+    if (remoteRelay == 0 && remoteSrflx == 0) {
+      debugPrint(
+          '[RLINK][Call][WARN] нет ни одного публичного кандидата от пира — '
+          'возможно его STUN не работает или ICE-сигнализация не доходит.');
+    }
   }
 
   void bindSignaling() {
@@ -153,6 +177,9 @@ class CallService {
     });
     await _createAndSendOffer();
     _armRingingTimeout();
+    // Keep resending invite+offer every 5 s so callee gets it even after
+    // a transient relay reconnect (WS drop → silent mailbox queue).
+    _startOfferResendLoop(recipientKey, callId);
 
     return CallSessionInfo(
       callId: callId,
@@ -184,9 +211,11 @@ class CallService {
     if (offer is! Map<String, dynamic>) {
       // Offer can arrive after user taps "accept"; keep session pending.
       _acceptedAwaitingOffer = true;
+      _startAcceptResendLoop(session.peerId, session.callId);
       incomingCall.value = null;
       return;
     }
+    _stopAcceptResendLoop();
     await _applyOfferAndAnswer(session.callId, session.peerId, offer);
     incomingCall.value = null;
   }
@@ -269,6 +298,9 @@ class CallService {
     if (_pc != null) return;
     final pc = await createPeerConnection(_iceConfig());
     _pc = pc;
+    // Pre-create remote stream — on iOS event.streams is often empty,
+    // so we add tracks manually and avoid the null-stream bug.
+    final rs = await createLocalMediaStream('remote');
 
     pc.onIceCandidate = (candidate) async {
       final peerId = _activePeerId;
@@ -276,6 +308,22 @@ class CallService {
       if (peerId == null || callId == null || candidate.candidate == null) {
         return;
       }
+      // Логируем тип кандидата для диагностики (host/srflx/relay)
+      final c = candidate.candidate ?? '';
+      final typ = RegExp(r'typ\s+(\S+)').firstMatch(c)?.group(1) ?? '?';
+      switch (typ) {
+        case 'relay':
+          _localRelayCount++;
+          break;
+        case 'srflx':
+        case 'prflx':
+          _localSrflxCount++;
+          break;
+        case 'host':
+          _localHostCount++;
+          break;
+      }
+      debugPrint('[RLINK][Call] ICE candidate typ=$typ mid=${candidate.sdpMid}');
       await _sendSignal(peerId, callId, 'ice', {
         'candidate': candidate.candidate,
         'sdpMid': candidate.sdpMid,
@@ -284,26 +332,58 @@ class CallService {
     };
 
     pc.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        remoteStream = event.streams.first;
-        _connectTimeout?.cancel();
+      unawaited(rs.addTrack(event.track));
+      remoteStream = rs;
+      remoteStreamNotifier.value = rs;
+      _connectTimeout?.cancel();
+      if (phase.value != CallPhase.connected) {
         _setPhase(CallPhase.connected);
         unawaited(SoundEffectsService.instance.playAction(ActionSound.callConnected));
       }
     };
 
+    pc.onIceConnectionState = (state) {
+      debugPrint('[RLINK][Call] ICE state: $state');
+      switch (state) {
+        case RTCIceConnectionState.RTCIceConnectionStateConnected:
+        case RTCIceConnectionState.RTCIceConnectionStateCompleted:
+          _connectTimeout?.cancel();
+          if (phase.value != CallPhase.connected) {
+            _setPhase(CallPhase.connected);
+            unawaited(SoundEffectsService.instance.playAction(ActionSound.callConnected));
+          }
+          break;
+        case RTCIceConnectionState.RTCIceConnectionStateFailed:
+          if (phase.value != CallPhase.ended && phase.value != CallPhase.failed) {
+            unawaited(_cleanup(CallPhase.failed));
+          }
+          break;
+        case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
+          // Transient — give it a few seconds before cleaning up.
+          // onConnectionState handles the definitive closure.
+          break;
+        default:
+          break;
+      }
+    };
+
     pc.onConnectionState = (state) {
+      debugPrint('[RLINK][Call] PC state: $state');
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         unawaited(_cleanup(CallPhase.failed));
       } else if (state ==
               RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
-        unawaited(_cleanup(CallPhase.ended));
+        if (phase.value != CallPhase.ended && phase.value != CallPhase.failed) {
+          unawaited(_cleanup(CallPhase.ended));
+        }
       } else if (state ==
           RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         _connectTimeout?.cancel();
-        _setPhase(CallPhase.connected);
-        unawaited(SoundEffectsService.instance.playAction(ActionSound.callConnected));
+        if (phase.value != CallPhase.connected) {
+          _setPhase(CallPhase.connected);
+          unawaited(SoundEffectsService.instance.playAction(ActionSound.callConnected));
+        }
       }
     };
   }
@@ -363,6 +443,11 @@ class CallService {
     debugPrint('[RLINK][Call][RX] $signalType call=$callId from=$f8');
     switch (signalType) {
       case 'invite':
+        // De-duplicate: if we're already ringing for this exact call, ignore
+        // re-invites (sent by caller's offer resend loop).
+        if (_activeCallId == callId && phase.value == CallPhase.ringing) {
+          break;
+        }
         if (isBusy && _activeCallId != callId) {
           final staleBusy = (phase.value == CallPhase.ringing ||
                   phase.value == CallPhase.connecting) &&
@@ -408,12 +493,19 @@ class CallService {
             _activePeerId == fromId &&
             _pc != null) {
           _acceptedAwaitingOffer = false;
+          _stopAcceptResendLoop();
           await _applyOfferAndAnswer(callId, fromId, payload);
         }
         break;
       case 'accept':
         // Callee accepted — move to connecting phase, then resend offer.
-        if (_activeCallId == callId && _activePeerId == fromId) {
+        final callMatch = _activeCallId == callId;
+        final peerMatch = _activePeerId == fromId;
+        debugPrint('[RLINK][Call] accept gate: callMatch=$callMatch peerMatch=$peerMatch '
+            'myCall=${_activeCallId?.substring(0, 8) ?? '-'} rxCall=${callId.substring(0, 8)} '
+            'myPeer=${_activePeerId?.substring(0, 8) ?? '-'} rxPeer=${fromId.substring(0, 8)}');
+        if (callMatch && peerMatch) {
+          _stopOfferResendLoop(); // stop ringing resend, caller now sends offer on-demand
           _setPhase(CallPhase.connecting);
           _armConnectTimeout();
           if (_lastLocalOffer != null) {
@@ -505,6 +597,10 @@ class CallService {
     await SoundEffectsService.instance.stopIncomingRingtone();
     _connectTimeout?.cancel();
     _connectTimeout = null;
+    _iceDiagTimer?.cancel();
+    _iceDiagTimer = null;
+    _stopAcceptResendLoop();
+    _stopOfferResendLoop();
     try {
       await _pc?.close();
     } catch (_) {}
@@ -517,13 +613,68 @@ class CallService {
       await remoteStream?.dispose();
     } catch (_) {}
     remoteStream = null;
+    remoteStreamNotifier.value = null;
     _activeCallId = null;
     _activePeerId = null;
     _lastLocalOffer = null;
     _acceptedAwaitingOffer = false;
     _pendingOffers.clear();
     _pendingIce.clear();
+    _localRelayCount = 0;
+    _localSrflxCount = 0;
+    _localHostCount = 0;
+    _remoteRelayCount = 0;
+    _remoteSrflxCount = 0;
+    _remoteHostCount = 0;
     _setPhase(endPhase);
+  }
+
+  void _startAcceptResendLoop(String peerId, String callId) {
+    _stopAcceptResendLoop();
+    _acceptResendAttempts = 0;
+    _acceptResendTimer = Timer.periodic(const Duration(seconds: 2), (t) async {
+      if (!_acceptedAwaitingOffer || _activeCallId != callId || _activePeerId != peerId) {
+        _stopAcceptResendLoop();
+        return;
+      }
+      _acceptResendAttempts++;
+      if (_acceptResendAttempts > 6) {
+        debugPrint('[RLINK][Call] offer did not arrive after repeated accept.');
+        _stopAcceptResendLoop();
+        return;
+      }
+      debugPrint('[RLINK][Call] resend accept #$_acceptResendAttempts call=$callId');
+      await _sendSignal(peerId, callId, 'accept');
+    });
+  }
+
+  void _stopAcceptResendLoop() {
+    _acceptResendTimer?.cancel();
+    _acceptResendTimer = null;
+    _acceptResendAttempts = 0;
+  }
+
+  /// Caller-side loop: resend invite+offer every 5 s while still ringing.
+  /// Ensures callee gets the offer even if they reconnected to relay after
+  /// the initial delivery (transient WebSocket drop → silent relay queue).
+  void _startOfferResendLoop(String peerId, String callId) {
+    _stopOfferResendLoop();
+    _offerResendTimer = Timer.periodic(const Duration(seconds: 5), (t) async {
+      if (phase.value != CallPhase.ringing || _activeCallId != callId) {
+        _stopOfferResendLoop();
+        return;
+      }
+      debugPrint('[RLINK][Call] resend invite+offer (ringing retry) call=$callId');
+      await _sendSignal(peerId, callId, 'invite', {'video': _videoEnabled, 'audio': true});
+      if (_lastLocalOffer != null) {
+        await _sendSignal(peerId, callId, 'offer', _lastLocalOffer!);
+      }
+    });
+  }
+
+  void _stopOfferResendLoop() {
+    _offerResendTimer?.cancel();
+    _offerResendTimer = null;
   }
 
   void _armConnectTimeout() {
@@ -536,7 +687,19 @@ class CallService {
       debugPrint(
         '[RLINK][Call] connect timeout: call=${_activeCallId ?? '-'} phase=${phase.value}',
       );
+      _logIceCandidateSummary(_localRelayCount, _localSrflxCount,
+          _localHostCount, _remoteRelayCount, _remoteSrflxCount,
+          _remoteHostCount);
       unawaited(_cleanup(CallPhase.failed));
+    });
+    // Промежуточный диаг через 8 сек — если до сих пор не connected,
+    // покажем сводку кандидатов: проще понять, виноват ли TURN.
+    _iceDiagTimer?.cancel();
+    _iceDiagTimer = Timer(const Duration(seconds: 8), () {
+      if (phase.value != CallPhase.connecting) return;
+      _logIceCandidateSummary(_localRelayCount, _localSrflxCount,
+          _localHostCount, _remoteRelayCount, _remoteSrflxCount,
+          _remoteHostCount);
     });
   }
 
@@ -562,6 +725,20 @@ class CallService {
   Future<void> _addIceCandidate(Map<String, dynamic> payload) async {
     final pc = _pc;
     if (pc == null) return;
+    final cstr = payload['candidate'] as String? ?? '';
+    final typ = RegExp(r'typ\s+(\S+)').firstMatch(cstr)?.group(1) ?? '?';
+    switch (typ) {
+      case 'relay':
+        _remoteRelayCount++;
+        break;
+      case 'srflx':
+      case 'prflx':
+        _remoteSrflxCount++;
+        break;
+      case 'host':
+        _remoteHostCount++;
+        break;
+    }
     await pc.addCandidate(
       RTCIceCandidate(
         payload['candidate'] as String?,

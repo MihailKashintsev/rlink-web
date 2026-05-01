@@ -103,7 +103,7 @@ class ChannelService {
     final path = await _dbPath('channels.db');
     _db = await openDatabase(
       path,
-      version: 17,
+      version: 19,
       onCreate: (db, v) async {
         await db.execute('''
           CREATE TABLE channels (
@@ -132,6 +132,8 @@ class ChannelService {
             drive_backup_enabled INTEGER DEFAULT 0,
             drive_backup_rev INTEGER DEFAULT 0,
             drive_file_id TEXT,
+            drive_file_url TEXT,
+            drive_keys_url TEXT,
             allow_mods_manage_drive_account INTEGER DEFAULT 0
           )
         ''');
@@ -383,6 +385,16 @@ class ChannelService {
             );
           } catch (_) {}
         }
+        if (oldVersion < 18) {
+          try {
+            await db.execute('ALTER TABLE channels ADD COLUMN drive_file_url TEXT');
+          } catch (_) {}
+        }
+        if (oldVersion < 19) {
+          try {
+            await db.execute('ALTER TABLE channels ADD COLUMN drive_keys_url TEXT');
+          } catch (_) {}
+        }
       },
     );
   }
@@ -450,6 +462,8 @@ class ChannelService {
       'drive_backup_enabled': channel.driveBackupEnabled ? 1 : 0,
       'drive_backup_rev': channel.driveBackupRev,
       'drive_file_id': channel.driveFileId,
+      'drive_file_url': channel.driveFileUrl,
+      'drive_keys_url': channel.driveKeysUrl,
       'allow_mods_manage_drive_account':
           channel.allowModeratorsManageDriveAccount ? 1 : 0,
     });
@@ -508,6 +522,8 @@ class ChannelService {
             'drive_backup_enabled': ch.driveBackupEnabled ? 1 : 0,
             'drive_backup_rev': ch.driveBackupRev,
             'drive_file_id': ch.driveFileId,
+            'drive_file_url': ch.driveFileUrl,
+            'drive_keys_url': ch.driveKeysUrl,
             'allow_mods_manage_drive_account':
                 ch.allowModeratorsManageDriveAccount ? 1 : 0,
           },
@@ -784,6 +800,8 @@ class ChannelService {
         driveBackupEnabled: (r['drive_backup_enabled'] as int?) == 1,
         driveBackupRev: (r['drive_backup_rev'] as int?) ?? 0,
         driveFileId: r['drive_file_id'] as String?,
+        driveFileUrl: r['drive_file_url'] as String?,
+        driveKeysUrl: r['drive_keys_url'] as String?,
         allowModeratorsManageDriveAccount:
             (r['allow_mods_manage_drive_account'] as int?) == 1,
       );
@@ -815,6 +833,8 @@ class ChannelService {
         'drive_backup_enabled': ch.driveBackupEnabled ? 1 : 0,
         'drive_backup_rev': ch.driveBackupRev,
         'drive_file_id': ch.driveFileId,
+        'drive_file_url': ch.driveFileUrl,
+        'drive_keys_url': ch.driveKeysUrl,
         'allow_mods_manage_drive_account':
             ch.allowModeratorsManageDriveAccount ? 1 : 0,
       },
@@ -986,6 +1006,12 @@ class ChannelService {
           ? ((p['driveBackupRev'] as num?)?.toInt() ?? 0)
           : (existing?.driveBackupRev ?? 0),
       driveFileId: existing?.driveFileId,
+      driveFileUrl: p.containsKey('driveFileUrl')
+          ? p['driveFileUrl'] as String?
+          : existing?.driveFileUrl,
+      driveKeysUrl: p.containsKey('driveKeysUrl')
+          ? p['driveKeysUrl'] as String?
+          : existing?.driveKeysUrl,
       allowModeratorsManageDriveAccount:
           p.containsKey('allowModeratorsManageDriveAccount')
               ? (p['allowModeratorsManageDriveAccount'] as bool? ?? false)
@@ -1078,6 +1104,8 @@ class ChannelService {
       'drive_backup_enabled': ch.driveBackupEnabled ? 1 : 0,
       'drive_backup_rev': ch.driveBackupRev,
       'drive_file_id': ch.driveFileId,
+      'drive_file_url': ch.driveFileUrl,
+      'drive_keys_url': ch.driveKeysUrl,
       'allow_mods_manage_drive_account':
           ch.allowModeratorsManageDriveAccount ? 1 : 0,
     });
@@ -1527,13 +1555,22 @@ class ChannelService {
         whereArgs: [pid],
         orderBy: 'timestamp ASC',
       );
+      final postMap = Map<String, dynamic>.from(r);
+      final postMedia = kIsWeb ? const <String, dynamic>{} : await _readRowMediaData(postMap);
+      final commentsList = <Map<String, dynamic>>[];
+      for (final c in crows) {
+        final cm = Map<String, dynamic>.from(c);
+        final commentMedia = kIsWeb ? const <String, dynamic>{} : await _readRowMediaData(cm);
+        commentsList.add({...cm, ...commentMedia});
+      }
       posts.add({
-        'post': Map<String, dynamic>.from(r),
-        'comments': crows.map((c) => Map<String, dynamic>.from(c)).toList(),
+        'post': postMap,
+        'comments': commentsList,
+        ...postMedia,
       });
     }
     return {
-      'v': 1,
+      'v': 2,
       'type': 'rlink_channel_backup',
       'channelId': channelId,
       'exportedAt': DateTime.now().millisecondsSinceEpoch,
@@ -1541,12 +1578,60 @@ class ChannelService {
     };
   }
 
+  /// Читает медиафайлы поста/комментария и возвращает base64-данные для включения в снимок.
+  Future<Map<String, dynamic>> _readRowMediaData(Map<String, dynamic> row) async {
+    final result = <String, dynamic>{};
+    await _attachMediaBytes(row, result, 'image_path', '_img', '_img_n');
+    await _attachMediaBytes(row, result, 'video_path', '_vid', '_vid_n');
+    await _attachMediaBytes(row, result, 'voice_path', '_voice', '_voice_n');
+    await _attachMediaBytes(row, result, 'file_path', '_file', '_file_n');
+    return result;
+  }
+
+  Future<void> _attachMediaBytes(Map<String, dynamic> row, Map<String, dynamic> out,
+      String pathKey, String dataKey, String nameKey) async {
+    final path = row[pathKey] as String?;
+    if (path == null || path.isEmpty) return;
+    try {
+      final file = File(path);
+      if (!file.existsSync()) return;
+      final bytes = await file.readAsBytes();
+      out[dataKey] = base64Encode(bytes);
+      out[nameKey] = p.basename(path);
+    } catch (e) {
+      debugPrint('[RLINK][ChBak] skip media $path: $e');
+    }
+  }
+
   /// Слияние снимка в локальную БД: снимок полный — посты канала, которых нет в JSON, удаляются.
+  /// Если снимок v2 — медиафайлы восстанавливаются из base64 прямо в Documents.
   Future<void> importChannelBackupSnapshot(
       String channelId, Map<String, dynamic> json) async {
     if (_db == null) return;
     final posts = json['posts'] as List<dynamic>?;
     if (posts == null) return;
+
+    // Для v2 снимков — восстанавливаем медиафайлы ДО транзакции (IO вне TX).
+    final restoredPostMedia = <String, Map<String, String>>{};
+    final restoredCommentMedia = <String, Map<String, String>>{};
+    if (!kIsWeb && (json['v'] as int? ?? 1) >= 2) {
+      for (final item in posts) {
+        final m = item as Map<String, dynamic>;
+        final postId = (m['post'] as Map?)?['id'] as String?;
+        if (postId != null) {
+          restoredPostMedia[postId] = await _restoreRowMediaFiles(m);
+        }
+        final cl = m['comments'] as List<dynamic>? ?? const [];
+        for (final c in cl) {
+          final cm = c as Map<String, dynamic>;
+          final cid = cm['id'] as String?;
+          if (cid != null) {
+            restoredCommentMedia[cid] = await _restoreRowMediaFiles(cm);
+          }
+        }
+      }
+    }
+
     await _db!.transaction((txn) async {
       final snapshotPostIds = <String>{};
       for (final item in posts) {
@@ -1577,17 +1662,28 @@ class ChannelService {
         final m = item as Map<String, dynamic>;
         final pmap = Map<String, dynamic>.from(m['post'] as Map);
         if (pmap['channel_id'] != channelId) continue;
+        final pid = pmap['id'] as String;
+        // Применяем восстановленные пути медиа (v2) и убираем служебные поля.
+        if (restoredPostMedia.containsKey(pid)) {
+          pmap.addAll(restoredPostMedia[pid]!);
+        }
+        pmap.removeWhere((k, _) => k.startsWith('_'));
         await txn.insert(
           'channel_posts',
           pmap,
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
-        final pid = pmap['id'] as String;
         await txn
             .delete('channel_comments', where: 'post_id = ?', whereArgs: [pid]);
         final cl = m['comments'] as List<dynamic>? ?? const [];
         for (final c in cl) {
           final cm = Map<String, dynamic>.from(c as Map);
+          final cid = cm['id'] as String?;
+          if (cid != null && restoredCommentMedia.containsKey(cid)) {
+            cm.addAll(restoredCommentMedia[cid]!);
+          }
+          // Убираем служебные поля перед записью в БД.
+          cm.removeWhere((k, _) => k.startsWith('_'));
           await txn.insert(
             'channel_comments',
             cm,
@@ -1597,6 +1693,47 @@ class ChannelService {
       }
     });
     _bump();
+  }
+
+  /// Восстанавливает медиафайлы из base64-полей снимка, возвращает новые пути для DB.
+  Future<Map<String, String>> _restoreRowMediaFiles(Map<String, dynamic> entry) async {
+    final result = <String, String>{};
+    final docsDir = await getApplicationDocumentsDirectory();
+    await _restoreMediaField(entry, result, '_img', '_img_n', 'image_path',
+        Directory(p.join(docsDir.path, 'images')));
+    await _restoreMediaField(entry, result, '_vid', '_vid_n', 'video_path',
+        Directory(p.join(docsDir.path, 'videos')));
+    await _restoreMediaField(entry, result, '_voice', '_voice_n', 'voice_path',
+        Directory(p.join(docsDir.path, 'voices')));
+    await _restoreMediaField(entry, result, '_file', '_file_n', 'file_path',
+        Directory(p.join(docsDir.path, 'files')));
+    return result;
+  }
+
+  Future<void> _restoreMediaField(
+    Map<String, dynamic> entry,
+    Map<String, String> out,
+    String dataKey,
+    String nameKey,
+    String pathKey,
+    Directory dir,
+  ) async {
+    final data = entry[dataKey] as String?;
+    if (data == null || data.isEmpty) return;
+    try {
+      final name = (entry[nameKey] as String?)?.isNotEmpty == true
+          ? entry[nameKey] as String
+          : _uuid.v4();
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final filePath = p.join(dir.path, name);
+      final file = File(filePath);
+      if (!file.existsSync()) {
+        await file.writeAsBytes(base64Decode(data));
+      }
+      out[pathKey] = filePath;
+    } catch (e) {
+      debugPrint('[RLINK][ChBak] restore media $pathKey failed: $e');
+    }
   }
 
   Future<String?> _findChannelIdForCompact(String compact) async {

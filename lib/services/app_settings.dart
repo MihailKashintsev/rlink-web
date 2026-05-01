@@ -255,6 +255,12 @@ class AppSettings extends ChangeNotifier {
     return base < 2 ? 2 : base;
   }
 
+  /// Нижний отступ между пузырями с учётом плотности.
+  double get messageBubbleBottomMargin {
+    if (_compactMode) return 2;
+    return const [8.0, 4.0, 2.0][_messageDensity];
+  }
+
   /// Цвет статуса: 0=зелёный(онлайн), 1=жёлтый(DND), 2=красный(занят), 3=серый(офлайн — авто)
   Color get onlineStatusColor => const [
         Color(0xFF4CAF50), // green

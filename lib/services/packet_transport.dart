@@ -50,6 +50,12 @@ class DefaultPacketTransport implements PacketTransport {
           // Keep canonical key as provided by sender side to avoid
           // case-mismatch with relay maps from mixed-version clients.
           recipientKey = explicitRecipient.trim();
+        } else if (explicitRecipient != null &&
+            explicitRecipient.trim().length >= 8) {
+          // Legacy chats can carry short peer ids in packet.recipientId.
+          // Try to resolve them through presence/contacts before dropping.
+          recipientKey =
+              RelayService.instance.findPeerByPrefix(explicitRecipient.trim());
         } else if (rid8 != null) {
           recipientKey = RelayService.instance.findPeerByPrefix(rid8);
         }
@@ -71,10 +77,10 @@ class DefaultPacketTransport implements PacketTransport {
             packet.type == 'raw' ||
             packet.type == 'pair_req' ||
             packet.type == 'pair_acc' ||
-            packet.type == 'ether') {
-          final route = (recipientKey != null && recipientKey.isNotEmpty) ? 'direct' : 'broadcast';
-          // Detailed routing trace for DM/pair/ether diagnostics.
-          // Helps identify wrong key/prefix resolution in web flows.
+            packet.type == 'ether' ||
+            packet.type == 'call_sig') {
+          final route = (recipientKey != null && recipientKey.isNotEmpty) ? 'direct' : 'drop/broadcast';
+          // Detailed routing trace for DM/pair/ether/call_sig diagnostics.
           final line = '[RLINK][Transport] type=${packet.type} route=$route '
               'rid=${_short(packet.recipientId ?? '')} r8=${packet.payload['r'] ?? '-'} '
               'resolved=${_short(recipientKey ?? '')} explicit=${_short(explicitRecipient ?? '')}';

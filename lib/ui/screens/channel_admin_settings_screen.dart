@@ -33,6 +33,8 @@ class _ChannelAdminSettingsScreenState
   Channel? _channel;
   GoogleDriveSyncStatus? _driveStatus;
   bool _driveRefreshing = false;
+  bool _isPublishingBackup = false;
+  String _publishStep = '';
 
   String get _myId => CryptoService.instance.publicKeyHex;
   bool get _isModeratorDriveMode => widget.allowModeratorDriveManagement;
@@ -184,6 +186,26 @@ class _ChannelAdminSettingsScreenState
         content: Text('Google-аккаунт отвязан'),
       ),
     );
+  }
+
+  Future<void> _publishBackupNow() async {
+    final ch = _channel;
+    if (ch == null) return;
+    setState(() { _isPublishingBackup = true; _publishStep = 'Сборка снимка истории…'; });
+    try {
+      await ChannelBackupService.instance.publishBackup(ch);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('История успешно сохранена на Google Drive')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка при публикации: $e')),
+      );
+    } finally {
+      if (mounted) setState(() { _isPublishingBackup = false; _publishStep = ''; });
+    }
   }
 
   Future<void> _clearDriveBackupHistory() async {
@@ -846,13 +868,33 @@ class _ChannelAdminSettingsScreenState
             ),
             if (!_isModeratorDriveMode)
               ListTile(
+                leading: _isPublishingBackup
+                    ? SizedBox(
+                        width: 24, height: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                      )
+                    : const Icon(Icons.cloud_upload_outlined),
+                title: const Text('Опубликовать историю сейчас'),
+                subtitle: Text(
+                  _isPublishingBackup
+                      ? _publishStep.isNotEmpty ? _publishStep : 'Подготовка…'
+                      : 'Загрузить текущую историю канала на Google Drive',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                onTap: (_driveRefreshing || _isPublishingBackup) ? null : _publishBackupNow,
+              ),
+            if (!_isModeratorDriveMode)
+              ListTile(
                 leading: const Icon(Icons.delete_sweep_outlined),
                 title: const Text('Очистить Google-историю канала'),
                 subtitle: const Text(
                   'Удалить файл резервной истории этого канала с Google Drive',
                   style: TextStyle(fontSize: 12),
                 ),
-                onTap: _driveRefreshing ? null : _clearDriveBackupHistory,
+                onTap: (_driveRefreshing || _isPublishingBackup) ? null : _clearDriveBackupHistory,
               ),
             const Divider(height: 24),
           ],

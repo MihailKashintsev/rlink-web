@@ -35,6 +35,7 @@ class UserProfile {
   static String normalizeStatusEmoji(String raw) {
     final t = raw.trim();
     if (t.isEmpty) return '';
+    if (RegExp(r'^:[a-zA-Z0-9_]{1,48}:$').hasMatch(t)) return t;
     final c = t.characters;
     if (c.length <= 4) return t;
     return c.take(4).toString();

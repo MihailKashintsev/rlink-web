@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'dart:io';
 
+import '../../models/emoji_pack.dart';
+import '../../services/emoji_pack_service.dart';
 /// Единый расширенный набор реакций, используемый по всему приложению:
 /// 1:1 чат, каналы, комментарии каналов, группы и истории.
 ///
@@ -57,24 +60,52 @@ Future<String?> showReactionPickerSheet(BuildContext context) async {
                 ),
               ),
               const SizedBox(height: 4),
-              Wrap(
-                spacing: 4,
-                runSpacing: 4,
-                children: kReactionEmojis.map((e) {
-                  return InkWell(
-                    borderRadius: BorderRadius.circular(10),
-                    onTap: () {
-                      HapticFeedback.selectionClick();
-                      Navigator.of(ctx).pop(e);
+              ValueListenableBuilder<int>(
+                valueListenable: EmojiPackService.instance.version,
+                builder: (_, __, ___) {
+                  return FutureBuilder<List<EmojiPack>>(
+                    future: EmojiPackService.instance.loadPacks(),
+                    builder: (context, snap) {
+                      final custom = <CustomEmoji>[];
+                      final seen = <String>{};
+                      for (final pack in snap.data ?? const <EmojiPack>[]) {
+                        for (final e in pack.emojis) {
+                          final key = e.shortcode.toLowerCase();
+                          if (seen.add(key)) custom.add(e);
+                        }
+                      }
+                      final items = <_ReactionPickerItem>[
+                        ...kReactionEmojis
+                            .map((e) => _ReactionPickerItem(value: e)),
+                        ...custom
+                            .map((e) => _ReactionPickerItem(value: ':${e.shortcode}:')),
+                      ];
+                      return Wrap(
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: items.map((item) {
+                          return InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: () {
+                              HapticFeedback.selectionClick();
+                              Navigator.of(ctx).pop(item.value);
+                            },
+                            child: SizedBox(
+                              width: 48,
+                              height: 48,
+                              child: Center(
+                                child: _ReactionGlyph(
+                                  value: item.value,
+                                  size: 26,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      );
                     },
-                    child: Container(
-                      width: 48,
-                      height: 48,
-                      alignment: Alignment.center,
-                      child: Text(e, style: const TextStyle(fontSize: 26)),
-                    ),
                   );
-                }).toList(),
+                },
               ),
             ],
           ),
@@ -137,7 +168,7 @@ class ReactionsBar extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(e.key, style: TextStyle(fontSize: compact ? 13 : 14)),
+                _ReactionGlyph(value: e.key, size: compact ? 13 : 14),
                 const SizedBox(width: 3),
                 Text(
                   '${e.value.length}',
@@ -152,6 +183,42 @@ class ReactionsBar extends StatelessWidget {
           ),
         );
       }).toList(),
+    );
+  }
+}
+
+class _ReactionPickerItem {
+  final String value;
+  const _ReactionPickerItem({required this.value});
+}
+
+class _ReactionGlyph extends StatelessWidget {
+  final String value;
+  final double size;
+  const _ReactionGlyph({
+    required this.value,
+    required this.size,
+  });
+
+  static final RegExp _shortcodeRe = RegExp(r'^:([a-zA-Z0-9_]{1,48}):$');
+
+  @override
+  Widget build(BuildContext context) {
+    final m = _shortcodeRe.firstMatch(value.trim());
+    if (m == null) {
+      return Text(value, style: TextStyle(fontSize: size));
+    }
+    final sc = m.group(1)!;
+    final path = EmojiPackService.instance.absolutePathForShortcode(sc);
+    if (path == null || !File(path).existsSync()) {
+      return Text('😀', style: TextStyle(fontSize: size));
+    }
+    return Image.file(
+      File(path),
+      width: size + 2,
+      height: size + 2,
+      fit: BoxFit.cover,
+      errorBuilder: (_, __, ___) => Text('😀', style: TextStyle(fontSize: size)),
     );
   }
 }

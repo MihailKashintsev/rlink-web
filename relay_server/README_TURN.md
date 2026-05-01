@@ -4,6 +4,25 @@ This setup runs both:
 - `relay` (WebSocket signaling/server logic) on `:8080`
 - `turn` (coturn media relay) on `:3478` and `:5349`
 
+## 0) Admin panel setup
+
+The in-app Admin Panel (accessible via 16 taps on About screen) requires `RELAY_ADMIN_HASH` to be set.
+
+Generate the hash of your chosen admin password:
+```bash
+echo -n "YourAdminPassword" | shasum -a 256 | awk '{print $1}'
+```
+
+Create a `.env` file next to `docker-compose.yml`:
+```bash
+cp .env.example .env
+# Edit .env and set RELAY_ADMIN_HASH to the hash above
+```
+
+The **default** app admin password is `Misha0000ff2010` — its hash is already in `.env.example`.
+Use the same password when prompted by the app.  
+**Change this in production.**
+
 ## 1) Configure TURN credentials
 
 Edit `turnserver.conf`:

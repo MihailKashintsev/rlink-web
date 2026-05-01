@@ -373,6 +373,7 @@ class ImageService {
       bool isFile = false,
       bool isSticker = false,
       bool isStory = false,
+      bool isChannelPost = false,
       String? fileName,
       String? storyId,
       String fromId = '',
@@ -393,6 +394,7 @@ class ImageService {
         isFile: isFile,
         isSticker: isSticker,
         isStory: isStory,
+        isChannelPost: isChannelPost,
         fileName: fileName,
         storyId: storyId,
         fromId: fromId,
@@ -412,6 +414,8 @@ class ImageService {
   bool isStickerAssembly(String msgId) =>
       _assemblies[msgId]?.isSticker ?? false;
   bool isStoryAssembly(String msgId) => _assemblies[msgId]?.isStory ?? false;
+  bool isChannelPostAssembly(String msgId) =>
+      _assemblies[msgId]?.isChannelPost ?? false;
   bool isViewOnceAssembly(String msgId) =>
       _assemblies[msgId]?.viewOnce ?? false;
   String? assemblyStoryId(String msgId) => _assemblies[msgId]?.storyId;
@@ -650,6 +654,7 @@ class _ImageAssembly {
   final bool isFile;
   final bool isSticker;
   final bool isStory;
+  final bool isChannelPost; // медиа канального поста — кэшируем если пост ещё не пришёл
   final bool viewOnce;
   final String? fileName;
   final String? storyId;
@@ -669,6 +674,7 @@ class _ImageAssembly {
     this.isFile = false,
     this.isSticker = false,
     this.isStory = false,
+    this.isChannelPost = false,
     this.viewOnce = false,
     this.fileName,
     this.storyId,

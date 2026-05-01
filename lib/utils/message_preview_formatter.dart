@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import '../models/channel.dart';
 import '../models/chat_message.dart';
 import '../models/group.dart';
 import '../models/message_poll.dart';
 import '../models/shared_collab.dart';
+import 'custom_emoji_text.dart';
 
 /// Человекочитаемое превью последнего сообщения (список чатов и т.п.).
 String formatMessagePreview(String? text, {String? pollJson}) {
@@ -32,14 +35,35 @@ String formatMessagePreview(String? text, {String? pollJson}) {
   if (text == '📹 Видео' || text == '⬛ Видео') return text;
   if (text.startsWith('📎 ')) return text;
 
-  return text;
+  return humanizeCustomEmojiCodes(text);
 }
 
 /// Превью для последнего сообщения личного чата (список диалогов).
 String dmLastMessagePreview(ChatMessage m) {
+  if (m.stickerPackPayload != null) {
+    final title = (m.stickerPackPayload!['title'] as String?)?.trim();
+    if (title != null && title.isNotEmpty) {
+      return '🩵 Набор «$title»';
+    }
+    return '🩵 Набор стикеров';
+  }
+  final inv = m.invitePayloadJson;
+  if (inv != null && inv.isNotEmpty) {
+    try {
+      final map = jsonDecode(inv) as Map<String, dynamic>;
+      final ty = map['type'] as String? ?? map['kind'] as String?;
+      if (ty == 'emoji_pack') {
+        final name = (map['name'] as String?)?.trim();
+        if (name != null && name.isNotEmpty) return '😀 Набор «$name»';
+        return '😀 Набор эмодзи';
+      }
+    } catch (_) {}
+  }
   var t = formatMessagePreview(m.text.isEmpty ? null : m.text);
   if (t.isNotEmpty) return t;
   if (m.imagePath != null) {
+    final base = m.imagePath!.split('/').last;
+    if (base.startsWith('stk_')) return '🩵 Стикер';
     if (m.imagePath!.toLowerCase().endsWith('.gif')) return '🎞 GIF';
     return '📷 Фото';
   }

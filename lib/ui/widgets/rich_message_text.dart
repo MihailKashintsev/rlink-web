@@ -1,6 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_highlight/flutter_highlight.dart';
+import 'package:highlight/highlight.dart' show highlight, Node;
 import 'package:flutter_highlight/themes/atom-one-dark.dart' as hl_atom_dark;
 import 'package:flutter_highlight/themes/github.dart' as hl_github;
 import 'package:google_fonts/google_fonts.dart';
@@ -8,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../l10n/app_l10n.dart';
 import '../../services/app_settings.dart';
+import '../../services/emoji_pack_service.dart';
 import '../../services/runtime_platform.dart';
 import '../../utils/card_luhn.dart';
 import '../../utils/channel_mentions.dart';
@@ -144,6 +147,17 @@ String? _normalizeHighlightLanguage(String? raw) {
     case 'zsh':
     case 'shell':
       return 'bash';
+    case 'ps1':
+    case 'psm1':
+    case 'pwsh':
+    case 'posh':
+    case 'powershell':
+    case 'microsoft.powershell':
+      return 'powershell';
+    case 'cmd':
+    case 'bat':
+    case 'batch':
+      return 'dos';
     case 'yml':
     case 'yaml':
       return 'yaml';
@@ -216,6 +230,19 @@ List<_Hit> _collectInteractiveHits(String s) {
   return picked;
 }
 
+List<_Hit> _collectCustomEmojiHits(String s, List<_Hit> blocked) {
+  final out = <_Hit>[];
+  for (final m in RegExp(r':([a-zA-Z0-9_]{1,48}):').allMatches(s)) {
+    final st = m.start;
+    final en = m.end;
+    if (blocked.any((h) => !(en <= h.start || st >= h.end))) continue;
+    final sc = m.group(1)!;
+    if (EmojiPackService.instance.lookupByShortcode(sc) == null) continue;
+    out.add(_Hit(st, en, 'cemoji', sc));
+  }
+  return out;
+}
+
 List<InlineSpan> _spansForPlain(
   String s,
   TextStyle baseStyle,
@@ -223,12 +250,21 @@ List<InlineSpan> _spansForPlain(
   bool isOut,
   BuildContext context, {
   void Function(String command)? onSlashCommandTap,
+  void Function(String shortcode)? onCustomEmojiTap,
+  bool parseCustomEmoji = true,
 }) {
   if (s.isEmpty) return [];
   final hits = _collectInteractiveHits(s);
   if (onSlashCommandTap != null) {
     for (final sh in _collectSlashCommandHits(s, hits)) {
       hits.add(sh);
+    }
+    hits.sort((a, b) => a.start.compareTo(b.start));
+  }
+  if (parseCustomEmoji) {
+    for (final eh in _collectCustomEmojiHits(s, hits)) {
+      if (hits.any((x) => !(eh.end <= x.start || eh.start >= x.end))) continue;
+      hits.add(eh);
     }
     hits.sort((a, b) => a.start.compareTo(b.start));
   }
@@ -306,6 +342,28 @@ List<InlineSpan> _spansForPlain(
           ),
         ),
       ));
+    } else if (h.kind == 'cemoji') {
+      final path = EmojiPackService.instance.absolutePathForShortcode(h.raw);
+      if (path == null || !File(path).existsSync()) {
+        spans.add(
+            TextSpan(text: s.substring(h.start, h.end), style: baseStyle));
+      } else {
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
+          child: GestureDetector(
+            onTap: onCustomEmojiTap == null ? null : () => onCustomEmojiTap(h.raw),
+            child: Image.file(
+              File(path),
+              width: 18,
+              height: 18,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) =>
+                  Text(':${h.raw}:', style: baseStyle),
+            ),
+          ),
+        ));
+      }
     }
     pos = h.end;
   }
@@ -480,6 +538,12 @@ class RichMessageText extends StatelessWidget {
   /// Тап по `/команде` в чате с ботом — отправить команду в поле ввода (обработчик снаружи).
   final void Function(String command)? onSlashCommandTap;
 
+  /// Тап по кастомному эмодзи в тексте.
+  final void Function(String shortcode)? onCustomEmojiTap;
+
+  /// Парсинг `:shortcode:` через [EmojiPackService].
+  final bool parseCustomEmoji;
+
   const RichMessageText({
     super.key,
     required this.text,
@@ -488,6 +552,8 @@ class RichMessageText extends StatelessWidget {
     this.mentionLabelFor,
     this.onMentionTap,
     this.onSlashCommandTap,
+    this.onCustomEmojiTap,
+    this.parseCustomEmoji = true,
   });
 
   static final _urlRegex = RegExp(r'https?://\S+');
@@ -589,6 +655,8 @@ class RichMessageText extends StatelessWidget {
         isOut,
         context,
         onSlashCommandTap: onSlashCommandTap,
+        onCustomEmojiTap: onCustomEmojiTap,
+        parseCustomEmoji: parseCustomEmoji,
       ));
     }
 
@@ -609,6 +677,8 @@ class RichMessageText extends StatelessWidget {
             isOut,
             context,
             onSlashCommandTap: onSlashCommandTap,
+            onCustomEmojiTap: onCustomEmojiTap,
+            parseCustomEmoji: parseCustomEmoji,
           ));
         }
         final hex = m.group(1)!;
@@ -640,6 +710,8 @@ class RichMessageText extends StatelessWidget {
           isOut,
           context,
           onSlashCommandTap: onSlashCommandTap,
+          onCustomEmojiTap: onCustomEmojiTap,
+          parseCustomEmoji: parseCustomEmoji,
         ));
       }
     }
@@ -681,7 +753,7 @@ class RichMessageText extends StatelessWidget {
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
           child: GestureDetector(
-            onTap: () => _showCodeSheet(context, t, isOut),
+            onLongPress: () => _showCodeSheet(context, t, isOut),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               margin: const EdgeInsets.symmetric(horizontal: 1),
@@ -691,7 +763,7 @@ class RichMessageText extends StatelessWidget {
                     : cs.surfaceContainerHighest.withValues(alpha: 0.6),
                 borderRadius: BorderRadius.circular(6),
               ),
-              child: Text(
+              child: SelectableText(
                 t,
                 style: baseStyle.copyWith(
                   fontFamily: 'monospace',
@@ -832,6 +904,91 @@ class LinkPreviewCard extends StatelessWidget {
   }
 }
 
+/// Подсветка как [HighlightView], но с выделением текста (копирование фрагмента).
+class _SelectableHighlightView extends StatelessWidget {
+  final String source;
+  final String? language;
+  final Map<String, TextStyle> theme;
+  final TextStyle? textStyle;
+
+  _SelectableHighlightView(
+    String input, {
+    this.language,
+    required this.theme,
+    this.textStyle,
+    int tabSize = 8,
+  }) : source = input.replaceAll('\t', ' ' * tabSize);
+
+  static const _rootKey = 'root';
+
+  static List<TextSpan> _spansForNodes(
+    List<Node> nodes,
+    Map<String, TextStyle> themeMap,
+  ) {
+    final spans = <TextSpan>[];
+    var currentSpans = spans;
+    final stack = <List<TextSpan>>[];
+
+    void traverse(Node node) {
+      if (node.value != null) {
+        currentSpans.add(node.className == null
+            ? TextSpan(text: node.value)
+            : TextSpan(
+                text: node.value,
+                style: themeMap[node.className!],
+              ));
+      } else if (node.children != null) {
+        final tmp = <TextSpan>[];
+        currentSpans
+            .add(TextSpan(children: tmp, style: themeMap[node.className!]));
+        stack.add(currentSpans);
+        currentSpans = tmp;
+
+        for (final n in node.children!) {
+          traverse(n);
+          if (n == node.children!.last) {
+            currentSpans = stack.isEmpty ? spans : stack.removeLast();
+          }
+        }
+      }
+    }
+
+    for (final node in nodes) {
+      traverse(node);
+    }
+    return spans;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const defaultFontColor = Color(0xff000000);
+    const defaultFontFamily = 'monospace';
+
+    var merged = TextStyle(
+      fontFamily: defaultFontFamily,
+      color: theme[_rootKey]?.color ?? defaultFontColor,
+    );
+    if (textStyle != null) {
+      merged = merged.merge(textStyle!);
+    }
+
+    List<TextSpan> children;
+    try {
+      final parsed = highlight.parse(source, language: language);
+      final nodes = parsed.nodes;
+      children = nodes != null && nodes.isNotEmpty
+          ? _spansForNodes(nodes, theme)
+          : [TextSpan(text: source)];
+    } catch (_) {
+      children = [TextSpan(text: source)];
+    }
+
+    return SelectableText.rich(
+      TextSpan(style: merged, children: children),
+    );
+  }
+}
+
 class _CodeBlockView extends StatelessWidget {
   final String code;
   final String languageLabel;
@@ -910,7 +1067,7 @@ class _CodeBlockView extends StatelessWidget {
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-            child: HighlightView(
+            child: _SelectableHighlightView(
               code.isEmpty ? ' ' : code,
               language: highlightLanguage,
               theme: theme,

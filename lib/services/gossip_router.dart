@@ -140,6 +140,7 @@ typedef OnMessageReceived = Future<void> Function(
   String? forwardFromId,
   String? forwardFromNick,
   String? forwardFromChannelId,
+  String? emojiAutoPayloadJson,
 });
 typedef OnAckReceived = void Function(String fromId, String messageId);
 typedef OnForwardPacket = Future<void> Function(GossipPacket packet);
@@ -155,6 +156,7 @@ typedef OnProfileReceived = void Function(
   String x25519Key,
   List<String> tags,
   String? statusEmojiPayload,
+  String? statusEmojiAutoPayloadJson,
 );
 
 typedef OnEditReceived = Future<void> Function(
@@ -198,7 +200,8 @@ typedef OnPairRequest = void Function(
     String emoji,
     String x25519Key,
     List<String> tags,
-    String? statusEmojiPayload);
+    String? statusEmojiPayload,
+    String? statusEmojiAutoPayloadJson);
 
 /// Typing/activity indicator: 0=stopped, 1=typing, 2=recording video, 3=recording voice
 typedef OnTypingReceived = void Function(String fromId, int activity);
@@ -219,7 +222,8 @@ typedef OnPairAccepted = void Function(
     String emoji,
     String x25519Key,
     List<String> tags,
-    String? statusEmojiPayload);
+    String? statusEmojiPayload,
+    String? statusEmojiAutoPayloadJson);
 
 typedef OnDeviceLinkRequest = void Function(
   String sourceId,
@@ -269,6 +273,7 @@ typedef OnImgMeta = void Function(
   String? forwardFromId,
   String? forwardFromNick,
   String? forwardFromChannelId,
+  bool isChannelPost, // true — медиа канального поста (ждём channel_post перед DM)
 });
 
 /// Вызывается при получении очередного img_chunk.
@@ -428,6 +433,7 @@ class GossipRouter {
     String? forwardFromId,
     String? forwardFromNick,
     String? forwardFromChannelId,
+    String? emojiAutoPayloadJson,
   }) async {
     // Безопасность: включаем 8-символьный префикс публичного ключа получателя
     // как поле 'r' в payload. Это позволяет другим узлам отфильтровать пакеты,
@@ -468,6 +474,9 @@ class GossipRouter {
       if (ffid != null) p['ffid'] = ffid;
       if (ffn != null) p['ffn'] = ffn;
       if (ffch != null) p['ffch'] = ffch;
+      if (emojiAutoPayloadJson != null && emojiAutoPayloadJson.isNotEmpty) {
+        p['eap'] = emojiAutoPayloadJson;
+      }
       final testPacket = GossipPacket(
         id: packetId,
         type: 'raw',
@@ -480,6 +489,9 @@ class GossipRouter {
         if (ffid != null) payload['ffid'] = ffid;
         if (ffn != null) payload['ffn'] = ffn;
         if (ffch != null) payload['ffch'] = ffch;
+        if (emojiAutoPayloadJson != null && emojiAutoPayloadJson.isNotEmpty) {
+          payload['eap'] = emojiAutoPayloadJson;
+        }
         break;
       }
       if (ffn != null) {
@@ -532,6 +544,7 @@ class GossipRouter {
     String? forwardFromId,
     String? forwardFromNick,
     String? forwardFromChannelId,
+    String? emojiAutoPayloadJson,
   }) async {
     final rid8 = _rid8From(recipientId);
 
@@ -562,6 +575,9 @@ class GossipRouter {
       if (ffid != null) p['ffid'] = ffid;
       if (ffn != null) p['ffn'] = ffn;
       if (ffch != null) p['ffch'] = ffch;
+      if (emojiAutoPayloadJson != null && emojiAutoPayloadJson.isNotEmpty) {
+        p['eap'] = emojiAutoPayloadJson;
+      }
       final testPacket = GossipPacket(
         id: messageId,
         type: 'msg',
@@ -574,6 +590,9 @@ class GossipRouter {
         if (ffid != null) payload['ffid'] = ffid;
         if (ffn != null) payload['ffn'] = ffn;
         if (ffch != null) payload['ffch'] = ffch;
+        if (emojiAutoPayloadJson != null && emojiAutoPayloadJson.isNotEmpty) {
+          payload['eap'] = emojiAutoPayloadJson;
+        }
         break;
       }
       if (ffn != null) {
@@ -729,6 +748,7 @@ class GossipRouter {
     bool isSquare = false,
     bool isFile = false,
     bool isSticker = false,
+    bool isChannelPost = false, // канальный пост: подписчики кэшируют медиа до прихода channel_post
     String? fileName,
     bool viewOnce = false,
     String? forwardFromId,
@@ -766,6 +786,7 @@ class GossipRouter {
         if (isSquare) 'sq': true,
         if (isFile) 'file': true,
         if (isSticker) 'stk': true,
+        if (isChannelPost) 'ch': true,
         if (fnameForPayload != null) 'fname': fnameForPayload,
         if (viewOnce) 'vo': true,
         if (rid8 != null) 'r': rid8,
@@ -1104,6 +1125,7 @@ class GossipRouter {
     String x25519Key = '',
     List<String> tags = const [],
     String statusEmoji = '',
+    String? statusEmojiAutoPayloadJson,
   }) async {
     final rid8 = _rid8From(recipientId) ?? '';
     final packet = GossipPacket(
@@ -1122,6 +1144,9 @@ class GossipRouter {
         if (x25519Key.isNotEmpty) 'x': x25519Key,
         if (tags.isNotEmpty) 'tags': tags,
         'st': statusEmoji,
+        if (statusEmojiAutoPayloadJson != null &&
+            statusEmojiAutoPayloadJson.isNotEmpty)
+          'stp': statusEmojiAutoPayloadJson,
       },
     );
     _gossipTrace('[RLINK][Gossip][TX] type=pair_req id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
@@ -1146,6 +1171,7 @@ class GossipRouter {
     required String recipientId,
     List<String> tags = const [],
     String statusEmoji = '',
+    String? statusEmojiAutoPayloadJson,
   }) async {
     final rid8 = _rid8From(recipientId) ?? '';
     final packet = GossipPacket(
@@ -1164,6 +1190,9 @@ class GossipRouter {
         if (x25519Key.isNotEmpty) 'x': x25519Key,
         if (tags.isNotEmpty) 'tags': tags,
         'st': statusEmoji,
+        if (statusEmojiAutoPayloadJson != null &&
+            statusEmojiAutoPayloadJson.isNotEmpty)
+          'stp': statusEmojiAutoPayloadJson,
       },
     );
     _gossipTrace('[RLINK][Gossip][TX] type=pair_acc id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} '
@@ -1348,6 +1377,7 @@ class GossipRouter {
     String x25519Key = '', // X25519 публичный ключ base64 для E2E шифрования
     List<String> tags = const [],
     String statusEmoji = '',
+    String? statusEmojiAutoPayloadJson,
   }) async {
     final payload = <String, dynamic>{
       'id': id,
@@ -1358,6 +1388,9 @@ class GossipRouter {
       if (x25519Key.isNotEmpty) 'x': x25519Key,
       if (tags.isNotEmpty) 'tags': tags,
       'st': statusEmoji,
+      if (statusEmojiAutoPayloadJson != null &&
+          statusEmojiAutoPayloadJson.isNotEmpty)
+        'stp': statusEmojiAutoPayloadJson,
     };
     final packet = GossipPacket(
       id: _uuid.v4(),
@@ -1468,6 +1501,7 @@ class GossipRouter {
             final ffid = packet.payload['ffid'] as String?;
             final ffn = packet.payload['ffn'] as String?;
             final ffch = packet.payload['ffch'] as String?;
+            final eap = packet.payload['eap'] as String?;
             await handler(
               from,
               EncryptedMessage(
@@ -1485,6 +1519,7 @@ class GossipRouter {
               forwardFromId: ffid,
               forwardFromNick: ffn,
               forwardFromChannelId: ffch,
+              emojiAutoPayloadJson: eap,
             );
           }
         }
@@ -1551,6 +1586,9 @@ class GossipRouter {
         final String? statusEmojiPayload = packet.payload.containsKey('st')
             ? (packet.payload['st'] as String? ?? '')
             : null;
+        final String? statusEmojiAutoPayloadJson = packet.payload.containsKey('stp')
+            ? (packet.payload['stp'] as String? ?? '')
+            : null;
 
         // Валидация: публичный ключ Ed25519 = 64 hex символа
         final isValidKey = publicKey != null &&
@@ -1562,7 +1600,8 @@ class GossipRouter {
           // onProfile в main.dart проверит isDirectBleId(bleId) перед регистрацией маппинга.
           final bleId = sourceId ?? publicKey;
           onProfileReceived?.call(bleId, publicKey, nick, username, color,
-              emoji, x25519Key, tags, statusEmojiPayload);
+              emoji, x25519Key, tags, statusEmojiPayload,
+              statusEmojiAutoPayloadJson);
         } else {
           debugPrint(
               '[RLINK][Gossip] Invalid profile packet: key=$publicKey nick=$nick');
@@ -1600,6 +1639,7 @@ class GossipRouter {
           final ffid = packet.payload['ffid'] as String?;
           final ffn = packet.payload['ffn'] as String?;
           final ffch = packet.payload['ffch'] as String?;
+          final eap = packet.payload['eap'] as String?;
           await handler(
             encrypted.senderPublicKey,
             encrypted,
@@ -1610,6 +1650,7 @@ class GossipRouter {
             forwardFromId: ffid,
             forwardFromNick: ffn,
             forwardFromChannelId: ffch,
+            emojiAutoPayloadJson: eap,
           );
         }
         return;
@@ -1633,6 +1674,7 @@ class GossipRouter {
         final isSquare = (packet.payload['sq'] as bool?) ?? false;
         final isFile = (packet.payload['file'] as bool?) ?? false;
         final isSticker = (packet.payload['stk'] as bool?) ?? false;
+        final isChannelPost = (packet.payload['ch'] as bool?) ?? false;
         final fileName = packet.payload['fname'] as String?;
         final viewOnce = (packet.payload['vo'] as bool?) ?? false;
         final ffid = packet.payload['ffid'] as String?;
@@ -1654,7 +1696,8 @@ class GossipRouter {
               isSquare, isFile, isSticker, fileName, viewOnce,
               forwardFromId: ffid,
               forwardFromNick: ffn,
-              forwardFromChannelId: ffch);
+              forwardFromChannelId: ffch,
+              isChannelPost: isChannelPost);
           _deliverPendingImgChunks(msgId);
         }
         return;
@@ -1804,6 +1847,9 @@ class GossipRouter {
         final String? statusEmojiPayload = packet.payload.containsKey('st')
             ? (packet.payload['st'] as String? ?? '')
             : null;
+        final String? statusEmojiAutoPayloadJson = packet.payload.containsKey('stp')
+            ? (packet.payload['stp'] as String? ?? '')
+            : null;
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_req not addressed to us (directed pairing)
         if (!_matchesRid8(myPublicKey, rid8)) {
@@ -1815,7 +1861,8 @@ class GossipRouter {
           _gossipTrace(
               '[RLINK][Gossip][RX] type=pair_req from=${publicKey.substring(0, 8)} nick=$nick');
           onPairRequest?.call(bleId, publicKey, nick, username, color, emoji,
-              x25519Key, tags, statusEmojiPayload);
+              x25519Key, tags, statusEmojiPayload,
+              statusEmojiAutoPayloadJson);
         }
         return;
       }
@@ -1834,6 +1881,9 @@ class GossipRouter {
         final String? statusEmojiPayload = packet.payload.containsKey('st')
             ? (packet.payload['st'] as String? ?? '')
             : null;
+        final String? statusEmojiAutoPayloadJson = packet.payload.containsKey('stp')
+            ? (packet.payload['stp'] as String? ?? '')
+            : null;
         final bleId = sourceId ?? publicKey ?? '';
         // Drop pair_acc not addressed to us (directed pairing)
         if (!_matchesRid8(myPublicKey, rid8)) {
@@ -1845,7 +1895,8 @@ class GossipRouter {
           _gossipTrace(
               '[RLINK][Gossip][RX] type=pair_acc from=${publicKey.substring(0, 8)} nick=$nick');
           onPairAccepted?.call(bleId, publicKey, nick, username, color, emoji,
-              x25519Key, tags, statusEmojiPayload);
+              x25519Key, tags, statusEmojiPayload,
+              statusEmojiAutoPayloadJson);
         }
         return;
       }

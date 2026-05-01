@@ -19,9 +19,14 @@ import '../../services/gossip_router.dart';
 import '../../services/image_service.dart';
 import '../../services/profile_service.dart';
 import '../../main.dart'
-    show broadcastMyAvatar, broadcastMyBanner, broadcastMyProfileMusic, sendProfileToAllContacts;
+    show
+        broadcastMyAvatar,
+        broadcastMyBanner,
+        broadcastMyProfileMusic,
+        sendProfileToAllContacts;
 import '../widgets/avatar_widget.dart';
 import '../widgets/desktop_image_picker.dart';
+import '../widgets/status_emoji_view.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -41,6 +46,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late TextEditingController _controller;
   late TextEditingController _usernameController;
   late TextEditingController _tagController;
+  late TextEditingController _statusEmojiController;
   late int _selectedColor;
   late String _selectedEmoji;
   late String _statusEmoji;
@@ -88,6 +94,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _controller = TextEditingController(text: p.nickname);
     _usernameController = TextEditingController(text: p.username);
     _tagController = TextEditingController();
+    _statusEmojiController = TextEditingController(text: p.statusEmoji);
     _selectedColor = p.avatarColor;
     _selectedEmoji = p.avatarEmoji;
     _statusEmoji = p.statusEmoji;
@@ -111,7 +118,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Аватар слишком большой. Выберите изображение меньше.'),
+              content:
+                  Text('Аватар слишком большой. Выберите изображение меньше.'),
             ),
           );
         }
@@ -143,7 +151,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Баннер слишком большой. Выберите изображение меньше.'),
+              content:
+                  Text('Баннер слишком большой. Выберите изображение меньше.'),
             ),
           );
         }
@@ -170,7 +179,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final src = r.files.single.path;
     if (src == null) return;
     final dir = await getApplicationDocumentsDirectory();
-    final sub = Directory(p.join(dir.path, 'profile_audio'))..createSync(recursive: true);
+    final sub = Directory(p.join(dir.path, 'profile_audio'))
+      ..createSync(recursive: true);
     final ext = p.extension(src).isEmpty ? '.m4a' : p.extension(src);
     final dest = p.join(sub.path, 'me_profile$ext');
     await File(src).copy(dest);
@@ -193,6 +203,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _controller.dispose();
     _usernameController.dispose();
     _tagController.dispose();
+    _statusEmojiController.dispose();
     super.dispose();
   }
 
@@ -204,7 +215,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       final prevBanner = prevProfile.bannerImagePath;
       final prevMusic = prevProfile.profileMusicPath;
 
-      final rawUsername = _usernameController.text.trim().toLowerCase()
+      final rawUsername = _usernameController.text
+          .trim()
+          .toLowerCase()
           .replaceAll(RegExp(r'[^a-z0-9_.]'), '');
       final updated = await ProfileService.instance.updateProfile(
         nickname: _controller.text.trim(),
@@ -259,10 +272,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     final profile = ProfileService.instance.profile!;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final maxContentWidth =
+        MediaQuery.of(context).size.width >= 900 ? 760.0 : 640.0;
+    final bannerWidth =
+        MediaQuery.of(context).size.width >= 900 ? 560.0 : double.infinity;
 
     return Scaffold(
+      backgroundColor:
+          isDark ? const Color(0xFF0F0F0F) : const Color(0xFFE8E8E8),
       appBar: AppBar(
         title: const Text('Профиль'),
+        elevation: 0,
+        scrolledUnderElevation: 0.5,
+        backgroundColor:
+            isDark ? const Color(0xFF121212) : const Color(0xFFF2F2F2),
         actions: [
           if (_editing)
             TextButton(
@@ -281,424 +305,519 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(children: [
-          // Баннер
-          GestureDetector(
-            onTap: _editing ? _pickBanner : null,
-            child: Container(
-              width: double.infinity,
-              height: 120,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(16),
-                color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                image: _bannerImagePath != null &&
-                        (kIsWeb || File(_bannerImagePath!).existsSync())
-                    ? DecorationImage(
-                        image: kIsWeb
-                            ? NetworkImage(_bannerImagePath!)
-                            : FileImage(File(_bannerImagePath!)) as ImageProvider,
-                        fit: BoxFit.cover,
-                      )
-                    : null,
-              ),
-              child: _bannerImagePath == null ||
-                      (!kIsWeb && !File(_bannerImagePath!).existsSync())
-                  ? Center(
-                      child: _editing
-                          ? Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.add_photo_alternate_outlined,
-                                    color: Theme.of(context).hintColor, size: 32),
-                                const SizedBox(height: 4),
-                                Text('Добавить баннер',
-                                    style: TextStyle(
-                                        color: Theme.of(context).hintColor, fontSize: 12)),
-                              ],
-                            )
-                          : Icon(Icons.panorama_outlined,
-                              color: Theme.of(context).hintColor, size: 40),
-                    )
-                  : _editing
-                      ? const Align(
-                          alignment: Alignment.topRight,
-                          child: Padding(
-                            padding: EdgeInsets.all(8),
-                            child: CircleAvatar(
-                              radius: 14,
-                              backgroundColor: Colors.black54,
-                              child: Icon(Icons.edit, size: 14, color: Colors.white),
-                            ),
-                          ),
-                        )
-                      : null,
-            ),
-          ),
-          const SizedBox(height: 16),
-
-          // Аватар
-          Center(
-            child: Stack(children: [
+      body: Center(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxContentWidth),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(children: [
+              // Баннер
               GestureDetector(
-                onTap: _editing
-                    ? () => setState(() {
+                onTap: _editing ? _pickBanner : null,
+                child: Container(
+                  width: bannerWidth,
+                  constraints: const BoxConstraints(maxWidth: 560),
+                  child: AspectRatio(
+                    aspectRatio: 3.2,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        color:
+                            Theme.of(context).colorScheme.surfaceContainerHigh,
+                        image: _bannerImagePath != null &&
+                                (kIsWeb || File(_bannerImagePath!).existsSync())
+                            ? DecorationImage(
+                                image: kIsWeb
+                                    ? NetworkImage(_bannerImagePath!)
+                                    : FileImage(File(_bannerImagePath!))
+                                        as ImageProvider,
+                                fit: BoxFit.cover,
+                              )
+                            : null,
+                      ),
+                      child: _bannerImagePath == null ||
+                              (!kIsWeb && !File(_bannerImagePath!).existsSync())
+                          ? Center(
+                              child: _editing
+                                  ? Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.add_photo_alternate_outlined,
+                                            color: Theme.of(context).hintColor,
+                                            size: 32),
+                                        const SizedBox(height: 4),
+                                        Text('Добавить баннер',
+                                            style: TextStyle(
+                                                color:
+                                                    Theme.of(context).hintColor,
+                                                fontSize: 12)),
+                                      ],
+                                    )
+                                  : Icon(Icons.panorama_outlined,
+                                      color: Theme.of(context).hintColor,
+                                      size: 40),
+                            )
+                          : _editing
+                              ? const Align(
+                                  alignment: Alignment.topRight,
+                                  child: Padding(
+                                    padding: EdgeInsets.all(8),
+                                    child: CircleAvatar(
+                                      radius: 14,
+                                      backgroundColor: Colors.black54,
+                                      child: Icon(Icons.edit,
+                                          size: 14, color: Colors.white),
+                                    ),
+                                  ),
+                                )
+                              : null,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // Аватар
+              Center(
+                child: Stack(children: [
+                  GestureDetector(
+                    onTap: _editing
+                        ? () => setState(() {
+                              _showEmojiPicker = !_showEmojiPicker;
+                              _showStatusEmojiPicker = false;
+                            })
+                        : null,
+                    child: Hero(
+                      tag: 'avatar_my_profile',
+                      child: Material(
+                        color: Colors.transparent,
+                        child: AvatarWidget(
+                          initials: (_editing && _controller.text.isNotEmpty)
+                              ? _controller.text[0].toUpperCase()
+                              : profile.initials,
+                          color:
+                              _editing ? _selectedColor : profile.avatarColor,
+                          emoji:
+                              _editing ? _selectedEmoji : profile.avatarEmoji,
+                          imagePath: _editing
+                              ? _selectedImagePath
+                              : profile.avatarImagePath,
+                          size: 88,
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (_editing) ...[
+                    // Кнопка смены эмодзи
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: GestureDetector(
+                        onTap: () => setState(() {
                           _showEmojiPicker = !_showEmojiPicker;
                           _showStatusEmojiPicker = false;
-                        })
-                    : null,
-                child: Hero(
-                  tag: 'avatar_my_profile',
-                  child: Material(
-                    color: Colors.transparent,
-                    child: AvatarWidget(
-                      initials: (_editing && _controller.text.isNotEmpty)
-                          ? _controller.text[0].toUpperCase()
-                          : profile.initials,
-                      color: _editing ? _selectedColor : profile.avatarColor,
-                      emoji: _editing ? _selectedEmoji : profile.avatarEmoji,
-                      imagePath: _editing
-                          ? _selectedImagePath
-                          : profile.avatarImagePath,
-                      size: 88,
+                        }),
+                        child: Container(
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1DB954),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                                color:
+                                    Theme.of(context).scaffoldBackgroundColor,
+                                width: 2),
+                          ),
+                          child: const Icon(Icons.edit,
+                              size: 14, color: Colors.white),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
+                    // Кнопка выбора фото
+                    Positioned(
+                      left: 0,
+                      bottom: 0,
+                      child: GestureDetector(
+                        onTap: _pickImage,
+                        child: Container(
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                                color:
+                                    Theme.of(context).scaffoldBackgroundColor,
+                                width: 2),
+                          ),
+                          child: const Icon(Icons.photo_camera,
+                              size: 14, color: Colors.white),
+                        ),
+                      ),
+                    ),
+                    if (_selectedImagePath != null)
+                      Positioned(
+                        right: 0,
+                        top: 0,
+                        child: GestureDetector(
+                          onTap: () => setState(() => _selectedImagePath = null),
+                          child: Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .surfaceContainerHighest,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                  color: Theme.of(context).scaffoldBackgroundColor,
+                                  width: 2),
+                            ),
+                            child: Icon(Icons.close,
+                                size: 14,
+                                color: Theme.of(context).colorScheme.onSurface),
+                          ),
+                        ),
+                      ),
+                  ],
+                ]),
               ),
+              const SizedBox(height: 20),
+
+              // Эмодзи пикер
               if (_editing) ...[
-                // Кнопка смены эмодзи
-                Positioned(
-                  right: 0,
-                  bottom: 0,
-                  child: GestureDetector(
-                    onTap: () => setState(() {
-                      _showEmojiPicker = !_showEmojiPicker;
-                      _showStatusEmojiPicker = false;
-                    }),
-                    child: Container(
-                      width: 28,
-                      height: 28,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1DB954),
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                            color: Theme.of(context).scaffoldBackgroundColor, width: 2),
-                      ),
-                      child:
-                          const Icon(Icons.edit, size: 14, color: Colors.white),
-                    ),
-                  ),
-                ),
-                // Кнопка выбора фото
-                Positioned(
-                  left: 0,
-                  bottom: 0,
-                  child: GestureDetector(
-                    onTap: _pickImage,
-                    child: Container(
-                      width: 28,
-                      height: 28,
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                            color: Theme.of(context).scaffoldBackgroundColor, width: 2),
-                      ),
-                      child: const Icon(Icons.photo_camera,
-                          size: 14, color: Colors.white),
-                    ),
-                  ),
-                ),
-              ],
-            ]),
-          ),
-          const SizedBox(height: 20),
-
-          // Эмодзи пикер
-          if (_editing) ...[
-            AnimatedSize(
-              duration: const Duration(milliseconds: 250),
-              curve: Curves.easeInOut,
-              child: _showEmojiPicker
-                  ? Container(
-                      padding: const EdgeInsets.all(12),
-                      margin: const EdgeInsets.only(bottom: 16),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: AvatarEmojiPicker(
-                        selected: _selectedEmoji,
-                        onSelected: (e) => setState(() {
-                          _selectedEmoji = e;
-                          _showEmojiPicker = false;
-                        }),
-                      ),
-                    )
-                  : const SizedBox.shrink(),
-            ),
-            AvatarColorPicker(
-              selected: _selectedColor,
-              onSelected: (c) => setState(() => _selectedColor = c),
-            ),
-            const SizedBox(height: 20),
-            AnimatedSize(
-              duration: const Duration(milliseconds: 250),
-              curve: Curves.easeInOut,
-              child: _showStatusEmojiPicker
-                  ? Container(
-                      padding: const EdgeInsets.all(12),
-                      margin: const EdgeInsets.only(bottom: 16),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context)
-                            .colorScheme
-                            .surfaceContainerHigh,
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: AvatarEmojiPicker(
-                        selected: _statusEmoji.isNotEmpty
-                            ? _statusEmoji
-                            : UserProfile.avatarEmojis.first,
-                        onSelected: (e) => setState(() {
-                          _statusEmoji = UserProfile.normalizeStatusEmoji(e);
-                          _showStatusEmojiPicker = false;
-                        }),
-                      ),
-                    )
-                  : const SizedBox.shrink(),
-            ),
-          ],
-
-          // Имя
-          _editing
-              ? TextField(
-                  controller: _controller,
-                  maxLength: 20,
-                  decoration: InputDecoration(
-                    labelText: 'Имя',
-                    border: const OutlineInputBorder(),
-                    counterStyle:
-                        TextStyle(color: Theme.of(context).hintColor, fontSize: 11),
-                  ),
-                  textCapitalization: TextCapitalization.words,
-                  onChanged: (_) => setState(() {}),
-                )
-              : _InfoTile(label: 'Имя', value: profile.nickname),
-
-          const SizedBox(height: 12),
-
-          // Эмодзи-статус (рядом с именем в списках)
-          _editing
-              ? Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Эмодзи-статус',
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: Theme.of(context).hintColor)),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        Material(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .surfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(12),
-                          child: InkWell(
-                            onTap: () => setState(() {
-                              _showStatusEmojiPicker = !_showStatusEmojiPicker;
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeInOut,
+                  child: _showEmojiPicker
+                      ? Container(
+                          padding: const EdgeInsets.all(12),
+                          margin: const EdgeInsets.only(bottom: 16),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: AvatarEmojiPicker(
+                            selected: _selectedEmoji,
+                            onSelected: (e) => setState(() {
+                              _selectedEmoji = e;
                               _showEmojiPicker = false;
                             }),
-                            borderRadius: BorderRadius.circular(12),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 14, vertical: 10),
-                              child: Text(
-                                _statusEmoji.isEmpty ? '—' : _statusEmoji,
-                                style: const TextStyle(fontSize: 22),
+                          ),
+                        )
+                      : const SizedBox.shrink(),
+                ),
+                if (_selectedImagePath == null) ...[
+                  AvatarColorPicker(
+                    selected: _selectedColor,
+                    onSelected: (c) => setState(() => _selectedColor = c),
+                  ),
+                  const SizedBox(height: 20),
+                ],
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeInOut,
+                  child: _showStatusEmojiPicker
+                      ? Container(
+                          padding: const EdgeInsets.all(12),
+                          margin: const EdgeInsets.only(bottom: 16),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: AvatarEmojiPicker(
+                            selected: _statusEmoji.isNotEmpty
+                                ? _statusEmoji
+                                : UserProfile.avatarEmojis.first,
+                            onSelected: (e) => setState(() {
+                              _statusEmoji =
+                                  UserProfile.normalizeStatusEmoji(e);
+                              _statusEmojiController.text = _statusEmoji;
+                              _showStatusEmojiPicker = false;
+                            }),
+                          ),
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ],
+
+              // Имя
+              _editing
+                  ? TextField(
+                      controller: _controller,
+                      maxLength: 20,
+                      decoration: InputDecoration(
+                        labelText: 'Имя',
+                        border: const OutlineInputBorder(),
+                        counterStyle: TextStyle(
+                            color: Theme.of(context).hintColor, fontSize: 11),
+                      ),
+                      textCapitalization: TextCapitalization.words,
+                      onChanged: (_) => setState(() {}),
+                    )
+                  : _InfoTile(label: 'Имя', value: profile.nickname),
+
+              const SizedBox(height: 12),
+
+              // Эмодзи-статус (рядом с именем в списках)
+              _editing
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Эмодзи-статус',
+                            style: TextStyle(
+                                fontSize: 12,
+                                color: Theme.of(context).hintColor)),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Material(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(12),
+                              child: InkWell(
+                                onTap: () => setState(() {
+                                  _showStatusEmojiPicker =
+                                      !_showStatusEmojiPicker;
+                                  _showEmojiPicker = false;
+                                }),
+                                borderRadius: BorderRadius.circular(12),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 14, vertical: 10),
+                                  child: StatusEmojiView(
+                                    statusEmoji: _statusEmoji,
+                                    fontSize: 22,
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
+                            const SizedBox(width: 8),
+                            if (_statusEmoji.isNotEmpty)
+                              TextButton(
+                                onPressed: () => setState(() {
+                                  _statusEmoji = '';
+                                  _statusEmojiController.clear();
+                                }),
+                                child: const Text('Убрать'),
+                              ),
+                          ],
                         ),
-                        const SizedBox(width: 8),
-                        if (_statusEmoji.isNotEmpty)
-                          TextButton(
-                            onPressed: () =>
-                                setState(() => _statusEmoji = ''),
-                            child: const Text('Убрать'),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _statusEmojiController,
+                          decoration: const InputDecoration(
+                            labelText: 'Или введите вручную',
+                            hintText: '😀 или :my_emoji:',
+                            border: OutlineInputBorder(),
                           ),
+                          onChanged: (v) {
+                            final normalized =
+                                UserProfile.normalizeStatusEmoji(v);
+                            if (normalized != v) {
+                              _statusEmojiController.value = TextEditingValue(
+                                text: normalized,
+                                selection: TextSelection.collapsed(
+                                  offset: normalized.length,
+                                ),
+                              );
+                            }
+                            _statusEmoji = normalized;
+                          },
+                        ),
                       ],
+                    )
+                  : _InfoTile(
+                      label: 'Эмодзи-статус',
+                      value: profile.statusEmoji.isEmpty ? 'Не задан' : '',
+                      valueWidget: profile.statusEmoji.isEmpty
+                          ? null
+                          : StatusEmojiView(
+                              statusEmoji: profile.statusEmoji,
+                              fontSize: 20,
+                            ),
                     ),
-                  ],
-                )
-              : _InfoTile(
-                  label: 'Эмодзи-статус',
-                  value: profile.statusEmoji.isEmpty
-                      ? 'Не задан'
-                      : profile.statusEmoji,
-                ),
 
-          const SizedBox(height: 12),
+              const SizedBox(height: 12),
 
-          // Юзернейм
-          _editing
-              ? TextField(
-                  controller: _usernameController,
-                  maxLength: 24,
-                  decoration: InputDecoration(
-                    labelText: 'Юзернейм',
-                    hintText: 'Например: ivan_99',
-                    prefixText: '#',
-                    border: const OutlineInputBorder(),
-                    counterStyle:
-                        TextStyle(color: Theme.of(context).hintColor, fontSize: 11),
-                    helperText: 'Латиница, цифры, _ и . — для быстрого поиска',
-                    helperStyle:
-                        TextStyle(color: Theme.of(context).hintColor, fontSize: 11),
-                  ),
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z0-9_.]')),
-                  ],
-                )
-              : _InfoTile(
-                  label: 'Юзернейм',
-                  value: profile.username.isNotEmpty
-                      ? '#${profile.username}'
-                      : 'Не задан',
-                  monospace: profile.username.isNotEmpty,
-                  onCopy: profile.username.isNotEmpty
-                      ? () {
-                          Clipboard.setData(ClipboardData(text: profile.username));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Юзернейм скопирован!')),
-                          );
-                        }
-                      : null,
-                ),
-          const SizedBox(height: 12),
-
-          // Музыка в профиле (контакты получат файл при связи)
-          Builder(builder: (context) {
-            final rp = _profileMusicPath == null
-                ? null
-                : (ImageService.instance.resolveStoredPath(_profileMusicPath) ??
-                    _profileMusicPath);
-            final hasMusic = rp != null && File(rp).existsSync();
-            final sub = hasMusic
-                ? p.basename(rp)
-                : (_editing
-                    ? 'Выберите аудиофайл — контакты смогут загрузить и послушать, когда вы в сети'
-                    : 'Не выбрано');
-            return ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.library_music_outlined),
-            title: const Text('Музыка в профиле'),
-            subtitle: Text(
-              sub,
-              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
-            ),
-            trailing: _editing
-                ? Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (_profileMusicPath != null)
-                        IconButton(
-                          icon: const Icon(Icons.clear),
-                          tooltip: 'Убрать',
-                          onPressed: _clearProfileMusic,
-                        ),
-                      IconButton(
-                        icon: const Icon(Icons.audio_file_outlined),
-                        tooltip: 'Выбрать файл',
-                        onPressed: _pickProfileMusic,
+              // Юзернейм
+              _editing
+                  ? TextField(
+                      controller: _usernameController,
+                      maxLength: 24,
+                      decoration: InputDecoration(
+                        labelText: 'Юзернейм',
+                        hintText: 'Например: ivan_99',
+                        prefixText: '#',
+                        border: const OutlineInputBorder(),
+                        counterStyle: TextStyle(
+                            color: Theme.of(context).hintColor, fontSize: 11),
+                        helperText:
+                            'Латиница, цифры, _ и . — для быстрого поиска',
+                        helperStyle: TextStyle(
+                            color: Theme.of(context).hintColor, fontSize: 11),
                       ),
-                    ],
-                  )
-                : null,
-            );
-          }),
-          const SizedBox(height: 8),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                            RegExp(r'[a-zA-Z0-9_.]')),
+                      ],
+                    )
+                  : _InfoTile(
+                      label: 'Юзернейм',
+                      value: profile.username.isNotEmpty
+                          ? '#${profile.username}'
+                          : 'Не задан',
+                      monospace: profile.username.isNotEmpty,
+                      onCopy: profile.username.isNotEmpty
+                          ? () {
+                              Clipboard.setData(
+                                  ClipboardData(text: profile.username));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text('Юзернейм скопирован!')),
+                              );
+                            }
+                          : null,
+                    ),
+              const SizedBox(height: 12),
 
-          // Теги
-          if (_editing) ...[
-            Row(children: [
-              Expanded(
-                child: TextField(
-                  controller: _tagController,
-                  decoration: InputDecoration(
-                    labelText: 'Добавить тег (макс. 5)',
-                    hintText: 'Например: музыка',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: IconButton(
-                      icon: const Icon(Icons.add),
-                      onPressed: _addTag,
+              // Музыка в профиле (контакты получат файл при связи)
+              Builder(builder: (context) {
+                final rp = _profileMusicPath == null
+                    ? null
+                    : (ImageService.instance
+                            .resolveStoredPath(_profileMusicPath) ??
+                        _profileMusicPath);
+                final hasMusic = rp != null && File(rp).existsSync();
+                final sub = hasMusic
+                    ? p.basename(rp)
+                    : (_editing
+                        ? 'Выберите аудиофайл — контакты смогут загрузить и послушать, когда вы в сети'
+                        : 'Не выбрано');
+                return ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.library_music_outlined),
+                  title: const Text('Музыка в профиле'),
+                  subtitle: Text(
+                    sub,
+                    style: TextStyle(
+                        fontSize: 12, color: Theme.of(context).hintColor),
+                  ),
+                  trailing: _editing
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (_profileMusicPath != null)
+                              IconButton(
+                                icon: const Icon(Icons.clear),
+                                tooltip: 'Убрать',
+                                onPressed: _clearProfileMusic,
+                              ),
+                            IconButton(
+                              icon: const Icon(Icons.audio_file_outlined),
+                              tooltip: 'Выбрать файл',
+                              onPressed: _pickProfileMusic,
+                            ),
+                          ],
+                        )
+                      : null,
+                );
+              }),
+              const SizedBox(height: 8),
+
+              // Теги
+              if (_editing) ...[
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _tagController,
+                      decoration: InputDecoration(
+                        labelText: 'Добавить тег (макс. 5)',
+                        hintText: 'Например: музыка',
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.add),
+                          onPressed: _addTag,
+                        ),
+                      ),
+                      onSubmitted: (_) => _addTag(),
                     ),
                   ),
-                  onSubmitted: (_) => _addTag(),
+                ]),
+                const SizedBox(height: 8),
+              ],
+              if (_tags.isNotEmpty || !_editing)
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ..._tags.asMap().entries.map((entry) {
+                      final i = entry.key;
+                      final tag = entry.value;
+                      final color = _tagColors[i % _tagColors.length];
+                      return Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(20),
+                          border:
+                              Border.all(color: color.withValues(alpha: 0.4)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('#$tag',
+                                style: TextStyle(
+                                  color: color,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                )),
+                            if (_editing) ...[
+                              const SizedBox(width: 4),
+                              GestureDetector(
+                                onTap: () => setState(() => _tags.remove(tag)),
+                                child:
+                                    Icon(Icons.close, size: 14, color: color),
+                              ),
+                            ],
+                          ],
+                        ),
+                      );
+                    }),
+                    if (_tags.isEmpty && !_editing)
+                      Text('Нет тегов',
+                          style: TextStyle(
+                              color: Theme.of(context).hintColor,
+                              fontSize: 13)),
+                  ],
                 ),
+              const SizedBox(height: 12),
+
+              const _GigaChatProfileCard(),
+              const SizedBox(height: 12),
+
+              _InfoTile(
+                label: 'Полный ID (для поиска через &)',
+                value: profile.publicKeyHex,
+                monospace: true,
+                onCopy: () {
+                  Clipboard.setData(ClipboardData(text: profile.publicKeyHex));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Скопировано!')),
+                  );
+                },
               ),
             ]),
-            const SizedBox(height: 8),
-          ],
-          if (_tags.isNotEmpty || !_editing)
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                ..._tags.asMap().entries.map((entry) {
-                  final i = entry.key;
-                  final tag = entry.value;
-                  final color = _tagColors[i % _tagColors.length];
-                  return Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: color.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: color.withValues(alpha: 0.4)),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text('#$tag',
-                            style: TextStyle(
-                              color: color,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                            )),
-                        if (_editing) ...[
-                          const SizedBox(width: 4),
-                          GestureDetector(
-                            onTap: () => setState(() => _tags.remove(tag)),
-                            child: Icon(Icons.close, size: 14, color: color),
-                          ),
-                        ],
-                      ],
-                    ),
-                  );
-                }),
-                if (_tags.isEmpty && !_editing)
-                  Text('Нет тегов',
-                      style: TextStyle(color: Theme.of(context).hintColor, fontSize: 13)),
-              ],
-            ),
-          const SizedBox(height: 12),
-
-          const _GigaChatProfileCard(),
-          const SizedBox(height: 12),
-
-          _InfoTile(
-            label: 'Полный ID (для поиска через &)',
-            value: profile.publicKeyHex,
-            monospace: true,
-            onCopy: () {
-              Clipboard.setData(ClipboardData(text: profile.publicKeyHex));
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Скопировано!')),
-              );
-            },
           ),
-        ]),
+        ),
       ),
     );
   }
@@ -769,8 +888,7 @@ class _GigaChatProfileCardState extends State<_GigaChatProfileCard> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      await GigachatService.instance
-          .saveAuthorizationKey(_keyCtrl.text.trim());
+      await GigachatService.instance.saveAuthorizationKey(_keyCtrl.text.trim());
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Ключ GigaChat сохранён')),
@@ -921,11 +1039,13 @@ class _GigaChatProfileCardState extends State<_GigaChatProfileCard> {
 
 class _InfoTile extends StatelessWidget {
   final String label, value;
+  final Widget? valueWidget;
   final bool monospace;
   final VoidCallback? onCopy;
   const _InfoTile(
       {required this.label,
       required this.value,
+      this.valueWidget,
       this.monospace = false,
       this.onCopy});
 
@@ -942,12 +1062,17 @@ class _InfoTile extends StatelessWidget {
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(label,
-                style: TextStyle(color: Theme.of(context).hintColor, fontSize: 12)),
-            const SizedBox(height: 4),
-            Text(value,
                 style: TextStyle(
-                    fontSize: 14, fontFamily: monospace ? 'monospace' : null),
-                overflow: TextOverflow.ellipsis),
+                    color: Theme.of(context).hintColor, fontSize: 12)),
+            const SizedBox(height: 4),
+            if (valueWidget != null)
+              valueWidget!
+            else
+              Text(value,
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontFamily: monospace ? 'monospace' : null),
+                  overflow: TextOverflow.ellipsis),
           ]),
         ),
         if (onCopy != null)

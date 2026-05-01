@@ -89,6 +89,7 @@ class _AdminScreenState extends State<AdminScreen>
   bool _relayBotsLoading = false;
   bool _includeRevokedBots = false;
   String? _relayBotsError;
+  Timer? _searchDebounce;
 
   @override
   void initState() {
@@ -96,13 +97,22 @@ class _AdminScreenState extends State<AdminScreen>
     _tabs = TabController(length: 3, vsync: this);
     ChannelService.instance.loadVerificationRequests();
     _searchCtrl.addListener(() {
-      setState(() => _query = _searchCtrl.text.trim().toLowerCase());
+      final q = _searchCtrl.text.trim().toLowerCase();
+      setState(() => _query = q);
+      // Debounce relay reload on query change (only on bots tab)
+      if (_tabs.index == 2) {
+        _searchDebounce?.cancel();
+        _searchDebounce = Timer(const Duration(milliseconds: 500), () {
+          if (mounted) unawaited(_loadRelayBots());
+        });
+      }
     });
     unawaited(_loadRelayBots());
   }
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _tabs.dispose();
     _searchCtrl.dispose();
     super.dispose();
@@ -265,6 +275,7 @@ class _AdminScreenState extends State<AdminScreen>
 
   Widget _buildBotsTab() {
     final cs = Theme.of(context).colorScheme;
+    final isRelayOnline = RelayService.instance.isConnected;
     final enabled = AppSettings.instance.enabledBotIds.toSet();
     final builtins = _query.isEmpty
         ? kBuiltinAiBots
@@ -282,15 +293,58 @@ class _AdminScreenState extends State<AdminScreen>
       child: ListView(
         padding: const EdgeInsets.symmetric(vertical: 8),
         children: [
+          if (!isRelayOnline)
+            Container(
+              margin: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.orange),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.wifi_off, color: Colors.orange, size: 18),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Relay не подключён — управление ботами недоступно',
+                      style: TextStyle(color: Colors.orange, fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (_relayBotsError != null)
+            Container(
+              margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.red.shade300),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.error_outline, color: Colors.red, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _translateBotError(_relayBotsError!),
+                      style: const TextStyle(color: Colors.red, fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ListTile(
             leading: const Icon(Icons.settings_ethernet_outlined),
             title: const Text('Relay-боты (админ)'),
-            subtitle: Text(_relayBotsError ??
-                'Поиск по @нику, названию и полному botId (64 hex).'),
+            subtitle: const Text('Поиск по @нику, названию и botId (64 hex)'),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('revoked'),
+                const Text('revoked', style: TextStyle(fontSize: 12)),
                 Switch(
                   value: _includeRevokedBots,
                   onChanged: (v) async {
@@ -312,11 +366,11 @@ class _AdminScreenState extends State<AdminScreen>
               ],
             ),
           ),
-          if (relayFiltered.isEmpty && !_relayBotsLoading)
+          if (relayFiltered.isEmpty && !_relayBotsLoading && _relayBotsError == null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Text(
-                _relayBotsError != null ? 'Ошибка загрузки списка ботов' : 'Релей-боты не найдены',
+                _query.isNotEmpty ? 'Ничего не найдено по "$_query"' : 'Нет зарегистрированных ботов',
                 style: TextStyle(color: cs.onSurfaceVariant),
               ),
             )
@@ -467,6 +521,19 @@ class _AdminScreenState extends State<AdminScreen>
     await AppSettings.instance.setEnabledBotIds(current.toList());
     await _publishAdminSync();
     if (mounted) setState(() {});
+  }
+
+  String _translateBotError(String raw) {
+    if (raw.contains('forbidden')) {
+      return 'Доступ запрещён: убедитесь, что RELAY_ADMIN_HASH настроен на сервере и пароль в приложении совпадает';
+    }
+    if (raw.contains('offline')) return 'Нет подключения к relay';
+    if (raw.contains('timeout')) return 'Relay не ответил (timeout 20 с)';
+    if (raw.contains('bad_admin_hash')) return 'Неверный формат хэша пароля';
+    if (raw.contains('bad_bot_id')) return 'Неверный botId';
+    if (raw.contains('not_found')) return 'Бот не найден';
+    if (raw.contains('empty_patch')) return 'Нечего обновлять';
+    return raw;
   }
 
   Future<void> _loadRelayBots() async {
@@ -790,6 +857,7 @@ class _RelayAdminBot {
   final bool verified;
   final bool blocked;
   final bool revoked;
+  final int createdAt;
 
   const _RelayAdminBot({
     required this.botId,
@@ -800,6 +868,7 @@ class _RelayAdminBot {
     required this.verified,
     required this.blocked,
     required this.revoked,
+    required this.createdAt,
   });
 
   bool matches(String q) {
@@ -809,6 +878,12 @@ class _RelayAdminBot {
         displayName.toLowerCase().contains(x) ||
         ownerEd25519Pub.toLowerCase().contains(x) ||
         description.toLowerCase().contains(x);
+  }
+
+  String get createdAtFormatted {
+    if (createdAt <= 0) return '';
+    final d = DateTime.fromMillisecondsSinceEpoch(createdAt);
+    return '${d.day.toString().padLeft(2, '0')}.${d.month.toString().padLeft(2, '0')}.${d.year}';
   }
 
   factory _RelayAdminBot.fromJson(Map<String, dynamic> j) {
@@ -821,6 +896,7 @@ class _RelayAdminBot {
       verified: j['verified'] == true,
       blocked: j['blocked'] == true,
       revoked: j['revoked'] == true,
+      createdAt: (j['createdAt'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -888,13 +964,20 @@ class _RelayBotAdminTile extends StatelessWidget {
             ],
             const SizedBox(height: 6),
             Text(
-              'Owner: ${bot.ownerEd25519Pub}',
+              'Owner: ${bot.ownerEd25519Pub.length > 16 ? "${bot.ownerEd25519Pub.substring(0, 16)}…" : bot.ownerEd25519Pub}',
               style: TextStyle(
                 fontSize: 11,
                 fontFamily: 'monospace',
                 color: cs.onSurfaceVariant,
               ),
             ),
+            if (bot.createdAtFormatted.isNotEmpty) ...[
+              const SizedBox(height: 2),
+              Text(
+                'Зарегистрирован: ${bot.createdAtFormatted}',
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              ),
+            ],
             const SizedBox(height: 8),
             Wrap(
               spacing: 6,

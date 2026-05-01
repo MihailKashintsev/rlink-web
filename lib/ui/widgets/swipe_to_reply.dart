@@ -39,31 +39,38 @@ class _SwipeToReplyState extends State<SwipeToReply>
   Animation<double>? _tween;
   VoidCallback? _tweenListener;
 
+  void _stopAnimation() {
+    if (_tweenListener != null) {
+      _tween?.removeListener(_tweenListener!);
+      _tweenListener = null;
+    }
+    _tween = null;
+    _snap.stop();
+  }
+
   @override
   void didUpdateWidget(SwipeToReply oldWidget) {
     super.didUpdateWidget(oldWidget);
     // Режим выбора отключает свайп: обрываем жест/анимацию, иначе слушатель
     // тика может вызвать setState уже в «обрезанном» дереве → _elements.contains.
     if (oldWidget.enabled && !widget.enabled) {
-      _snap.stop();
-      if (_tweenListener != null) {
-        _tween?.removeListener(_tweenListener!);
-        _tweenListener = null;
-      }
-      _tween = null;
+      _stopAnimation();
       _dx = 0;
     }
   }
 
+  /// Вызывается ДО dispose() когда виджет убирается из дерева.
+  /// Останавливаем анимацию здесь — на macOS тик может прийти в промежутке
+  /// между deactivate() и dispose() и вызвать setState/Theme.of на мёртвом контексте.
+  @override
+  void deactivate() {
+    _tearDown = true;
+    _stopAnimation();
+    super.deactivate();
+  }
+
   @override
   void dispose() {
-    _tearDown = true;
-    _snap.stop();
-    if (_tweenListener != null) {
-      _tween?.removeListener(_tweenListener!);
-      _tweenListener = null;
-    }
-    _tween = null;
     _snap.dispose();
     super.dispose();
   }

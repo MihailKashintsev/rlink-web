@@ -37,7 +37,7 @@ class _StickersHubScreenState extends State<StickersHubScreen> {
   }
 
   Future<void> _reload() async {
-    await StickerCollectionService.instance.ensureInitialized();
+    await StickerCollectionService.instance.init();
     final packs = await StickerCollectionService.instance.loadPacks();
     final flat = await StickerCollectionService.instance.relativePathsValid();
     if (mounted) {

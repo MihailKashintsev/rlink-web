@@ -17,6 +17,7 @@ import 'models/channel.dart';
 import 'models/chat_message.dart';
 import 'utils/reaction_limit.dart';
 import 'utils/invite_dm_codec.dart';
+import 'utils/custom_emoji_text.dart';
 import 'models/contact.dart';
 import 'models/group.dart';
 import 'models/user_profile.dart';
@@ -37,6 +38,9 @@ import 'services/crypto_service.dart';
 import 'services/gossip_router.dart';
 import 'services/image_service.dart';
 import 'services/sticker_collection_service.dart';
+import 'services/emoji_pack_service.dart';
+import 'services/emoji_pack_dm_service.dart';
+import 'services/sticker_pack_dm_service.dart';
 import 'services/name_filter.dart';
 import 'services/profile_service.dart';
 import 'services/broadcast_outbox_service.dart';
@@ -58,6 +62,7 @@ import 'services/app_icon_service.dart';
 import 'services/desktop_tray_service.dart';
 import 'services/packet_transport.dart';
 import 'services/rlink_deep_link_service.dart';
+import 'services/pending_media_service.dart';
 import 'services/runtime_platform.dart';
 import 'services/web_storage_bootstrap.dart';
 import 'services/web_identity_portable.dart';
@@ -581,9 +586,14 @@ Future<void> initServices() async {
     await ChatInboxService.instance.init();
     EtherService.instance.init();
     try {
-      await StickerCollectionService.instance.ensureInitialized();
+      await StickerCollectionService.instance.init();
     } catch (e, st) {
       debugPrint('[RLINK][Init] StickerCollectionService skipped: $e\n$st');
+    }
+    try {
+      await EmojiPackService.instance.ensureInitialized();
+    } catch (e, st) {
+      debugPrint('[RLINK][Init] EmojiPackService skipped: $e\n$st');
     }
     await ChatStorageService.instance.init();
     await ChannelService.instance.init();
@@ -631,7 +641,8 @@ Future<void> initServices() async {
           double? longitude,
           String? forwardFromId,
           String? forwardFromNick,
-          String? forwardFromChannelId}) async {
+          String? forwardFromChannelId,
+          String? emojiAutoPayloadJson}) async {
         debugPrint(
             '[Main] onMessage fromId=${fromId.substring(0, 16)} ephemeral=${encrypted.ephemeralPublicKey.isEmpty ? "empty" : "set"}');
 
@@ -834,6 +845,14 @@ Future<void> initServices() async {
             );
           }
         }
+        if (emojiAutoPayloadJson != null && emojiAutoPayloadJson.isNotEmpty) {
+          try {
+            await EmojiPackService.instance.installFromAutoPayload(
+              jsonDecode(emojiAutoPayloadJson) as Map<String, dynamic>,
+              sourcePeerId: fromId,
+            );
+          } catch (_) {}
+        }
         await ChatStorageService.instance.saveMessage(ChatMessage(
           id: msgId,
           peerId: fromId,
@@ -863,8 +882,8 @@ Future<void> initServices() async {
                 await ChatStorageService.instance.getContact(fromId);
             final senderName =
                 contact?.nickname ?? '${fromId.substring(0, 8)}…';
-            final preview =
-                text.length > 60 ? '${text.substring(0, 60)}…' : text;
+            final plain = humanizeCustomEmojiCodes(text);
+            final preview = plain.length > 60 ? '${plain.substring(0, 60)}…' : plain;
             // Локальные уведомления только через NotificationService (threadId на iOS),
             // без дублирующего нативного showNotification — иначе двойной badge/двойной тост.
             await NotificationService.instance.showPersonalMessage(
@@ -929,7 +948,8 @@ Future<void> initServices() async {
           bool viewOnce,
           {String? forwardFromId,
           String? forwardFromNick,
-          String? forwardFromChannelId}) {
+          String? forwardFromChannelId,
+          bool isChannelPost = false}) {
         ImageService.instance.initAssembly(
           msgId,
           totalChunks,
@@ -940,6 +960,7 @@ Future<void> initServices() async {
           isSquare: isSquare,
           isFile: isFile,
           isSticker: isSticker,
+          isChannelPost: isChannelPost,
           fileName: fileName,
           viewOnce: viewOnce,
           forwardFromId: forwardFromId,
@@ -1000,7 +1021,7 @@ Future<void> initServices() async {
         }());
       },
       onPairReq: (bleId, publicKey, nick, username, color, emoji, x25519Key,
-          tags, statusEmojiPayload) {
+          tags, statusEmojiPayload, statusEmojiAutoPayloadJson) {
         // Игнорируем pair-запросы от заблокированных.
         if (BlockService.instance.isBlocked(publicKey)) {
           debugPrint(
@@ -1056,7 +1077,7 @@ Future<void> initServices() async {
         tryShowScreen(0);
       },
       onPairAcc: (bleId, publicKey, nick, username, color, emoji, x25519Key,
-          tags, statusEmojiPayload) async {
+          tags, statusEmojiPayload, statusEmojiAutoPayloadJson) async {
         debugPrint('[RLINK][Main] Pair accepted by $nick ($bleId)');
         BleService.instance.removePairRequest(bleId);
         // Register peer key — always register, even if bleId isn't recognized as direct.
@@ -1159,6 +1180,8 @@ Future<void> initServices() async {
         final isVideo = ImageService.instance.isVideoAssembly(msgId);
         final isSquare = ImageService.instance.isSquareAssembly(msgId);
         final isFile = ImageService.instance.isFileAssembly(msgId);
+        final isSticker = ImageService.instance.isStickerAssembly(msgId);
+        final isChannelPost = ImageService.instance.isChannelPostAssembly(msgId);
         final fileName = ImageService.instance.assemblyFileName(msgId);
         final vo = ImageService.instance.isViewOnceAssembly(msgId);
         final ffId = ImageService.instance.assemblyForwardFromId(msgId);
@@ -1178,11 +1201,13 @@ Future<void> initServices() async {
           isVideo: isVideo,
           isSquare: isSquare,
           isFile: isFile,
+          isSticker: isSticker,
           viewOnce: vo,
           fileName: fileName,
           forwardFromId: ffId,
           forwardFromNick: ffNick,
           forwardFromChannelId: ffCh,
+          isChannelPost: isChannelPost,
         );
         if (skippedBySettings) {
           ImageService.instance.cancelAssembly(msgId);
@@ -1254,7 +1279,8 @@ Future<void> initServices() async {
           final path = await ImageService.instance.assembleAndSaveVoice(msgId);
           if (path == null) return;
           ImageService.instance.markCompleted(msgId);
-          if (await ChannelService.instance.getPost(msgId) != null) {
+          // isChannelPost: всегда кэшируем, даже если channel_post ещё не пришёл
+          if (isChannelPost || await ChannelService.instance.getPost(msgId) != null) {
             await ChannelService.instance.applyAssembledPostMedia(
               postId: msgId,
               voicePath: path,
@@ -1298,7 +1324,7 @@ Future<void> initServices() async {
           final path = await ImageService.instance.assembleAndSaveFile(msgId);
           if (path == null) return;
           ImageService.instance.markCompleted(msgId);
-          if (await ChannelService.instance.getPost(msgId) != null) {
+          if (isChannelPost || await ChannelService.instance.getPost(msgId) != null) {
             final sz = await File(path).length();
             await ChannelService.instance.applyAssembledPostMedia(
               postId: msgId,
@@ -1352,7 +1378,7 @@ Future<void> initServices() async {
               .assembleAndSaveVideo(msgId, isSquare: isSquare);
           if (path == null) return;
           ImageService.instance.markCompleted(msgId);
-          if (await ChannelService.instance.getPost(msgId) != null) {
+          if (isChannelPost || await ChannelService.instance.getPost(msgId) != null) {
             await ChannelService.instance.applyAssembledPostMedia(
               postId: msgId,
               videoPath: path,
@@ -1401,7 +1427,7 @@ Future<void> initServices() async {
           if (path == null) return;
           ImageService.instance.markCompleted(msgId);
 
-          if (await ChannelService.instance.getPost(msgId) != null) {
+          if (isChannelPost || await ChannelService.instance.getPost(msgId) != null) {
             await ChannelService.instance.applyAssembledPostMedia(
               postId: msgId,
               imagePath: path,
@@ -1467,7 +1493,16 @@ Future<void> initServices() async {
       // publicKey — Ed25519 ключ из payload профиля
       // x25519Key — X25519 ключ base64 для E2E шифрования (пустая строка у старых версий)
       onProfile: (bleId, publicKey, nick, username, color, emoji, x25519Key,
-          tags, statusEmojiPayload) async {
+          tags, statusEmojiPayload, statusEmojiAutoPayloadJson) async {
+        if (statusEmojiAutoPayloadJson != null &&
+            statusEmojiAutoPayloadJson.isNotEmpty) {
+          try {
+            await EmojiPackService.instance.installFromAutoPayload(
+              jsonDecode(statusEmojiAutoPayloadJson) as Map<String, dynamic>,
+              sourcePeerId: publicKey,
+            );
+          } catch (_) {}
+        }
         // В Internet-only режиме игнорируем BLE профили — не нужны маппинги
         final mode = AppSettings.instance.connectionMode;
         // Регистрируем маппинг BLE ID → publicKey ТОЛЬКО для прямых пиров и НЕ в Internet-only.
@@ -1863,11 +1898,13 @@ Future<void> initServices() async {
                 ch.moderatorIds.contains(myKey) ||
                 ch.linkAdminIds.contains(myKey) ||
                 ch.adminId == myKey)) {
-          final preview = (payload['text'] as String? ?? '').isEmpty
+          final rawText = payload['text'] as String? ?? '';
+          final textHuman = humanizeCustomEmojiCodes(rawText);
+          final preview = rawText.isEmpty
               ? 'Новый пост'
-              : (payload['text'] as String).length > 80
-                  ? '${(payload['text'] as String).substring(0, 80)}…'
-                  : (payload['text'] as String);
+              : textHuman.length > 80
+                  ? '${textHuman.substring(0, 80)}…'
+                  : textHuman;
           await NotificationService.instance.showChannelPost(
             channelId: channelId,
             title: ch.name,
@@ -2299,9 +2336,10 @@ Future<void> initServices() async {
         final contact = await ChatStorageService.instance.getContact(senderId);
         final author = contact?.nickname ??
             '${senderId.substring(0, senderId.length.clamp(0, 8))}…';
+        final plain = humanizeCustomEmojiCodes(text);
         final preview = text.isEmpty
             ? 'Опрос'
-            : (text.length > 60 ? '${text.substring(0, 60)}…' : text);
+            : (plain.length > 60 ? '${plain.substring(0, 60)}…' : plain);
         await NotificationService.instance.showGroupMessage(
           groupId: groupId,
           title: g?.name ?? 'Группа',
@@ -2484,6 +2522,7 @@ Future<void> initServices() async {
 
     // Relay: колбэки регистрируем всегда — чтобы смена режима без перезапуска работала.
     RelayService.instance.onBlobReceived = _onBlobReceived;
+    PendingMediaService.instance.setProcessor(_processBlobDirect);
     RelayService.instance.onPeerOnline = _onRelayPeerOnline;
     RelayService.instance.onAccountSyncBlob =
         (sealed) => unawaited(AccountSyncService.applySealedFromRelay(sealed));
@@ -2549,7 +2588,8 @@ void _bindGossipFallbackHandlersIfMissing() {
 
   if (GossipRouter.instance.onPairRequest == null) {
     GossipRouter.instance.onPairRequest = (bleId, publicKey, nick, username,
-        color, emoji, x25519Key, tags, statusEmojiPayload) {
+        color, emoji, x25519Key, tags, statusEmojiPayload,
+        statusEmojiAutoPayloadJson) {
       debugPrint('[RLINK][Fallback] Bind onPairReq from $nick');
       final info = <String, dynamic>{
         'sourceId': bleId,
@@ -2579,7 +2619,8 @@ void _bindGossipFallbackHandlersIfMissing() {
             double? longitude,
             String? forwardFromId,
             String? forwardFromNick,
-            String? forwardFromChannelId}) async {
+            String? forwardFromChannelId,
+            String? emojiAutoPayloadJson}) async {
       debugPrint(
           '[RLINK][Fallback] Bind onMessage from ${fromId.substring(0, fromId.length.clamp(0, 8))}');
       final String text;
@@ -2668,6 +2709,19 @@ Future<void> _sendFullProfileToPeer(String peerKey) async {
 
   final myProfile = ProfileService.instance.profile;
   if (myProfile == null) return;
+  final autoStatusPayload =
+      await EmojiPackDmService.buildPayloadForStatus(myProfile.statusEmoji);
+  if (autoStatusPayload != null && RelayService.instance.isConnected) {
+    try {
+      await EmojiPackDmService.sendAutoPayloadToPeer(
+        targetPeerId: peerKey,
+        fromId: myProfile.publicKeyHex,
+        payload: autoStatusPayload,
+      );
+    } catch (e) {
+      debugPrint('[RLINK][EmojiAuto] status payload failed: $e');
+    }
+  }
 
   // Send avatar blob
   final avatarBytes = await _readProfileMediaBytes(myProfile.avatarImagePath);
@@ -3047,14 +3101,23 @@ Future<bool> _handleIncomingMediaWhenAutoDownloadDisabled({
   required bool isVideo,
   required bool isSquare,
   required bool isFile,
+  required bool isSticker,
   required bool viewOnce,
   String? fileName,
   String? forwardFromId,
   String? forwardFromNick,
   String? forwardFromChannelId,
+  bool isChannelPost = false,
 }) async {
   if (AppSettings.instance.autoDownloadMedia) return false;
+  // Стикеры всегда скачиваем — они часть сообщения.
+  if (isSticker) return false;
+  if (msgId.startsWith('stickerpack_')) return false;
+  if (msgId.startsWith('emojiauto_')) return false;
   if (_isServiceMediaByMsgId(msgId, isAvatar: isAvatar)) return false;
+  // Канальный пост: всегда скачиваем (флаг от отправителя), даже если сам
+  // channel_post ещё не пришёл — иначе подписчик увидит «призрак»-DM вместо медиа.
+  if (isChannelPost) return false;
 
   if (await _isKnownChannelOrGroupMedia(msgId)) {
     return false;
@@ -3108,6 +3171,33 @@ Future<bool> _handleIncomingMediaWhenAutoDownloadDisabled({
   debugPrint(
       '[RLINK][Media] Auto-download disabled, keeping placeholder: $msgId');
   return true;
+}
+
+/// Обработка blob-а в обход проверки авто-загрузки (вызывается при ручном скачивании).
+Future<void> _processBlobDirect(
+  String fromId,
+  String msgId,
+  Uint8List data,
+  bool isVoice,
+  bool isVideo,
+  bool isSquare,
+  bool isFile,
+  bool isSticker,
+  String? fileName,
+  bool viewOnce,
+) async {
+  await _processBlobAssemble(
+    fromId: fromId,
+    msgId: msgId,
+    data: data,
+    isVoice: isVoice,
+    isVideo: isVideo,
+    isSquare: isSquare,
+    isFile: isFile,
+    isSticker: isSticker,
+    fileName: fileName,
+    viewOnce: viewOnce,
+  );
 }
 
 /// Handle blob received from relay — reassemble into a file and save message
@@ -3252,6 +3342,62 @@ void _onBlobReceived(
     return;
   }
 
+  if (msgId.startsWith('stickerpack_')) {
+    try {
+      final preview = await StickerPackDmService.receiveFromRelay(
+        fromId,
+        msgId,
+        data,
+      );
+      if (preview != null) {
+        incomingMessageController.add(IncomingMessage(
+          fromId: fromId,
+          text: preview,
+          timestamp: DateTime.now(),
+          msgId: msgId,
+        ));
+        final myKey = CryptoService.instance.publicKeyHex;
+        if (myKey.isNotEmpty) {
+          unawaited(GossipRouter.instance.sendAck(
+            messageId: msgId,
+            senderId: myKey,
+            recipientId: fromId,
+          ));
+        }
+        await _notifyIncomingDirectEvent(peerId: fromId, body: preview);
+      }
+    } catch (e, st) {
+      debugPrint('[RLINK][StickerPack] relay blob failed: $e\n$st');
+    }
+    return;
+  }
+
+  if (msgId.startsWith('emojiauto_')) {
+    try {
+      await EmojiPackDmService.receiveFromRelay(
+        fromId: fromId,
+        compressedData: data,
+      );
+      incomingMessageController.add(IncomingMessage(
+        fromId: fromId,
+        text: '',
+        timestamp: DateTime.now(),
+        msgId: msgId,
+      ));
+      final myKey = CryptoService.instance.publicKeyHex;
+      if (myKey.isNotEmpty) {
+        unawaited(GossipRouter.instance.sendAck(
+          messageId: msgId,
+          senderId: myKey,
+          recipientId: fromId,
+        ));
+      }
+    } catch (e, st) {
+      debugPrint('[RLINK][EmojiAuto] relay blob failed: $e\n$st');
+    }
+    return;
+  }
+
   final skippedBySettings = await _handleIncomingMediaWhenAutoDownloadDisabled(
     fromId: fromId,
     msgId: msgId,
@@ -3260,11 +3406,53 @@ void _onBlobReceived(
     isVideo: isVideo,
     isSquare: isSquare,
     isFile: isFile,
+    isSticker: isSticker,
     viewOnce: viewOnce,
     fileName: fileName,
   );
-  if (skippedBySettings) return;
+  if (skippedBySettings) {
+    // Сохраняем байты для ручной загрузки по кнопке «Загрузить».
+    PendingMediaService.instance.store(
+      msgId: msgId,
+      data: data,
+      fromId: fromId,
+      isVoice: isVoice,
+      isVideo: isVideo,
+      isSquare: isSquare,
+      isFile: isFile,
+      isSticker: isSticker,
+      viewOnce: viewOnce,
+      fileName: fileName,
+    );
+    return;
+  }
 
+  await _processBlobAssemble(
+    fromId: fromId,
+    msgId: msgId,
+    data: data,
+    isVoice: isVoice,
+    isVideo: isVideo,
+    isSquare: isSquare,
+    isFile: isFile,
+    isSticker: isSticker,
+    fileName: fileName,
+    viewOnce: viewOnce,
+  );
+}
+
+Future<void> _processBlobAssemble({
+  required String fromId,
+  required String msgId,
+  required Uint8List data,
+  required bool isVoice,
+  required bool isVideo,
+  required bool isSquare,
+  required bool isFile,
+  required bool isSticker,
+  required bool viewOnce,
+  String? fileName,
+}) async {
   // Feed directly to ImageService as if all chunks arrived at once
   ImageService.instance.initAssembly(
     msgId,
@@ -3718,20 +3906,27 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
       title: 'Rlink',
       debugShowCheckedModeBanner: false,
       builder: (context, child) {
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            if (child != null) child,
-            const Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: SafeArea(
-                bottom: false,
-                child: AudioQueueMiniPlayer(),
+        final fontScale =
+            const [0.85, 1.0, 1.2][AppSettings.instance.fontSize];
+        return MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            textScaler: TextScaler.linear(fontScale),
+          ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (child != null) child,
+              const Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: SafeArea(
+                  bottom: false,
+                  child: AudioQueueMiniPlayer(),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         );
       },
       themeMode: settings.themeMode,
@@ -3764,8 +3959,6 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
     final isDark = brightness == Brightness.dark;
     final base = isDark ? ThemeData.dark() : ThemeData.light();
 
-    // Font size scaling: 0=small(0.85), 1=medium(1.0), 2=large(1.2)
-    final fontScale = const [0.85, 1.0, 1.2][AppSettings.instance.fontSize];
     TextTheme scaled = GoogleFonts.googleSansTextTheme(base.textTheme);
 
     // Android: Noto Color Emoji как fallback — ближе к единому виду с iOS (вкл. в настройках).
@@ -3799,30 +3992,6 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
       labelSmall: addEmoji(scaled.labelSmall),
     );
 
-    if (fontScale != 1.0) {
-      // Don't use apply(fontSizeFactor:) — it asserts fontSize != null on
-      // every style, but GoogleFonts may leave some null. Scale manually.
-      TextStyle? s(TextStyle? st) => st == null || st.fontSize == null
-          ? st
-          : st.copyWith(fontSize: st.fontSize! * fontScale);
-      scaled = scaled.copyWith(
-        displayLarge: s(scaled.displayLarge),
-        displayMedium: s(scaled.displayMedium),
-        displaySmall: s(scaled.displaySmall),
-        headlineLarge: s(scaled.headlineLarge),
-        headlineMedium: s(scaled.headlineMedium),
-        headlineSmall: s(scaled.headlineSmall),
-        titleLarge: s(scaled.titleLarge),
-        titleMedium: s(scaled.titleMedium),
-        titleSmall: s(scaled.titleSmall),
-        bodyLarge: s(scaled.bodyLarge),
-        bodyMedium: s(scaled.bodyMedium),
-        bodySmall: s(scaled.bodySmall),
-        labelLarge: s(scaled.labelLarge),
-        labelMedium: s(scaled.labelMedium),
-        labelSmall: s(scaled.labelSmall),
-      );
-    }
 
     final cs = ColorScheme.fromSeed(
       seedColor: accent,

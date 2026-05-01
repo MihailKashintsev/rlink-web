@@ -48,6 +48,7 @@ import '../mention_nav.dart';
 import 'image_editor_screen.dart';
 import '../widgets/forward_target_sheet.dart';
 import '../widgets/media_gallery_send_sheet.dart';
+import '../widgets/chat_emoji_insert_sheet.dart';
 import 'square_video_recorder_screen.dart';
 
 class GroupsScreen extends StatefulWidget {
@@ -367,6 +368,27 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
+  void _insertIntoComposer(String insert) {
+    final value = _controller.value;
+    final sel = value.selection;
+    final text = value.text;
+    if (!sel.isValid) {
+      _controller.value = value.copyWith(
+        text: '$text$insert',
+        selection: TextSelection.collapsed(offset: text.length + insert.length),
+      );
+      return;
+    }
+    final start = sel.start < 0 ? text.length : sel.start;
+    final end = sel.end < 0 ? text.length : sel.end;
+    final next = text.replaceRange(start, end, insert);
+    final caret = start + insert.length;
+    _controller.value = value.copyWith(
+      text: next,
+      selection: TextSelection.collapsed(offset: caret),
+    );
+  }
+
   Future<void> _attachLinkToSelection() async {
     final sel = _controller.selection;
     if (!sel.isValid || sel.isCollapsed) return;
@@ -670,6 +692,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
+  // ignore: unused_element
   Future<void> _sendGroupSquareVideo() async {
     if (_isSending) return;
     if (!mounted) return;
@@ -750,6 +773,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
+  // ignore: unused_element
   Future<void> _sendGroupVideoFromGallery() async {
     if (_isSending) return;
     final picked = await _picker.pickVideo(source: ImageSource.gallery);
@@ -986,6 +1010,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
+  // ignore: unused_element
   Future<void> _sendFile() async {
     if (_isSending) return;
     final result = await FilePicker.platform.pickFiles(
@@ -1093,6 +1118,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       onStickerCropped: _groupGalleryStickerCrop,
       onStickerFromLibrary: _groupGalleryStickerLib,
       onFilePath: _groupGalleryFile,
+      onLocation: _toggleLocation,
+      onTodo: _composeAndSendTodo,
+      onPoll: () async => _sendPoll(),
+      onCalendarEvent: _composeAndSendCalendar,
     );
   }
 
@@ -2273,123 +2302,24 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                               ? 'Скрыть формат'
                               : 'Формат выделенного текста',
                         ),
-                      PopupMenuButton<String>(
-                        onSelected: (value) {
-                          if (_isSending) return;
-                          switch (value) {
-                            case 'square_video':
-                              unawaited(_sendGroupSquareVideo());
-                              break;
-                            case 'video':
-                              unawaited(_sendGroupVideoFromGallery());
-                              break;
-                            case 'poll':
-                              _sendPoll();
-                              break;
-                            case 'todo':
-                              _composeAndSendTodo();
-                              break;
-                            case 'cal':
-                              _composeAndSendCalendar();
-                              break;
-                            case 'file':
-                              _sendFile();
-                              break;
-                            case 'location':
-                              unawaited(_toggleLocation());
-                              break;
-                          }
-                        },
-                        icon: AnimatedRotation(
-                          turns: (_pendingLat != null && _pendingLng != null)
-                              ? 0.125
-                              : 0,
-                          duration: const Duration(milliseconds: 200),
-                          child: Icon(Icons.add_rounded,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                              size: 26),
+                      IconButton(
+                        onPressed: _isSending
+                            ? null
+                            : () => unawaited(showChatEmojiInsertSheet(
+                                  context,
+                                  onInsert: _insertIntoComposer,
+                                )),
+                        icon: Icon(
+                          Icons.emoji_emotions_outlined,
+                          color: _isSending
+                              ? cs.onSurface.withValues(alpha: 0.3)
+                              : cs.onSurfaceVariant,
+                          size: 24,
                         ),
                         padding: EdgeInsets.zero,
                         constraints:
                             const BoxConstraints(minWidth: 36, minHeight: 36),
-                        tooltip: 'Прикрепить',
-                        position: PopupMenuPosition.over,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14)),
-                        itemBuilder: (_) {
-                          return [
-                            const PopupMenuItem(
-                              value: 'square_video',
-                              child: Row(children: [
-                                Icon(Icons.crop_square, size: 20),
-                                SizedBox(width: 12),
-                                Text('Квадратик'),
-                              ]),
-                            ),
-                            const PopupMenuItem(
-                              value: 'video',
-                              child: Row(children: [
-                                Icon(Icons.video_library_outlined, size: 20),
-                                SizedBox(width: 12),
-                                Text('Видео из галереи'),
-                              ]),
-                            ),
-                            const PopupMenuItem(
-                              value: 'poll',
-                              child: Row(children: [
-                                Icon(Icons.poll_outlined, size: 20),
-                                SizedBox(width: 12),
-                                Text('Опрос'),
-                              ]),
-                            ),
-                            const PopupMenuItem(
-                              value: 'todo',
-                              child: Row(children: [
-                                Icon(Icons.checklist_rtl, size: 20),
-                                SizedBox(width: 12),
-                                Text('Список дел'),
-                              ]),
-                            ),
-                            const PopupMenuItem(
-                              value: 'cal',
-                              child: Row(children: [
-                                Icon(Icons.event_available_outlined, size: 20),
-                                SizedBox(width: 12),
-                                Text('Событие'),
-                              ]),
-                            ),
-                            const PopupMenuItem(
-                              value: 'file',
-                              child: Row(children: [
-                                Icon(Icons.attach_file_outlined, size: 20),
-                                SizedBox(width: 12),
-                                Text('Файл'),
-                              ]),
-                            ),
-                            PopupMenuItem(
-                              value: 'location',
-                              child: Row(children: [
-                                Icon(
-                                  (_pendingLat != null && _pendingLng != null)
-                                      ? Icons.location_on
-                                      : Icons.location_on_outlined,
-                                  size: 20,
-                                  color: (_pendingLat != null &&
-                                          _pendingLng != null)
-                                      ? cs.primary
-                                      : null,
-                                ),
-                                const SizedBox(width: 12),
-                                Text(
-                                    (_pendingLat != null && _pendingLng != null)
-                                        ? 'Убрать геометку'
-                                        : 'Геометка'),
-                              ]),
-                            ),
-                          ];
-                        },
+                        tooltip: 'Эмодзи и стикеры',
                       ),
                       IconButton(
                         onPressed: _isSending

@@ -1,38 +1,167 @@
-# rlink_bot — Python-бот для Rlink (relay + E2E)
+# rlink_bot — Python SDK для ботов Rlink
 
-Формат шифрования совместим с клиентом Flutter (`CryptoService` + gossip `msg`).
+Формат шифрования совместим с Flutter-клиентом (`CryptoService` + gossip `msg`).
 
-**Relay по умолчанию** — тот же, что в приложении: `wss://rlink.ru.tuna.am` (константа `rlink_bot/relay_defaults.py`, синхронно с `RelayService.defaultServerUrl` во Flutter). Указывать `--relay` нужно только если вы поднимаете **свой** relay.
+**Relay по умолчанию** — тот же, что в приложении: `wss://rlink.ru.tuna.am`.
+Указывайте `--relay` только если поднимаете свой relay.
 
 ---
 
-## Три шага для разработчика
+## Быстрый старт — три шага
 
-1. **Ключи** (один раз на машине с ботом):
-   ```bash
-   cd tools/rlink_bot
-   python -m pip install -e .
-   python -m rlink_bot keys init --file bot_keys.json
-   python -m rlink_bot keys show-pub --file bot_keys.json
-   ```
-   Публичный **64 hex** отправьте боту **Lib** в Rlink: `/newbot ваш_ник` и ключ (или одной строкой).
+### 1. Ключи (один раз на машине с ботом)
 
-2. **Код из Lib** — в ответе будет **claimCode** (коротко) и **claimId** (32 hex). Достаточно **одной команды** (relay не указываете — возьмётся как в приложении):
-   ```bash
-   python -m rlink_bot onboard СЮДА_ВСТАВИТЬ_КОД_ИЗ_LIB --file bot_keys.json
-   ```
-   В stdout один раз — **API token**; рядом появится `rlink_bot_config.json`.
+```bash
+cd tools/rlink_bot
+pip install -e .
+python -m rlink_bot keys init --file bot_keys.json
+python -m rlink_bot keys show-pub --file bot_keys.json
+```
 
-3. **Онлайн**:
-   echo-режим в этом репозитории отключён. Используйте только `tools/rlink_help_bot`:
-   ```bash
-   cd tools/rlink_help_bot
-   python -m rlink_help_bot --config rlink_help_bot_config.json
-   ```
+Скопируйте **64 hex** из последней команды.
 
-Команда **`claim`** — то же, что **`onboard`**, но с явным **`--relay`** по умолчанию из переменной окружения `RLINK_RELAY_URL` (если нужен другой сервер).
+### 2. Регистрация через Lib
 
-Демо-формат claimCode (не из Lib): `python -m rlink_bot code`
+В приложении Rlink → чат с ботом **Lib**:
+
+```
+/newbot ваш_ник <вставьте 64 hex сюда>
+```
+
+В ответе придёт **claimCode** (короткий, удобный) и claimId (32 hex).
+
+```bash
+python -m rlink_bot onboard ABCD-EFGH-JKLM --file bot_keys.json
+```
+
+В stdout один раз — **API token**. Рядом создастся `rlink_bot_config.json`.
+
+### 3. Запуск
+
+```bash
+# Пример-эхо из этого репозитория:
+python tools/rlink_bot/example_echo_bot.py --config rlink_bot_config.json
+
+# Справочный бот с меню:
+cd tools/rlink_help_bot
+python -m rlink_help_bot --config rlink_help_bot_config.json
+```
+
+---
+
+## Кнопки (InlineKeyboard)
+
+Клиент Rlink показывает **кнопки-чипы** прямо в пузыре сообщения.
+Формат — токен в тексте ответа:
+
+```
+[btn:Метка|/команда]
+```
+
+Несколько кнопок в одном сообщении:
+
+```
+Что хотите сделать?
+[btn:Меню|/menu] [btn:Помощь|/help] [btn:Время|/time]
+```
+
+При нажатии клиент автоматически отправляет `/команда` в чат с ботом.
+
+### Вспомогательная функция (Python)
+
+```python
+def btns(*pairs: tuple[str, str]) -> str:
+    """Строка из нескольких кнопок."""
+    return " ".join(f"[btn:{label}|{cmd}]" for label, cmd in pairs)
+
+reply = (
+    "Привет! Выберите действие:\n\n"
+    + btns(
+        ("Меню", "/menu"),
+        ("Помощь", "/help"),
+        ("Эхо", "/echo"),
+    )
+)
+sess.send_dm(user_id, reply)
+```
+
+### Минимальный бот с кнопками
+
+```python
+from rlink_bot.crypto_rlink import BotKeys
+from rlink_bot.relay_client import RelayBotSession
+import json
+from pathlib import Path
+
+cfg = json.loads(Path("rlink_bot_config.json").read_text())
+keys = BotKeys.from_json_dict(json.loads(Path(cfg["keys_path"]).read_text()))
+sess = RelayBotSession(cfg["relay_url"], keys)
+sess.connect(nick="@mybot")
+
+def on_dm(sender: str, text: str) -> None:
+    if text.strip().lower() in ("/start", "/menu"):
+        sess.send_dm(sender,
+            "Привет!\n\n[btn:Помощь|/help] [btn:Эхо|/echo]"
+        )
+    elif text.strip().lower() == "/help":
+        sess.send_dm(sender, "Это пример бота. [btn:Назад|/menu]")
+    else:
+        sess.send_dm(sender, f"Эхо: {text}\n\n[btn:Меню|/menu]")
+
+sess.recv_loop(on_dm)
+```
+
+Полный рабочий пример с меню, командами и режимом эха: `example_echo_bot.py`.
+
+---
+
+## Форматирование текста
+
+Поддерживается Markdown-подобный синтаксис (как в Telegram):
+
+| Синтаксис | Результат |
+|-----------|-----------|
+| `**текст**` | **жирный** |
+| `_текст_` | *курсив* |
+| `__текст__` | подчёркнутый |
+| `~~текст~~` | зачёркнутый |
+| `\`код\`` | моноширинный |
+| `\`\`\`python\nкод\n\`\`\`` | блок кода с подсветкой |
+| `\|\|текст\|\|` | спойлер |
+
+Пример:
+
+```python
+sess.send_dm(user_id,
+    "**Результат поиска:**\n\n"
+    "```python\nprint('Hello, Rlink!')\n```\n\n"
+    "[btn:Новый поиск|/search] [btn:Меню|/menu]"
+)
+```
+
+---
+
+## API бота (HTTP)
+
+После `onboard` есть API-токен для управления метаданными бота через HTTP:
+
+```bash
+# Установить описание
+curl -X POST "http://relay:8080/bot-api/v1/setMyDescription" \
+  -H "Authorization: Bearer ВАШ_ТОКЕН" \
+  -H "Content-Type: application/json" \
+  -d '{"description":"Мой бот"}'
+
+# Аватар (публичный URL)
+curl -X POST "http://relay:8080/bot-api/v1/setMyAvatarUrl" \
+  -H "Authorization: Bearer ВАШ_ТОКЕН" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/avatar.png"}'
+```
+
+Другие методы: `setMyName`, `setMyBannerUrl`, `setWebhook`, `revokeToken`.
+
+---
 
 ## Установка
 
@@ -43,125 +172,34 @@ pip install -e .
 
 ### Windows (PowerShell)
 
-- Во многих версиях PowerShell **`&&` не является разделителем команд** (ошибка «Лексема "&&"…»). Используйте **две строки** или **`;`**:
-  ```powershell
-  cd tools\rlink_bot
-  python -m pip install -e .
-  ```
-- Нужна именно команда **`pip install -e .`** или **`python -m pip install -e .`** — в конце **точка** (каталог пакета). Команда **`pip install -e`** без аргумента завершится ошибкой.
-- Ошибка **`No module named 'websocket'`** значит, что зависимости из `pyproject.toml` не установились (другой Python, не тот venv или установка не выполнялась). Повторите:
-  ```powershell
-  cd C:\путь\к\репо\tools\rlink_bot
-  python -m pip install -e .
-  python -m pip install "websocket-client>=1.7" "cryptography>=42"
-  ```
-  И дальше вызывайте **`python -m rlink_bot`** тем же интерпретатором, которым ставили пакеты.
-
-Или без установки:
-
-```bash
-cd tools/rlink_bot
-PYTHONPATH=. python -m rlink_bot keys init
+```powershell
+cd tools\rlink_bot
+python -m pip install -e .
 ```
 
-## Локальный relay (опционально)
+Если `&&` не работает — используйте две строки или `;`.
 
-Если тестируете на своём сервере:
-
-```bash
-cd relay_server
-dart run bin/server.dart
+При ошибке `No module named 'websocket'`:
+```powershell
+python -m pip install "websocket-client>=1.7" "cryptography>=42"
 ```
 
-PowerShell: две строки, без `&&`. Тогда в шаге 2 используйте  
-`python -m rlink_bot onboard КОД --file bot_keys.json --relay ws://127.0.0.1:8080`.
+---
 
-## Пример: справочный бот `rlink_help_bot`
+## Структура пакета
 
-В репозитории есть отдельный пакет **`tools/rlink_help_bot`** — меню по пунктам 1–8, ответы по ключевым словам и action-кнопки в пузыре (см. его `README.md`).
+| Файл | Что делает |
+|------|-----------|
+| `rlink_bot/relay_client.py` | WebSocket-сессия: connect, send_dm, recv_loop |
+| `rlink_bot/crypto_rlink.py` | Ключи Ed25519/X25519, шифрование DM |
+| `rlink_bot/bootstrap.py` | Онбординг (claim) + запись конфига |
+| `rlink_bot/cli.py` | CLI: `keys init`, `keys show-pub`, `onboard`, `run` |
+| `example_echo_bot.py` | Пример бота с кнопками, командами и эхо |
 
-### Action-кнопки для любого Python-бота
-
-Клиент Rlink понимает «кнопки как в TG» из текста сообщения в формате:
-
-```text
-[btn:Текст|/команда]
-```
-
-Можно добавить несколько кнопок в один ответ:
-
-```text
-Выберите действие:
-[btn:Меню|/menu] [btn:Помощь|/help] [btn:Мои боты|/mybots]
-```
-
-Минимальный шаблон в Python:
-
-```python
-def button_tokens(pairs: list[tuple[str, str]]) -> str:
-    return " ".join(f"[btn:{label}|{command}]" for label, command in pairs)
-
-reply = (
-    "Готово.\n\n"
-    + button_tokens([
-        ("Меню", "/menu"),
-        ("Помощь", "/help"),
-        ("Боты и Lib", "/topic_lib"),
-    ])
-)
-sess.send_dm(user_id, reply)
-```
-
-`/команда` — любой текст, который ваш бот умеет обрабатывать в `on_dm`.
-
-### Формат action-кнопок для любого бота
-
-Кнопка кодируется прямо в тексте ответа:
-
-```text
-[btn:Текст кнопки|/команда]
-```
-
-Несколько кнопок можно отправить в одном сообщении:
-
-```text
-Подсказки:
-[btn:Меню|/menu] [btn:Помощь|/help]
-```
-
-Клиент Rlink покажет чипы-кнопки и отправит `/команда` при нажатии.
-
-## HTTP Bot API (метаданные)
-
-После `claim` у вас есть токен. Пример (локально порт 8080):
-
-```bash
-curl -sS -X POST "http://127.0.0.1:8080/bot-api/v1/setMyDescription" \
-  -H "Authorization: Bearer ВАШ_ТОКЕН" \
-  -H "Content-Type: application/json" \
-  -d '{"description":"Мой echo-бот"}'
-```
-
-Другие пути: `setWebhook`, `deleteWebhook`, `setMyName`, `revokeToken`.
-
-Аватар и баннер в каталоге (публичные URL, `https` или `http`, до 2048 символов; пустая строка сбрасывает):
-
-```bash
-curl -sS -X POST "http://127.0.0.1:8080/bot-api/v1/setMyAvatarUrl" \
-  -H "Authorization: Bearer ВАШ_ТОКЕН" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com/bot-avatar.png"}'
-
-curl -sS -X POST "http://127.0.0.1:8080/bot-api/v1/setMyBannerUrl" \
-  -H "Authorization: Bearer ВАШ_ТОКЕН" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com/bot-banner.jpg"}'
-```
-
-После сохранения relay рассылает обновлённый `bot_dir_snapshot` всем подключённым клиентам.
+---
 
 ## Переменные окружения
 
-| Переменная        | Назначение                          |
-|-------------------|-------------------------------------|
-| `RLINK_RELAY_URL` | URL WebSocket relay по умолчанию   |
+| Переменная | Назначение |
+|------------|-----------|
+| `RLINK_RELAY_URL` | URL WebSocket relay по умолчанию |

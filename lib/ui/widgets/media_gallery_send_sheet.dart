@@ -61,7 +61,7 @@ Future<List<String>> _loadRecentFilePaths() async {
   }
 }
 
-/// Вкладки: коллекция стикеров / GIF / фото / видео / файлы (включая недавние).
+/// Вкладки: коллекция стикеров / GIF / фото / видео / файлы (+ меню действий).
 Future<void> showMediaGallerySendSheet(
   BuildContext context, {
   required Future<void> Function(String filePath) onPhotoPath,
@@ -71,7 +71,21 @@ Future<void> showMediaGallerySendSheet(
   required Future<void> Function(String stickerLibraryFilePath)
       onStickerFromLibrary,
   required Future<void> Function(String filePath) onFilePath,
+  Future<void> Function()? onLocation,
+  Future<void> Function()? onTodo,
+  Future<void> Function()? onPoll,
+  Future<void> Function()? onCalendarEvent,
 }) {
+  final hasExtraMenu =
+      onLocation != null || onTodo != null || onPoll != null || onCalendarEvent != null;
+  final tabs = <Tab>[
+    const Tab(text: 'Стикеры'),
+    const Tab(text: 'GIF'),
+    const Tab(text: 'Фото'),
+    const Tab(text: 'Видео'),
+    const Tab(text: 'Файлы'),
+    if (hasExtraMenu) const Tab(text: 'Гео/Меню'),
+  ];
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -87,7 +101,7 @@ Future<void> showMediaGallerySendSheet(
         maxChildSize: 0.95,
         builder: (context, _) {
           return DefaultTabController(
-            length: 5,
+            length: tabs.length,
             child: Column(
               children: [
                 const SizedBox(height: 8),
@@ -99,15 +113,9 @@ Future<void> showMediaGallerySendSheet(
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-                const TabBar(
+                TabBar(
                   isScrollable: true,
-                  tabs: [
-                    Tab(text: 'Стикеры'),
-                    Tab(text: 'GIF'),
-                    Tab(text: 'Фото'),
-                    Tab(text: 'Видео'),
-                    Tab(text: 'Файлы'),
-                  ],
+                  tabs: tabs,
                 ),
                 Expanded(
                   child: TabBarView(
@@ -142,6 +150,14 @@ Future<void> showMediaGallerySendSheet(
                         sheetContext: ctx,
                         onFilePath: onFilePath,
                       ),
+                      if (hasExtraMenu)
+                        _ExtraActionsMenuTab(
+                          sheetContext: ctx,
+                          onLocation: onLocation,
+                          onTodo: onTodo,
+                          onPoll: onPoll,
+                          onCalendarEvent: onCalendarEvent,
+                        ),
                     ],
                   ),
                 ),
@@ -152,6 +168,65 @@ Future<void> showMediaGallerySendSheet(
       );
     },
   );
+}
+
+class _ExtraActionsMenuTab extends StatelessWidget {
+  final BuildContext sheetContext;
+  final Future<void> Function()? onLocation;
+  final Future<void> Function()? onTodo;
+  final Future<void> Function()? onPoll;
+  final Future<void> Function()? onCalendarEvent;
+
+  const _ExtraActionsMenuTab({
+    required this.sheetContext,
+    required this.onLocation,
+    required this.onTodo,
+    required this.onPoll,
+    required this.onCalendarEvent,
+  });
+
+  Future<void> _runAndClose(Future<void> Function() action) async {
+    Navigator.of(sheetContext).pop();
+    await action();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tiles = <Widget>[
+      if (onLocation != null)
+        ListTile(
+          leading: const Icon(Icons.location_on_outlined),
+          title: const Text('Геометка'),
+          onTap: () => unawaited(_runAndClose(onLocation!)),
+        ),
+      if (onTodo != null)
+        ListTile(
+          leading: const Icon(Icons.checklist_rtl),
+          title: const Text('Список дел'),
+          onTap: () => unawaited(_runAndClose(onTodo!)),
+        ),
+      if (onCalendarEvent != null)
+        ListTile(
+          leading: const Icon(Icons.event_available_outlined),
+          title: const Text('Событие'),
+          onTap: () => unawaited(_runAndClose(onCalendarEvent!)),
+        ),
+      if (onPoll != null)
+        ListTile(
+          leading: const Icon(Icons.poll_outlined),
+          title: const Text('Опрос'),
+          onTap: () => unawaited(_runAndClose(onPoll!)),
+        ),
+    ];
+    if (tiles.isEmpty) {
+      return const Center(child: Text('Нет доступных действий'));
+    }
+    return ListView.separated(
+      itemCount: tiles.length,
+      separatorBuilder: (_, __) => const Divider(height: 1),
+      itemBuilder: (_, i) => tiles[i],
+    );
+  }
 }
 
 class _StickerLibraryTab extends StatefulWidget {
@@ -193,7 +268,7 @@ class _StickerLibraryTabState extends State<_StickerLibraryTab> {
   Future<void> _reload() async {
     if (!mounted) return;
     setState(() => _loading = true);
-    await StickerCollectionService.instance.ensureInitialized();
+    await StickerCollectionService.instance.init();
     if (!mounted) return;
     final packs = await StickerCollectionService.instance.loadPacks();
     if (!mounted) return;

@@ -5,8 +5,12 @@ import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as epf;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
+import '../../models/emoji_pack.dart';
 import '../../services/app_settings.dart';
+import '../../services/emoji_pack_service.dart';
 import '../../services/image_service.dart';
 import '../../services/runtime_platform.dart';
 
@@ -35,6 +39,8 @@ class AvatarWidget extends StatelessWidget {
     this.hasStory = false,
     this.hasUnviewedStory = false,
   });
+
+  static final RegExp _shortcodeRe = RegExp(r'^:([a-zA-Z0-9_]{1,48}):$');
 
   @override
   Widget build(BuildContext context) {
@@ -84,17 +90,7 @@ class AvatarWidget extends StatelessWidget {
                 height: innerSize,
                 fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) => Center(
-                  child: emoji.isNotEmpty
-                      ? Text(emoji, style: TextStyle(fontSize: innerSize * 0.46))
-                      : Text(
-                          initials.isNotEmpty ? initials : '?',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: innerSize * 0.38,
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: 0.5,
-                          ),
-                        ),
+                  child: _buildEmojiOrInitials(innerSize),
                 ),
               )
             : hasNetworkImage
@@ -104,32 +100,11 @@ class AvatarWidget extends StatelessWidget {
                     height: innerSize,
                     fit: BoxFit.cover,
                     errorBuilder: (_, __, ___) => Center(
-                      child: emoji.isNotEmpty
-                          ? Text(emoji,
-                              style: TextStyle(fontSize: innerSize * 0.46))
-                          : Text(
-                              initials.isNotEmpty ? initials : '?',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: innerSize * 0.38,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 0.5,
-                              ),
-                            ),
+                      child: _buildEmojiOrInitials(innerSize),
                     ),
                   )
             : Center(
-                child: emoji.isNotEmpty
-                    ? Text(emoji, style: TextStyle(fontSize: innerSize * 0.46))
-                    : Text(
-                        initials.isNotEmpty ? initials : '?',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: innerSize * 0.38,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
+                child: _buildEmojiOrInitials(innerSize),
               ),
       ),
     );
@@ -198,6 +173,36 @@ class AvatarWidget extends StatelessWidget {
     );
   }
 
+  Widget _buildEmojiOrInitials(double innerSize) {
+    if (emoji.isNotEmpty) {
+      final m = _shortcodeRe.firstMatch(emoji.trim());
+      if (m != null) {
+        final abs = EmojiPackService.instance.absolutePathForShortcode(m.group(1)!);
+        if (abs != null && File(abs).existsSync()) {
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(innerSize * 0.16),
+            child: Image.file(
+              File(abs),
+              width: innerSize * 0.72,
+              height: innerSize * 0.72,
+              fit: BoxFit.cover,
+            ),
+          );
+        }
+      }
+      return Text(emoji, style: TextStyle(fontSize: innerSize * 0.46));
+    }
+    return Text(
+      initials.isNotEmpty ? initials : '?',
+      style: TextStyle(
+        color: Colors.white,
+        fontSize: innerSize * 0.38,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.5,
+      ),
+    );
+  }
+
   List<Widget> _statusIcons(double avatarSize) {
     final iconSize = avatarSize * 0.12;
     final icons = <IconData>[];
@@ -229,9 +234,9 @@ class AvatarWidget extends StatelessWidget {
   }
 }
 
-// ── Выбор эмодзи (полный набор Unicode через emoji_picker_flutter) ──
+// ── Выбор эмодзи (Unicode + мои кастомные) ──
 
-class AvatarEmojiPicker extends StatelessWidget {
+class AvatarEmojiPicker extends StatefulWidget {
   final String selected;
   final void Function(String emoji) onSelected;
 
@@ -242,39 +247,190 @@ class AvatarEmojiPicker extends StatelessWidget {
   });
 
   @override
+  State<AvatarEmojiPicker> createState() => _AvatarEmojiPickerState();
+}
+
+class _AvatarEmojiPickerState extends State<AvatarEmojiPicker> {
+  List<(CustomEmoji, String?)> _customItems = [];
+
+  @override
+  void initState() {
+    super.initState();
+    EmojiPackService.instance.version.addListener(_loadCustom);
+    _loadCustom();
+  }
+
+  @override
+  void dispose() {
+    EmojiPackService.instance.version.removeListener(_loadCustom);
+    super.dispose();
+  }
+
+  Future<void> _loadCustom() async {
+    await EmojiPackService.instance.ensureInitialized();
+    final packs = await EmojiPackService.instance.loadPacks();
+    final docs = await getApplicationDocumentsDirectory();
+    final out = <(CustomEmoji, String?)>[];
+    for (final pack in packs) {
+      for (final e in pack.emojis) {
+        final abs = p.join(docs.path, e.relPath);
+        out.add((e, File(abs).existsSync() ? abs : null));
+      }
+    }
+    if (mounted) setState(() => _customItems = out);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     final useNoto =
         RuntimePlatform.isAndroid && AppSettings.instance.useIosStyleEmoji;
-    return SizedBox(
-      height: 280,
-      child: epf.EmojiPicker(
-        onEmojiSelected: (_, emoji) => onSelected(emoji.emoji),
-        config: epf.Config(
-          height: 280,
-          checkPlatformCompatibility: !useNoto,
-          emojiTextStyle:
-              useNoto ? GoogleFonts.notoColorEmoji(fontSize: 26) : null,
-          emojiViewConfig: const epf.EmojiViewConfig(
-            backgroundColor: Color(0xFF1A1A1A),
-            columns: 8,
-            emojiSizeMax: 26,
-          ),
-          categoryViewConfig: const epf.CategoryViewConfig(
-            backgroundColor: Color(0xFF1A1A1A),
-            iconColorSelected: Color(0xFF1DB954),
-            indicatorColor: Color(0xFF1DB954),
-            iconColor: Colors.grey,
-          ),
-          bottomActionBarConfig: const epf.BottomActionBarConfig(
-            backgroundColor: Color(0xFF1A1A1A),
-            buttonIconColor: Colors.grey,
-          ),
-          searchViewConfig: const epf.SearchViewConfig(
-            backgroundColor: Color(0xFF1A1A1A),
-            buttonIconColor: Colors.grey,
-          ),
+    return DefaultTabController(
+      length: 2,
+      child: SizedBox(
+        height: 320,
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(4),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.8),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: TabBar(
+                indicatorSize: TabBarIndicatorSize.tab,
+                indicator: BoxDecoration(
+                  color: cs.primary.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                labelColor: cs.primary,
+                unselectedLabelColor: cs.onSurfaceVariant,
+                dividerColor: Colors.transparent,
+                tabs: const [
+                  Tab(text: 'Эмодзи'),
+                  Tab(text: 'Мои'),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: epf.EmojiPicker(
+                      onEmojiSelected: (_, emoji) =>
+                          widget.onSelected(emoji.emoji),
+                      config: epf.Config(
+                        height: 280,
+                        checkPlatformCompatibility: !useNoto,
+                        emojiTextStyle: useNoto
+                            ? GoogleFonts.notoColorEmoji(fontSize: 26)
+                            : null,
+                        emojiViewConfig: epf.EmojiViewConfig(
+                          backgroundColor: cs.surfaceContainerHighest
+                              .withValues(alpha: 0.5),
+                          columns: 8,
+                          emojiSizeMax: 26,
+                        ),
+                        categoryViewConfig: epf.CategoryViewConfig(
+                          backgroundColor: cs.surfaceContainerHighest
+                              .withValues(alpha: 0.5),
+                          iconColorSelected: cs.primary,
+                          indicatorColor: cs.primary,
+                          iconColor: cs.onSurfaceVariant,
+                        ),
+                        bottomActionBarConfig: epf.BottomActionBarConfig(
+                          backgroundColor: cs.surfaceContainerHighest
+                              .withValues(alpha: 0.5),
+                          buttonIconColor: cs.onSurfaceVariant,
+                        ),
+                        searchViewConfig: epf.SearchViewConfig(
+                          backgroundColor: cs.surfaceContainerHighest
+                              .withValues(alpha: 0.5),
+                          buttonIconColor: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                  _CustomEmojiGrid(
+                    items: _customItems,
+                    onPick: (shortcode) => widget.onSelected(':$shortcode:'),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
+    );
+  }
+}
+
+class _CustomEmojiGrid extends StatelessWidget {
+  final List<(CustomEmoji, String?)> items;
+  final void Function(String shortcode) onPick;
+
+  const _CustomEmojiGrid({
+    required this.items,
+    required this.onPick,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    if (items.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Text(
+            'Тут будут ваши эмодзи.\nДобавьте их через Emoji-бота или настройки.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: cs.onSurfaceVariant, height: 1.35),
+          ),
+        ),
+      );
+    }
+    return GridView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 6,
+        mainAxisSpacing: 8,
+        crossAxisSpacing: 8,
+      ),
+      itemCount: items.length,
+      itemBuilder: (context, i) {
+        final item = items[i];
+        final e = item.$1;
+        final path = item.$2;
+        return Tooltip(
+          message: ':${e.shortcode}:',
+          child: Material(
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              onTap: () => onPick(e.shortcode),
+              borderRadius: BorderRadius.circular(12),
+              child: path != null
+                  ? Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(9),
+                        child: Image.file(
+                          File(path),
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: double.infinity,
+                          cacheWidth: RuntimePlatform.isAndroid ? 128 : null,
+                          cacheHeight: RuntimePlatform.isAndroid ? 128 : null,
+                        ),
+                      ),
+                    )
+                  : const Icon(Icons.image_not_supported_outlined),
+            ),
+          ),
+        );
+      },
     );
   }
 }

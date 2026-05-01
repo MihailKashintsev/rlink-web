@@ -43,6 +43,7 @@ import '../widgets/poll_message_card.dart';
 import '../widgets/missing_local_media.dart';
 import '../widgets/channel_feed_image.dart';
 import '../widgets/desktop_image_picker.dart';
+import '../widgets/chat_emoji_insert_sheet.dart';
 import '../widgets/media_gallery_send_sheet.dart';
 import 'image_editor_screen.dart';
 import 'square_video_recorder_screen.dart';
@@ -572,6 +573,9 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
   bool _isSending = false;
   double _sendProgress = 0.0;
   bool _isRecording = false;
+  bool _isRestoringFromDrive = false;
+  bool _isBackingUp = false;
+  String _backupStep = '';
   final _recordingSecondsNotifier = ValueNotifier<double>(0);
   Timer? _recordingTimer;
   Timer? _historyPollTimer;
@@ -615,6 +619,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
     ));
   }
 
+  // ignore: unused_element
   Future<void> _openMentionPickerForPost() async {
     await _showContactMentionPicker(context, (hex) {
       insertChannelMentionToken(_postCtrl, hex);
@@ -681,12 +686,16 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
   /// Резерв на Drive после публикации поста владельцем (если включён).
   void _maybeAutoDriveBackupAfterOwnerPost() {
     unawaited(() async {
+      if (!mounted) return;
+      setState(() { _isBackingUp = true; _backupStep = 'Сохранение на Google Drive…'; });
       try {
         await ChannelBackupService.instance
             .publishBackupIfAdminDriveEnabled(_channel.id);
         if (mounted) await _load();
       } catch (e, st) {
         debugPrint('[RLINK][Drive] auto backup: $e\n$st');
+      } finally {
+        if (mounted) setState(() { _isBackingUp = false; _backupStep = ''; });
       }
     }());
   }
@@ -871,6 +880,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
 
   // ── Video post (gallery) ──────────────────────────────────────
 
+  // ignore: unused_element
   Future<void> _pickAndSendVideoFromGallery() async {
     if (_isSending) return;
     if (!mounted) return;
@@ -896,6 +906,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
         isAvatar: false,
         isVideo: true,
         isSquare: false,
+        isChannelPost: true,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -969,6 +980,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
         isAvatar: false,
         isVideo: true,
         isSquare: true,
+        isChannelPost: true,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -1020,6 +1032,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
 
   // ── File post ───────────────────────────────────────────────
 
+  // ignore: unused_element
   Future<void> _pickAndSendFile() async {
     if (_isSending) return;
 
@@ -1080,6 +1093,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
         fromId: _myId,
         isAvatar: false,
         isFile: true,
+        isChannelPost: true,
         fileName: originalName,
       );
       for (var i = 0; i < chunks.length; i++) {
@@ -1147,6 +1161,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
       onStickerCropped: _channelGalleryStickerFromCrop,
       onStickerFromLibrary: _channelGalleryStickerFromLibrary,
       onFilePath: _channelGalleryFilePath,
+      onPoll: _createPollPost,
     );
   }
 
@@ -1166,6 +1181,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
         totalChunks: chunks.length,
         fromId: _myId,
         isAvatar: false,
+        isChannelPost: true,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -1252,6 +1268,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
         totalChunks: chunks.length,
         fromId: _myId,
         isAvatar: false,
+        isChannelPost: true,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -1382,6 +1399,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
       fromId: _myId,
       isAvatar: false,
       isSticker: true,
+      isChannelPost: true,
     );
     for (var i = 0; i < chunks.length; i++) {
       await GossipRouter.instance.sendImgChunk(
@@ -1522,6 +1540,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
         fromId: _myId,
         isAvatar: false,
         isFile: true,
+        isChannelPost: true,
         fileName: originalName,
       );
       for (var i = 0; i < chunks.length; i++) {
@@ -1636,6 +1655,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
         fromId: _myId,
         isAvatar: false,
         isVoice: true,
+        isChannelPost: true,
       );
       for (var i = 0; i < chunks.length; i++) {
         await GossipRouter.instance.sendImgChunk(
@@ -1973,6 +1993,71 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
 
   // ── Helpers ─────────────────────────────────────────────────
 
+  Widget _buildEmptyPostsView(ColorScheme cs) {
+    final hasUrl = _channel.driveFileUrl != null && _channel.driveFileUrl!.isNotEmpty;
+    if (!hasUrl) {
+      return Center(
+        child: Text('Нет постов',
+            style: TextStyle(color: cs.onSurface.withValues(alpha: 0.3))),
+      );
+    }
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_download_outlined, size: 48, color: cs.primary.withValues(alpha: 0.7)),
+            const SizedBox(height: 16),
+            Text(
+              'История канала доступна\nчерез Google Drive',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 15, color: cs.onSurface.withValues(alpha: 0.7)),
+            ),
+            const SizedBox(height: 20),
+            if (_isRestoringFromDrive) ...[
+              const CircularProgressIndicator(),
+              const SizedBox(height: 12),
+              Text(
+                _backupStep.isNotEmpty ? _backupStep : 'Загрузка…',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13, color: cs.onSurface.withValues(alpha: 0.6)),
+              ),
+            ] else
+              FilledButton.icon(
+                icon: const Icon(Icons.download_rounded),
+                label: const Text('Загрузить историю'),
+                onPressed: _restoreFromDrive,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _restoreFromDrive() async {
+    setState(() { _isRestoringFromDrive = true; _backupStep = 'Подключение к Google Drive…'; });
+    try {
+      final ok = await ChannelBackupService.instance.restoreFromDriveUrl(
+        _channel,
+        onStep: (step) { if (mounted) setState(() => _backupStep = step); },
+      );
+      if (!mounted) return;
+      if (ok) {
+        await _loadAndMarkRead();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('История восстановлена из Google Drive')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Не удалось загрузить историю. Возможно, ключ ещё не получен от автора.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() { _isRestoringFromDrive = false; _backupStep = ''; });
+    }
+  }
+
   String _nickFor(String id) {
     if (id == _myId) return 'Вы';
     final contact = ChatStorageService.instance.contactsNotifier.value
@@ -2089,6 +2174,24 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
       ),
       body: Column(
         children: [
+          if (_isBackingUp)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              color: cs.primaryContainer.withValues(alpha: 0.5),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(_backupStep,
+                      style: TextStyle(fontSize: 12, color: cs.onPrimaryContainer)),
+                ],
+              ),
+            ),
           if (_channel.foreignAgent)
             Container(
               width: double.infinity,
@@ -2137,10 +2240,7 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
             ),
           Expanded(
             child: _posts.isEmpty
-                ? Center(
-                    child: Text('Нет постов',
-                        style: TextStyle(
-                            color: cs.onSurface.withValues(alpha: 0.3))))
+                ? _buildEmptyPostsView(cs)
                 : Stack(
                     fit: StackFit.expand,
                     children: [
@@ -2203,15 +2303,35 @@ class _ChannelViewScreenState extends State<ChannelViewScreen>
               isRecording: _isRecording,
               recordingSecondsNotifier: _recordingSecondsNotifier,
               onSend: () => unawaited(_createPost()),
+              onOpenEmojiInsert: () => unawaited(showChatEmojiInsertSheet(
+                    context,
+                    onInsert: (insert) {
+                      final value = _postCtrl.value;
+                      final sel = value.selection;
+                      final text = value.text;
+                      if (!sel.isValid) {
+                        _postCtrl.value = value.copyWith(
+                          text: '$text$insert',
+                          selection: TextSelection.collapsed(
+                            offset: text.length + insert.length,
+                          ),
+                        );
+                        return;
+                      }
+                      final start = sel.start < 0 ? text.length : sel.start;
+                      final end = sel.end < 0 ? text.length : sel.end;
+                      final next = text.replaceRange(start, end, insert);
+                      _postCtrl.value = value.copyWith(
+                        text: next,
+                        selection:
+                            TextSelection.collapsed(offset: start + insert.length),
+                      );
+                    },
+                  )),
               onOpenMediaGallery: () => unawaited(_openChannelMediaGallery()),
-              onPickVideoFromGallery: () =>
-                  unawaited(_pickAndSendVideoFromGallery()),
               onRecordSquareVideo: () => unawaited(_recordAndSendSquarePost()),
-              onPickFile: () => unawaited(_pickAndSendFile()),
-              onCreatePoll: () => unawaited(_createPollPost()),
               onMicDown: () => unawaited(_startVoiceRecording()),
               onMicUp: () => unawaited(_stopAndSendVoice()),
-              onMentionPicker: () => unawaited(_openMentionPickerForPost()),
             ),
         ],
       ),
@@ -2287,14 +2407,11 @@ class _ChannelInputBar extends StatefulWidget {
   final bool isRecording;
   final ValueNotifier<double> recordingSecondsNotifier;
   final VoidCallback onSend;
+  final VoidCallback onOpenEmojiInsert;
   final VoidCallback onOpenMediaGallery;
-  final VoidCallback onPickVideoFromGallery;
   final VoidCallback onRecordSquareVideo;
-  final VoidCallback onPickFile;
-  final VoidCallback onCreatePoll;
   final VoidCallback onMicDown;
   final VoidCallback onMicUp;
-  final VoidCallback? onMentionPicker;
 
   const _ChannelInputBar({
     required this.controller,
@@ -2303,14 +2420,11 @@ class _ChannelInputBar extends StatefulWidget {
     required this.isRecording,
     required this.recordingSecondsNotifier,
     required this.onSend,
+    required this.onOpenEmojiInsert,
     required this.onOpenMediaGallery,
-    required this.onPickVideoFromGallery,
     required this.onRecordSquareVideo,
-    required this.onPickFile,
-    required this.onCreatePoll,
     required this.onMicDown,
     required this.onMicUp,
-    this.onMentionPicker,
   });
 
   @override
@@ -2543,76 +2657,20 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                       ? 'Скрыть формат'
                       : 'Формат выделенного текста',
                 ),
-              PopupMenuButton<String>(
-                onSelected: (value) {
-                  if (widget.isSending) return;
-                  switch (value) {
-                    case 'square_video':
-                      widget.onRecordSquareVideo();
-                      break;
-                    case 'video':
-                      widget.onPickVideoFromGallery();
-                      break;
-                    case 'file':
-                      widget.onPickFile();
-                      break;
-                    case 'poll':
-                      widget.onCreatePoll();
-                      break;
-                  }
-                },
-                icon: Icon(Icons.add_rounded,
-                    color: cs.onSurfaceVariant, size: 26),
+              IconButton(
+                onPressed: widget.isSending || widget.isRecording
+                    ? null
+                    : widget.onOpenEmojiInsert,
+                icon: Icon(
+                  Icons.emoji_emotions_outlined,
+                  color: widget.isSending || widget.isRecording
+                      ? cs.onSurface.withValues(alpha: 0.3)
+                      : cs.onSurfaceVariant,
+                  size: 24,
+                ),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                tooltip: 'Прикрепить',
-                position: PopupMenuPosition.over,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14)),
-                itemBuilder: (_) => [
-                  const PopupMenuItem(
-                    value: 'square_video',
-                    child: Row(children: [
-                      Icon(Icons.crop_square, size: 20),
-                      SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          'Записать квадратик',
-                          maxLines: 2,
-                        ),
-                      ),
-                    ]),
-                  ),
-                  const PopupMenuItem(
-                    value: 'video',
-                    child: Row(children: [
-                      Icon(Icons.video_library_outlined, size: 20),
-                      SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          'Видео из галереи',
-                          maxLines: 2,
-                        ),
-                      ),
-                    ]),
-                  ),
-                  const PopupMenuItem(
-                    value: 'file',
-                    child: Row(children: [
-                      Icon(Icons.attach_file_outlined, size: 20),
-                      SizedBox(width: 12),
-                      Text('Файл'),
-                    ]),
-                  ),
-                  const PopupMenuItem(
-                    value: 'poll',
-                    child: Row(children: [
-                      Icon(Icons.poll_outlined, size: 20),
-                      SizedBox(width: 12),
-                      Text('Опрос'),
-                    ]),
-                  ),
-                ],
+                tooltip: 'Эмодзи и стикеры',
               ),
               IconButton(
                 onPressed: widget.isSending || widget.isRecording
@@ -2679,20 +2737,7 @@ class _ChannelInputBarState extends State<_ChannelInputBar> {
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
-              if (widget.onMentionPicker != null)
-                IconButton(
-                  onPressed: widget.isSending || widget.isRecording
-                      ? null
-                      : widget.onMentionPicker,
-                  icon: Icon(Icons.alternate_email_rounded,
-                      color: cs.onSurfaceVariant, size: 22),
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
-                  tooltip: 'Отметить человека',
-                ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 8),
               GestureDetector(
                 onTap: widget.isRecording ? widget.onMicUp : widget.onMicDown,
                 onLongPressStart: (_) {
@@ -4596,6 +4641,9 @@ class _ChannelVideoFullScreenState extends State<_ChannelVideoFullScreen> {
       } else {
         c.dispose();
       }
+    }).catchError((e) {
+      debugPrint('[ChannelVideoFull] init error: $e');
+      c.dispose();
     });
   }
 

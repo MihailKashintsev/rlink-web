@@ -58,6 +58,7 @@ class LibBotService {
       '• /setdesc @ник текст — описание (до 512; пустой текст — очистить)\n'
       '• /setavatar @ник <url> — URL аватара (http/https); без URL — сбросить\n'
       '• /setbanner @ник <url> — баннер; без URL — сбросить\n'
+      '• /setcommands @ник /cmd1 Описание, /cmd2 Описание — команды в профиле и автодополнение\n'
       '• /delbot @ник — удалить (отозвать) бота из каталога relay\n'
       '• /newbot <ник> — затем **в чат Lib** одним сообщением публичный ключ бота Ed25519 (64 hex). '
       'Ключ копируют с ПК: `python -m rlink_bot keys show-pub` (в терминал ключ вводить не нужно).\n'
@@ -77,6 +78,7 @@ class LibBotService {
       '/setdesc @ник текст — описание (пусто = очистить)\n'
       '/setavatar @ник [url] — аватар по URL или сброс без url\n'
       '/setbanner @ник [url] — баннер или сброс\n'
+      '/setcommands @ник /cmd1 Описание, /cmd2 … — список slash-команд бота\n'
       '/delbot @ник — удалить бота из каталога relay\n'
       '/newbot <ник> — новый бот (см. кнопки под полем ввода)\n'
       '/cancel — отменить ожидание публичного ключа\n'
@@ -280,6 +282,53 @@ class LibBotService {
       return _patchOwnedBot(handleNorm: h, changes: {'bannerUrl': url});
     }
 
+    if (lower.startsWith('/setcommands')) {
+      final m = RegExp(
+        r'^/setcommands\s+@([a-z0-9_]{2,32})\s+(.+)$',
+        caseSensitive: false,
+      ).firstMatch(t.trim());
+      if (m == null) {
+        return const [
+          'Использование: /setcommands @ник /команда1 Описание, /команда2 Описание',
+          'Пары разделяются запятой перед следующей «/» (запятые внутри описания допустимы).',
+          'Пример: /setcommands @mybot /start Начало работы, /help Справка',
+        ];
+      }
+      final h = m.group(1)!.toLowerCase();
+      final rest = m.group(2)!;
+      final segments = rest.split(RegExp(r',\s*(?=\/)'));
+      final out = <Map<String, String>>[];
+      for (final seg in segments) {
+        final s = seg.trim();
+        if (s.isEmpty) continue;
+        final space = s.indexOf(' ');
+        if (space <= 0) {
+          return [
+            'После команды нужен пробел и описание: `$s`',
+          ];
+        }
+        final cmd = s.substring(0, space).trim();
+        final desc = s.substring(space + 1).trim();
+        if (!RegExp(r'^/[a-z0-9_]{1,63}$', caseSensitive: false)
+            .hasMatch(cmd)) {
+          return [
+            'Некорректная команда: `$cmd` (формат: /имя, латиница, цифры, _).',
+          ];
+        }
+        if (desc.length > 256) {
+          return ['Описание для `$cmd` не длиннее 256 символов.'];
+        }
+        out.add({'cmd': cmd.toLowerCase(), 'desc': desc});
+      }
+      if (out.isEmpty) {
+        return const ['Укажите хотя бы одну команду после ника.'];
+      }
+      if (out.length > 32) {
+        return const ['Не больше 32 команд за раз.'];
+      }
+      return _setCommandsForOwnedBot(handleNorm: h, commands: out);
+    }
+
     if (lower.startsWith('/newbot')) {
       final parts = t.split(RegExp(r'\s+'));
       if (parts.length < 2) {
@@ -376,6 +425,32 @@ class LibBotService {
     }
   }
 
+  String _botCommandsSetErr(Map<String, dynamic> ack) {
+    final e = ack['error']?.toString() ?? 'unknown';
+    switch (e) {
+      case 'offline':
+        return 'Relay не подключён.';
+      case 'timeout':
+        return 'Таймаут ответа relay.';
+      case 'not_found':
+        return 'Бот не найден в каталоге relay.';
+      case 'not_owner':
+        return 'Этот бот привязан к другому владельцу.';
+      case 'bad_commands':
+      case 'bad_command_entry':
+        return 'Некорректный формат команд для relay.';
+      case 'too_many_commands':
+        return 'Не больше 32 команд.';
+      case 'rate_limited':
+        return 'Слишком частые запросы к relay. Подождите немного.';
+      case 'bad_signature':
+      case 'stale_ts':
+        return 'Запрос отклонён relay ($e). Попробуйте ещё раз.';
+      default:
+        return 'Ошибка relay: $e';
+    }
+  }
+
   String _ownerPatchErr(Map<String, dynamic> ack) {
     final e = ack['error']?.toString() ?? 'unknown';
     switch (e) {
@@ -459,8 +534,8 @@ class LibBotService {
       }
       lines.add('');
     }
-    lines
-        .add('Правки: /setname, /setdesc, /setavatar, /setbanner (см. /help).');
+    lines.add(
+        'Правки: /setname, /setdesc, /setavatar, /setbanner, /setcommands (см. /help).');
     lines.add('Удалить бота: /delbot @ник');
     return lines;
   }
@@ -479,6 +554,42 @@ class LibBotService {
       ];
     }
     return res;
+  }
+
+  Future<List<String>> _setCommandsForOwnedBot({
+    required String handleNorm,
+    required List<Map<String, String>> commands,
+  }) async {
+    if (!await _ensureRelayConnected()) {
+      return const [
+        'Relay не подключён.',
+        'Проверьте интернет и URL relay в настройках сети, затем повторите команду.',
+      ];
+    }
+    final (bots, err) = await _loadMyBots();
+    if (err != null) return [err];
+    final row = _findOwnedBotByHandle(bots, handleNorm);
+    if (row == null) {
+      return [
+        'Бот @$handleNorm не найден среди ваших на relay.',
+        'Список: /mybots',
+      ];
+    }
+    final botId = (row['botId'] as String?) ?? '';
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(botId)) {
+      return const ['Внутренняя ошибка: некорректный botId.'];
+    }
+    final ack =
+        await RelayService.instance.sendBotCommandsSetOwner(
+      botId: botId,
+      commands: commands,
+    );
+    if (ack['ok'] == true) {
+      return [
+        'Готово: команды для @$handleNorm обновлены на relay (${commands.length}).',
+      ];
+    }
+    return [_botCommandsSetErr(ack)];
   }
 
   Future<List<String>> _patchOwnedBot({
