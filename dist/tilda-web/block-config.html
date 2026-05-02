@@ -1,7 +1,15 @@
 <script>
   // URL папки с файлами Flutter web (index.html, main.dart.js и т.д.)
-  window.RLINK_WEB_APP_URL = "https://your-cdn.example.com/rlink-web";
+  window.RLINK_WEB_APP_URL = "https://mihailkashintsev.github.io/rlink-web";
+  // Авто-версия: всегда подгружает актуальную сборку (без ручного bump).
+  window.RLINK_WEB_VERSION = String(Date.now());
 
-  // Необязательно: высота iframe приложения на странице Tilda
-  window.RLINK_WEB_HEIGHT = 820;
+  // Если > 0, задает фиксированную высоту iframe (в px).
+  // Если 0 или не задано, используется авто-режим по высоте экрана.
+  window.RLINK_WEB_HEIGHT = 0;
+
+  // Параметры авто-высоты (адаптив под мобильные/планшеты/десктоп):
+  window.RLINK_WEB_MIN_HEIGHT = 680; // нижний предел
+  window.RLINK_WEB_MAX_HEIGHT = 10000; // верхний предел (практически без лимита)
+  window.RLINK_WEB_VIEWPORT_OFFSET = 0; // отступ от высоты viewport
 </script>

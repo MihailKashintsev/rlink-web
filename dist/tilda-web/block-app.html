@@ -1,8 +1,11 @@
-<div id="rlink-tilda-app-wrap" style="width:100%;max-width:1280px;margin:0 auto;"></div>
+<div id="rlink-tilda-app-wrap" style="width:100%;max-width:none;margin:0;"></div>
 <script>
   (function () {
     var appUrl = (window.RLINK_WEB_APP_URL || "").replace(/\/$/, "");
-    var height = Number(window.RLINK_WEB_HEIGHT || 820);
+    var manualHeight = Number(window.RLINK_WEB_HEIGHT || 0);
+    var minHeight = Number(window.RLINK_WEB_MIN_HEIGHT || 680);
+    var maxHeight = Number(window.RLINK_WEB_MAX_HEIGHT || 10000);
+    var viewportOffset = Number(window.RLINK_WEB_VIEWPORT_OFFSET || 0);
     var wrap = document.getElementById("rlink-tilda-app-wrap");
 
     if (!appUrl) {
@@ -13,15 +16,99 @@
       return;
     }
 
+    // On HTTPS pages (Tilda), HTTP iframe URL is blocked by browser (mixed content).
+    if (window.location.protocol === "https:" && appUrl.indexOf("http://") === 0) {
+      appUrl = "https://" + appUrl.substring("http://".length);
+    }
+
     var iframe = document.createElement("iframe");
-    iframe.src = appUrl + "/index.html";
+    var ver = window.RLINK_WEB_VERSION || String(Date.now());
+    var params = new URLSearchParams(window.location.search || "");
+    params.set("v", String(ver));
+    iframe.src = appUrl + "/index.html?" + params.toString();
     iframe.style.width = "100%";
-    iframe.style.height = height + "px";
+    iframe.style.display = "block";
     iframe.style.border = "0";
-    iframe.style.borderRadius = "14px";
+    iframe.style.borderRadius = "0";
     iframe.style.background = "#0B0F1A";
     iframe.loading = "lazy";
     iframe.allow = "camera; microphone; geolocation; clipboard-read; clipboard-write";
     wrap.appendChild(iframe);
+    var parentStorePrefix = "rlink_parent_store_";
+    window.addEventListener("message", function (event) {
+      try {
+        if (event.source !== iframe.contentWindow) return;
+        var d = event.data || {};
+        if (d.type !== "rlink_parent_storage_req") return;
+        var id = String(d.id || "");
+        var op = String(d.op || "");
+        var key = String(d.key || "");
+        var resp = { type: "rlink_parent_storage_res", id: id, ok: true, value: null };
+        if (!key) {
+          resp.ok = false;
+        } else if (op === "get") {
+          resp.value = localStorage.getItem(parentStorePrefix + key);
+        } else if (op === "set") {
+          localStorage.setItem(parentStorePrefix + key, String(d.value || ""));
+        } else {
+          resp.ok = false;
+        }
+        // Send stringified payload so Flutter web can parse it reliably
+        // across browsers/iframe contexts where event.data isn't a plain Map.
+        event.source.postMessage(JSON.stringify(resp), "*");
+      } catch (_) {}
+    });
+
+    var errShown = false;
+    function showLoadError(reason) {
+      if (errShown) return;
+      errShown = true;
+      var msg = document.createElement("div");
+      msg.style.marginTop = "12px";
+      msg.style.padding = "12px 14px";
+      msg.style.border = "1px solid #fecaca";
+      msg.style.borderRadius = "10px";
+      msg.style.background = "#fff1f2";
+      msg.style.color = "#9f1239";
+      msg.style.fontFamily = "Arial,sans-serif";
+      msg.style.fontSize = "13px";
+      msg.textContent =
+        "Не удалось загрузить Rlink Web (" + reason + "). Проверьте RLINK_WEB_APP_URL и что используется HTTPS.";
+      wrap.appendChild(msg);
+    }
+
+    var loadTimer = setTimeout(function () {
+      showLoadError("timeout");
+    }, 15000);
+    iframe.addEventListener("load", function () {
+      clearTimeout(loadTimer);
+    });
+    iframe.addEventListener("error", function () {
+      clearTimeout(loadTimer);
+      showLoadError("iframe error");
+    });
+
+    function clamp(v, lo, hi) {
+      return Math.max(lo, Math.min(hi, v));
+    }
+
+    function applyAutoHeight() {
+      if (manualHeight > 0) {
+        iframe.style.height = manualHeight + "px";
+        return;
+      }
+      var vh = window.visualViewport && window.visualViewport.height
+        ? window.visualViewport.height
+        : window.innerHeight;
+      var dynamicHeight = Math.round(vh - viewportOffset);
+      iframe.style.height = clamp(dynamicHeight, minHeight, maxHeight) + "px";
+    }
+
+    applyAutoHeight();
+    window.addEventListener("resize", applyAutoHeight);
+    window.addEventListener("orientationchange", applyAutoHeight);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", applyAutoHeight);
+    }
   })();
 </script>
