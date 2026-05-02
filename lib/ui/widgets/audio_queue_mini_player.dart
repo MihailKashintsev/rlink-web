@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../services/voice_service.dart';
 
-/// Панель под системным статус-баром: очередь голосовых / аудио / квадратиков.
+/// Панель очереди голосовых / аудио / квадратиков; вертикальная позиция задаётся
+/// [AudioQueueMiniPlayerLayout] (под шапкой чата или между фильтрами и списком на главном).
 class AudioQueueMiniPlayer extends StatelessWidget {
   const AudioQueueMiniPlayer({super.key});
 
@@ -29,7 +30,12 @@ class AudioQueueMiniPlayer extends StatelessWidget {
             break;
         }
 
-        return Material(
+        // Жёстко фиксируем ширину: MaterialApp.builder в Stack(fit: expand)
+        // на iPhone иногда даёт unbounded width → Row детей переполняет на 200000px.
+        final screenWidth = MediaQuery.of(context).size.width;
+        return SizedBox(
+          width: screenWidth,
+          child: Material(
           elevation: 3,
           color: cs.surfaceContainerHigh,
           child: Padding(
@@ -64,8 +70,10 @@ class AudioQueueMiniPlayer extends StatelessWidget {
                         ],
                       ),
                     ),
+                    // Tooltip убран намеренно: AudioQueueMiniPlayer сидит в
+                    // MaterialApp.builder выше Navigator, и RawTooltip
+                    // не может найти Overlay → красный экран.
                     IconButton(
-                      tooltip: session.isPaused ? 'Продолжить' : 'Пауза',
                       icon: Icon(
                         session.isPaused
                             ? Icons.play_arrow_rounded
@@ -80,7 +88,6 @@ class AudioQueueMiniPlayer extends StatelessWidget {
                       },
                     ),
                     IconButton(
-                      tooltip: 'Стоп',
                       icon: const Icon(Icons.close_rounded),
                       onPressed: () =>
                           VoiceService.instance.stopPlayback(),
@@ -107,6 +114,7 @@ class AudioQueueMiniPlayer extends StatelessWidget {
                 ),
               ],
             ),
+          ),
           ),
         );
       },

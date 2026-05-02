@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/group.dart';
 import '../models/message_poll.dart';
+import '../utils/reaction_emoji_key.dart';
 import '../utils/reaction_limit.dart';
 import 'image_service.dart';
 import 'web_identity_portable.dart';
@@ -546,23 +547,24 @@ class GroupService {
   /// Returns the updated message (or null if not found).
   Future<GroupMessage?> toggleMessageReaction(
       String messageId, String emoji, String reactorId) async {
+    final em = canonicalReactionEmojiKey(emoji);
     if (_db == null) return null;
     final msg = await getMessage(messageId);
     if (msg == null) return null;
     final updated = Map<String, List<String>>.from(
       msg.reactions.map((k, v) => MapEntry(k, List<String>.from(v))),
     );
-    final list = List<String>.from(updated[emoji] ?? const <String>[]);
+    final list = List<String>.from(updated[em] ?? const <String>[]);
     if (list.contains(reactorId)) {
       list.remove(reactorId);
     } else {
-      if (!reactionAddAllowed(updated, emoji, reactorId)) return null;
+      if (!reactionAddAllowed(updated, em, reactorId)) return null;
       list.add(reactorId);
     }
     if (list.isEmpty) {
-      updated.remove(emoji);
+      updated.remove(em);
     } else {
-      updated[emoji] = list;
+      updated[em] = list;
     }
     await _db!.update(
       'group_messages',

@@ -6,6 +6,7 @@ import 'package:video_compress/video_compress.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../services/embedded_video_pause_bus.dart';
+import 'square_video_recording_widgets.dart';
 
 /// Предпросмотр «видеоквадратика» перед отправкой (удержание или полноэкранный рекордер).
 /// [allowTrim] — показать ползунок обрезки (обычно true).
@@ -159,87 +160,102 @@ class _HoldSquareVideoReviewScreenState
       ),
       body: !_ready || p == null
           ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                Expanded(
-                  child: Center(
-                    child: AspectRatio(
-                      aspectRatio: 1,
-                      child: FittedBox(
-                        fit: BoxFit.cover,
+          : LayoutBuilder(
+              builder: (ctx, bc) {
+                final side = math
+                    .min(
+                      squareVideoPreviewSize(ctx),
+                      math.min(bc.maxWidth, bc.maxHeight) - 8,
+                    )
+                    .clamp(200.0, 360.0);
+                return Column(
+                  children: [
+                    Expanded(
+                      child: Center(
                         child: SizedBox(
-                          width: p.value.size.width,
-                          height: p.value.size.height,
-                          child: VideoPlayer(p),
+                          width: side,
+                          height: side,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(20),
+                            child: FittedBox(
+                              fit: BoxFit.cover,
+                              alignment: Alignment.center,
+                              child: SizedBox(
+                                width: p.value.size.width,
+                                height: p.value.size.height,
+                                child: VideoPlayer(p),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ),
-                if (widget.allowTrim) ...[
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                    child: Text(
-                      'При необходимости выберите фрагмент или отправьте целиком',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: cs.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                  RangeSlider(
-                    values: RangeValues(_rangeStart, _rangeEnd),
-                    min: 0,
-                    max: _durationSec,
-                    onChanged: _busy ? null : _onRangeChanged,
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          '${_rangeStart.toStringAsFixed(1)} с',
+                    if (widget.allowTrim) ...[
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                        child: Text(
+                          'При необходимости выберите фрагмент или отправьте целиком',
                           style: TextStyle(
-                            fontSize: 12,
+                            fontSize: 13,
                             color: cs.onSurfaceVariant,
                           ),
                         ),
-                        Text(
-                          '${_rangeEnd.toStringAsFixed(1)} с',
+                      ),
+                      RangeSlider(
+                        values: RangeValues(_rangeStart, _rangeEnd),
+                        min: 0,
+                        max: _durationSec,
+                        onChanged: _busy ? null : _onRangeChanged,
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              '${_rangeStart.toStringAsFixed(1)} с',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                            Text(
+                              '${_rangeEnd.toStringAsFixed(1)} с',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ] else
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Text(
+                          'Проверьте кадр и нажмите «Отправить»',
                           style: TextStyle(
-                            fontSize: 12,
+                            fontSize: 13,
                             color: cs.onSurfaceVariant,
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                ] else
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      'Проверьте кадр и нажмите «Отправить»',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: cs.onSurfaceVariant,
+                      ),
+                    SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                            onPressed: _busy ? null : _send,
+                            child: Text(_busy ? 'Обработка…' : 'Отправить'),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                SafeArea(
-                  top: false,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: FilledButton(
-                        onPressed: _busy ? null : _send,
-                        child: Text(_busy ? 'Обработка…' : 'Отправить'),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+                  ],
+                );
+              },
             ),
     );
   }

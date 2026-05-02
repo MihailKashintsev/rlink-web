@@ -113,6 +113,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         username: username,
         avatarColor: _selectedColor,
         avatarEmoji: _selectedEmoji,
+        setAvatarImagePath: true,
         avatarImagePath: _selectedImagePath,
       );
       unawaited(WebIdentityPortable.exportIdentityKeyDownload());

@@ -8,7 +8,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
+import '../utils/reaction_emoji_key.dart';
 import 'app_settings.dart';
+import 'emoji_pack_dm_service.dart';
 import 'ble_service.dart';
 import 'gossip_router.dart';
 import 'relay_service.dart';
@@ -125,6 +127,13 @@ class BroadcastOutboxService {
     String? pollJson,
     String? staffLabel,
   }) async {
+    String? eap;
+    if (text != null && text.trim().isNotEmpty) {
+      eap = await EmojiPackDmService.buildEmojiAutoPayloadJson(
+        text,
+        kind: 'channel_post',
+      );
+    }
     await _enqueue('channel_post', {
       'channelId': channelId,
       'postId': postId,
@@ -140,6 +149,7 @@ class BroadcastOutboxService {
       if (fileName != null) 'fileName': fileName,
       if (pollJson != null && pollJson.isNotEmpty) 'pollJson': pollJson,
       if (staffLabel != null && staffLabel.isNotEmpty) 'staffLabel': staffLabel,
+      if (eap != null && eap.isNotEmpty) 'eap': eap,
     });
     unawaited(_pump());
   }
@@ -157,6 +167,13 @@ class BroadcastOutboxService {
     bool hasFile = false,
     String? fileName,
   }) async {
+    String? eap;
+    if (text.trim().isNotEmpty) {
+      eap = await EmojiPackDmService.buildEmojiAutoPayloadJson(
+        text,
+        kind: 'channel_comment',
+      );
+    }
     await _enqueue('channel_comment', {
       'postId': postId,
       'commentId': commentId,
@@ -169,6 +186,7 @@ class BroadcastOutboxService {
       if (hasVoice) 'hasVoice': true,
       if (hasFile) 'hasFile': true,
       if (fileName != null) 'fileName': fileName,
+      if (eap != null && eap.isNotEmpty) 'eap': eap,
     });
     unawaited(_pump());
   }
@@ -233,10 +251,11 @@ class BroadcastOutboxService {
     required String emoji,
     required String fromId,
   }) async {
+    final em = canonicalReactionEmojiKey(emoji);
     await _enqueue('react_ext', {
       'kind': kind,
       'targetId': targetId,
-      'emoji': emoji,
+      'emoji': em,
       'from': fromId,
     });
     unawaited(_pump());
@@ -339,6 +358,7 @@ class BroadcastOutboxService {
             fileName: payload['fileName'] as String?,
             pollJson: payload['pollJson'] as String?,
             staffLabel: payload['staffLabel'] as String?,
+            emojiAutoPayloadJson: payload['eap'] as String?,
           );
           break;
         case 'channel_comment':
@@ -354,6 +374,7 @@ class BroadcastOutboxService {
             hasVoice: payload['hasVoice'] as bool? ?? false,
             hasFile: payload['hasFile'] as bool? ?? false,
             fileName: payload['fileName'] as String?,
+            emojiAutoPayloadJson: payload['eap'] as String?,
           );
           break;
         case 'group_message':

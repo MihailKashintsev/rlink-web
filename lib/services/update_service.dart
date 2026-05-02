@@ -10,7 +10,7 @@ const _kGithubPat = String.fromEnvironment('GITHUB_PAT', defaultValue: '');
 const _kGithubOwner = String.fromEnvironment('GITHUB_OWNER', defaultValue: '');
 const _kGithubRepo = String.fromEnvironment('GITHUB_REPO', defaultValue: '');
 
-/// Публичные релизы (теги вида v0.0.6): https://github.com/MihailKashintsev/Rlink-releases/releases
+/// Публичные релизы (теги вида v0.0.8): https://github.com/MihailKashintsev/Rlink-releases/releases
 const _kDefaultReleaseOwner = 'MihailKashintsev';
 const _kDefaultReleaseRepo = 'Rlink-releases';
 
@@ -185,7 +185,7 @@ class UpdateService {
         File(Platform.resolvedExecutable).parent.parent.parent.path;
     await Process.run('unzip', ['-o', zipPath, '-d', dir.path]);
     final script =
-        'sleep 2\ncp -R "${dir.path}/MeshChat.app/." "$appBundle/"\nopen "$appBundle"';
+        'sleep 2\ncp -R "${dir.path}/Rlink.app/." "$appBundle/"\nopen "$appBundle"';
     final f = File('${dir.path}/update.sh')..writeAsStringSync(script);
     await Process.run('chmod', ['+x', f.path]);
     await Process.start('bash', [f.path], mode: ProcessStartMode.detached);

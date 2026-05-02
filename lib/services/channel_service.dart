@@ -11,6 +11,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/channel.dart';
 import '../models/message_poll.dart';
+import '../utils/reaction_emoji_key.dart';
 import '../utils/reaction_limit.dart';
 import 'gossip_router.dart';
 import 'image_service.dart';
@@ -397,6 +398,7 @@ class ChannelService {
         }
       },
     );
+    unawaited(_loadVerificationRequests());
   }
 
   Future<void> _ensureDbReady() async {
@@ -2140,6 +2142,7 @@ class ChannelService {
   /// Переключает реакцию [emoji] от [reactorId] на посте канала [postId].
   Future<void> togglePostReaction(
       String postId, String emoji, String reactorId) async {
+    final em = canonicalReactionEmojiKey(emoji);
     if (_db == null) return;
     final rows = await _db!.query(
       'channel_posts',
@@ -2151,13 +2154,13 @@ class ChannelService {
     final post = ChannelPost.fromMap(rows.first);
     final updated = <String, List<String>>{};
     post.reactions.forEach((k, v) => updated[k] = List<String>.from(v));
-    final list = updated[emoji];
+    final list = updated[em];
     if (list != null && list.contains(reactorId)) {
       list.remove(reactorId);
-      if (list.isEmpty) updated.remove(emoji);
+      if (list.isEmpty) updated.remove(em);
     } else {
-      if (!reactionAddAllowed(updated, emoji, reactorId)) return;
-      updated.putIfAbsent(emoji, () => <String>[]).add(reactorId);
+      if (!reactionAddAllowed(updated, em, reactorId)) return;
+      updated.putIfAbsent(em, () => <String>[]).add(reactorId);
     }
     await _db!.update(
       'channel_posts',
@@ -2171,6 +2174,7 @@ class ChannelService {
   /// Переключает реакцию [emoji] от [reactorId] на комментарии [commentId].
   Future<void> toggleCommentReaction(
       String commentId, String emoji, String reactorId) async {
+    final em = canonicalReactionEmojiKey(emoji);
     if (_db == null) return;
     final rows = await _db!.query(
       'channel_comments',
@@ -2182,13 +2186,13 @@ class ChannelService {
     final comment = ChannelComment.fromMap(rows.first);
     final updated = <String, List<String>>{};
     comment.reactions.forEach((k, v) => updated[k] = List<String>.from(v));
-    final list = updated[emoji];
+    final list = updated[em];
     if (list != null && list.contains(reactorId)) {
       list.remove(reactorId);
-      if (list.isEmpty) updated.remove(emoji);
+      if (list.isEmpty) updated.remove(em);
     } else {
-      if (!reactionAddAllowed(updated, emoji, reactorId)) return;
-      updated.putIfAbsent(emoji, () => <String>[]).add(reactorId);
+      if (!reactionAddAllowed(updated, em, reactorId)) return;
+      updated.putIfAbsent(em, () => <String>[]).add(reactorId);
     }
     await _db!.update(
       'channel_comments',

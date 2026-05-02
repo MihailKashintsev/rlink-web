@@ -4,6 +4,8 @@ import 'dart:io';
 
 import '../../models/emoji_pack.dart';
 import '../../services/emoji_pack_service.dart';
+import '../../utils/reaction_emoji_key.dart';
+
 /// Единый расширенный набор реакций, используемый по всему приложению:
 /// 1:1 чат, каналы, комментарии каналов, группы и истории.
 ///
@@ -94,8 +96,8 @@ Future<String?> showReactionPickerSheet(BuildContext context) async {
                               width: 48,
                               height: 48,
                               child: Center(
-                                child: _ReactionGlyph(
-                                  value: item.value,
+                                child: ReactionKeyGlyph(
+                                  reactionKey: item.value,
                                   size: 26,
                                 ),
                               ),
@@ -168,7 +170,10 @@ class ReactionsBar extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _ReactionGlyph(value: e.key, size: compact ? 13 : 14),
+                ReactionKeyGlyph(
+                  reactionKey: e.key,
+                  size: compact ? 13 : 14,
+                ),
                 const SizedBox(width: 3),
                 Text(
                   '${e.value.length}',
@@ -192,33 +197,64 @@ class _ReactionPickerItem {
   const _ReactionPickerItem({required this.value});
 }
 
-class _ReactionGlyph extends StatelessWidget {
-  final String value;
+/// Ключ реакции в хранилище: Unicode-эмодзи, `:shortcode:` или (если есть в индексе) «голый» shortcode.
+///
+/// Подписан на [EmojiPackService.instance.version], чтобы после авто-установки пака
+/// картинка появилась без перезапуска.
+class ReactionKeyGlyph extends StatelessWidget {
+  final String reactionKey;
   final double size;
-  const _ReactionGlyph({
-    required this.value,
+
+  const ReactionKeyGlyph({
+    super.key,
+    required this.reactionKey,
     required this.size,
   });
 
-  static final RegExp _shortcodeRe = RegExp(r'^:([a-zA-Z0-9_]{1,48}):$');
+  static final RegExp _bareAscii = RegExp(r'^[a-zA-Z0-9_]{1,48}$');
 
   @override
   Widget build(BuildContext context) {
-    final m = _shortcodeRe.firstMatch(value.trim());
-    if (m == null) {
-      return Text(value, style: TextStyle(fontSize: size));
-    }
-    final sc = m.group(1)!;
-    final path = EmojiPackService.instance.absolutePathForShortcode(sc);
-    if (path == null || !File(path).existsSync()) {
-      return Text('😀', style: TextStyle(fontSize: size));
-    }
-    return Image.file(
-      File(path),
-      width: size + 2,
-      height: size + 2,
-      fit: BoxFit.cover,
-      errorBuilder: (_, __, ___) => Text('😀', style: TextStyle(fontSize: size)),
+    return ValueListenableBuilder<int>(
+      valueListenable: EmojiPackService.instance.version,
+      builder: (_, __, ___) {
+        final v = canonicalReactionEmojiKey(reactionKey);
+        if (v.isEmpty) {
+          return SizedBox(width: size, height: size);
+        }
+
+        String? shortcodeForFile;
+        final looseInner = looseWrappedShortcodeInner(v);
+        if (looseInner != null) {
+          shortcodeForFile = looseInner;
+        } else if (_bareAscii.hasMatch(v) &&
+            EmojiPackService.instance.lookupByShortcode(v) != null) {
+          shortcodeForFile = v;
+        } else if (!v.contains(':') &&
+            v.runes.length <= 64 &&
+            !RegExp(r'\s').hasMatch(v) &&
+            EmojiPackService.instance.lookupByShortcode(v) != null) {
+          shortcodeForFile = v;
+        }
+
+        if (shortcodeForFile != null) {
+          final path =
+              EmojiPackService.instance.absolutePathForShortcode(shortcodeForFile);
+          if (path != null && File(path).existsSync()) {
+            return Image.file(
+              File(path),
+              width: size + 2,
+              height: size + 2,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) =>
+                  Text('😀', style: TextStyle(fontSize: size)),
+            );
+          }
+          return Text('😀', style: TextStyle(fontSize: size));
+        }
+
+        return Text(v, style: TextStyle(fontSize: size));
+      },
     );
   }
 }

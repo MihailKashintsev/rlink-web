@@ -709,6 +709,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.1"
+  flutter_whisper_kit:
+    dependency: "direct main"
+    description:
+      name: flutter_whisper_kit
+      sha256: "22fe88bceed209136747c83bd26cb154782756c9c583857e3bc3a6699845b63f"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.0"
+  flutter_whisper_kit_apple:
+    dependency: transitive
+    description:
+      name: flutter_whisper_kit_apple
+      sha256: ff9a353ec8a46ee0403fb4b1abf96e7f197f9395ee03ebf86983fc2039e779f3
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.0"
   gal:
     dependency: "direct main"
     description:

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:video_player/video_player.dart';
 
@@ -26,7 +27,8 @@ class DmVideoFullscreenPage extends StatefulWidget {
   State<DmVideoFullscreenPage> createState() => _DmVideoFullscreenPageState();
 }
 
-class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
+class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage>
+    with TickerProviderStateMixin {
   late VideoPlayerController _ctrl;
   bool _initialized = false;
   bool _error = false;
@@ -35,8 +37,12 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
   String? _seekFlash;
   Timer? _seekFlashTimer;
   bool _speedBoost = false;
+  double _playbackRate = 1.0;
   int _embedPauseGen = 0;
   bool _completeScheduled = false;
+  AnimationController? _doubleTapAnim;
+  bool _doubleTapLeft = true;
+  static const _kSpeedSteps = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
   void _onEmbedPauseBus() {
     if (!mounted) return;
@@ -102,11 +108,24 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
           .addListener(_onResumePulse);
     }
 
+    _doubleTapAnim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    )..addStatusListener((s) {
+        if (s == AnimationStatus.completed) {
+          _doubleTapAnim?.reset();
+          if (mounted) setState(() {});
+        }
+      });
+
     _ctrl = VideoPlayerController.file(File(widget.path))
       ..initialize().then((_) {
         if (mounted) {
           setState(() => _initialized = true);
           _ctrl.addListener(_onCtrlTick);
+          try {
+            _ctrl.setPlaybackSpeed(_playbackRate);
+          } catch (_) {}
           _ctrl.play();
           _armHideTopBar();
         }
@@ -129,6 +148,7 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
     }
     _hideTopTimer?.cancel();
     _seekFlashTimer?.cancel();
+    _doubleTapAnim?.dispose();
     try {
       _ctrl.removeListener(_onCtrlTick);
     } catch (_) {}
@@ -159,17 +179,38 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
 
   void _seekRelative(int deltaSec) {
     final end = _ctrl.value.duration;
-    var p = _ctrl.value.position + Duration(seconds: deltaSec);
-    if (p < Duration.zero) p = Duration.zero;
-    if (p > end) p = end;
-    _ctrl.seekTo(p);
+    var pos = _ctrl.value.position + Duration(seconds: deltaSec);
+    if (pos < Duration.zero) pos = Duration.zero;
+    if (pos > end) pos = end;
+    _ctrl.seekTo(pos);
     _flashSeek(deltaSec > 0 ? '+5 с' : '−5 с');
+  }
+
+  void _playDoubleTapSeekAnimation({required bool left}) {
+    _doubleTapLeft = left;
+    _doubleTapAnim?.forward(from: 0);
+    setState(() {});
+  }
+
+  void _applyPlaybackRate(double rate) {
+    _playbackRate = rate;
+    if (!_initialized) return;
+    if (_speedBoost) {
+      try {
+        _ctrl.setPlaybackSpeed(rate * 2.0);
+      } catch (_) {}
+    } else {
+      try {
+        _ctrl.setPlaybackSpeed(rate);
+      } catch (_) {}
+    }
+    setState(() {});
   }
 
   void _setSpeedBoost(bool on) {
     if (!_initialized) return;
     try {
-      _ctrl.setPlaybackSpeed(on ? 2.0 : 1.0);
+      _ctrl.setPlaybackSpeed(on ? _playbackRate * 2.0 : _playbackRate);
     } catch (_) {}
     setState(() => _speedBoost = on);
   }
@@ -190,6 +231,11 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
     final m = s ~/ 60;
     final r = s % 60;
     return '$m:${r.toString().padLeft(2, '0')}';
+  }
+
+  String _playbackSpeedButtonLabel() {
+    final r = _playbackRate;
+    return '${r.toStringAsFixed(2).replaceAll(RegExp(r'\.?0+$'), '')}×';
   }
 
   @override
@@ -260,7 +306,11 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
                     flex: 35,
                     child: GestureDetector(
                       behavior: HitTestBehavior.translucent,
-                      onDoubleTap: () => _seekRelative(-5),
+                      onDoubleTap: () {
+                        HapticFeedback.lightImpact();
+                        _seekRelative(-5);
+                        _playDoubleTapSeekAnimation(left: true);
+                      },
                       onLongPressStart: (_) => _setSpeedBoost(true),
                       onLongPressEnd: (_) => _setSpeedBoost(false),
                       onLongPressCancel: () => _setSpeedBoost(false),
@@ -277,7 +327,11 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
                     flex: 35,
                     child: GestureDetector(
                       behavior: HitTestBehavior.translucent,
-                      onDoubleTap: () => _seekRelative(5),
+                      onDoubleTap: () {
+                        HapticFeedback.lightImpact();
+                        _seekRelative(5);
+                        _playDoubleTapSeekAnimation(left: false);
+                      },
                       onLongPressStart: (_) => _setSpeedBoost(true),
                       onLongPressEnd: (_) => _setSpeedBoost(false),
                       onLongPressCancel: () => _setSpeedBoost(false),
@@ -286,6 +340,79 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
                 ],
               ),
             ),
+            if (_doubleTapAnim != null)
+              Positioned.fill(
+                bottom: 112 + bottomInset,
+                child: IgnorePointer(
+                  child: AnimatedBuilder(
+                    animation: _doubleTapAnim!,
+                    builder: (_, __) {
+                      if (_doubleTapAnim!.value <= 0) {
+                        return const SizedBox.shrink();
+                      }
+                      final t = Curves.easeOut.transform(_doubleTapAnim!.value);
+                      final opacity = (1.0 - t) * 0.95;
+                      final scale = 0.75 + 0.35 * (1.0 - t);
+                      return Row(
+                        children: [
+                          Expanded(
+                            child: Align(
+                              alignment: _doubleTapLeft
+                                  ? Alignment.center
+                                  : Alignment.centerRight,
+                              child: Opacity(
+                                opacity: _doubleTapLeft ? opacity : 0,
+                                child: Transform.scale(
+                                  scale: _doubleTapLeft ? scale : 1,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(18),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withValues(
+                                          alpha: 0.45 * opacity.clamp(0.0, 1.0)),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(
+                                      Icons.replay_5,
+                                      color: Colors.white,
+                                      size: 56,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Align(
+                              alignment: _doubleTapLeft
+                                  ? Alignment.centerLeft
+                                  : Alignment.center,
+                              child: Opacity(
+                                opacity: _doubleTapLeft ? 0 : opacity,
+                                child: Transform.scale(
+                                  scale: _doubleTapLeft ? 1 : scale,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(18),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withValues(
+                                          alpha: 0.45 * opacity.clamp(0.0, 1.0)),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(
+                                      Icons.forward_5,
+                                      color: Colors.white,
+                                      size: 56,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
             if (_seekFlash != null)
               Center(
                 child: IgnorePointer(
@@ -323,6 +450,29 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
                   ),
                 ),
               ),
+            ValueListenableBuilder<VideoPlayerValue>(
+              valueListenable: _ctrl,
+              builder: (_, val, __) {
+                if (val.isPlaying) return const SizedBox.shrink();
+                return Center(
+                  child: GestureDetector(
+                    onTap: _togglePlayPause,
+                    child: Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.35),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.play_arrow_rounded,
+                        color: Colors.white,
+                        size: 72,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
             if (_showTopBar)
               Positioned(
                 top: 0,
@@ -336,12 +486,42 @@ class _DmVideoFullscreenPageState extends State<DmVideoFullscreenPage> {
                         icon: const Icon(Icons.close, color: Colors.white),
                         onPressed: () => Navigator.pop(context),
                       ),
+                      PopupMenuButton<double>(
+                        tooltip: 'Скорость',
+                        icon: Text(
+                          _playbackSpeedButtonLabel(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 15,
+                          ),
+                        ),
+                        color: const Color(0xFF2A2A2A),
+                        onSelected: _applyPlaybackRate,
+                        itemBuilder: (_) => [
+                          for (final s in _kSpeedSteps)
+                            PopupMenuItem<double>(
+                              value: s,
+                              child: Row(
+                                children: [
+                                  if ((s - _playbackRate).abs() < 0.001)
+                                    const Icon(Icons.check,
+                                        color: Color(0xFF1DB954), size: 20)
+                                  else
+                                    const SizedBox(width: 20),
+                                  const SizedBox(width: 8),
+                                  Text('$s×'),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
                       const Spacer(),
                       ValueListenableBuilder<VideoPlayerValue>(
                         valueListenable: _ctrl,
-                        builder: (_, val, __) => IconButton(
+                        builder: (_, v, __) => IconButton(
                           icon: Icon(
-                            val.isPlaying ? Icons.pause : Icons.play_arrow,
+                            v.isPlaying ? Icons.pause : Icons.play_arrow,
                             color: Colors.white,
                           ),
                           onPressed: _togglePlayPause,

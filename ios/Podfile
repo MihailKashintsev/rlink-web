@@ -1,4 +1,4 @@
-platform :ios, '14.0'
+platform :ios, '16.0'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -36,7 +36,24 @@ target 'Runner' do
 end
 
 post_install do |installer|
+  # flutter pub get regenerates FlutterGeneratedPluginSwiftPackage with iOS 13.0;
+  # align it with `platform :ios` so SPM plugins (e.g. flutter_whisper_kit_apple) resolve.
+  ios_deployment = '16.0'
+  podfile_src = File.read(File.join(__dir__, 'Podfile'))
+  if (m = podfile_src.match(/platform\s+:ios,\s*['"]([^'"]+)['"]/))
+    ios_deployment = m[1]
+  end
+  spm_pkg = File.expand_path('Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift', __dir__)
+  if File.exist?(spm_pkg)
+    spm_body = File.read(spm_pkg)
+    spm_next = spm_body.gsub(/\.iOS\("[0-9.]+"\)/, ".iOS(\"#{ios_deployment}\")")
+    File.write(spm_pkg, spm_next) if spm_next != spm_body
+  end
+
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = ios_deployment
+    end
   end
 end

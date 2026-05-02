@@ -50,14 +50,27 @@ class EmojiPackDmService {
     };
   }
 
-  static Future<Map<String, dynamic>?> buildPayloadForText(String text) async {
+  static Future<Map<String, dynamic>?> buildPayloadForText(
+    String text, {
+    String kind = 'text',
+  }) async {
     final codes = <String>[];
     for (final m in _shortcodeRe.allMatches(text)) {
       final sc = m.group(1);
       if (sc != null) codes.add(sc);
     }
     if (codes.isEmpty) return null;
-    return _buildPayloadFromShortcodes(shortcodes: codes, kind: 'text');
+    return _buildPayloadFromShortcodes(shortcodes: codes, kind: kind);
+  }
+
+  /// JSON-строка для поля `eap` в gossip (канал / группа и т.д.).
+  static Future<String?> buildEmojiAutoPayloadJson(
+    String text, {
+    String kind = 'text',
+  }) async {
+    final m = await buildPayloadForText(text, kind: kind);
+    if (m == null) return null;
+    return jsonEncode(m);
   }
 
   static Future<Map<String, dynamic>?> buildPayloadForStatus(
@@ -86,6 +99,24 @@ class EmojiPackDmService {
       isFile: true,
       fileName: _blobFileName,
     );
+  }
+
+  /// Поле gossip `eap` (JSON) в пакетах `channel_post` / `channel_comment`.
+  static Future<int> installFromGossipEapField(
+    Map<String, dynamic> payload, {
+    required String sourcePeerId,
+  }) async {
+    final eapRaw = payload['eap'] as String?;
+    if (eapRaw == null || eapRaw.trim().isEmpty) return 0;
+    try {
+      final map = jsonDecode(eapRaw) as Map<String, dynamic>;
+      return await EmojiPackService.instance.installFromAutoPayload(
+        map,
+        sourcePeerId: sourcePeerId,
+      );
+    } catch (_) {
+      return 0;
+    }
   }
 
   static Future<int> receiveFromRelay({

@@ -7,6 +7,7 @@ import 'ai_bot_constants.dart';
 import 'runtime_platform.dart';
 import 'web_account_bundle.dart';
 import 'web_identity_portable.dart';
+import '../utils/reaction_emoji_key.dart';
 
 /// Глобальные настройки приложения — тема, уведомления, акцентный цвет.
 /// Является ChangeNotifier: виджеты перестраиваются при изменениях.
@@ -369,7 +370,13 @@ class AppSettings extends ChangeNotifier {
     _clockFormat = (_prefs.getInt(_keyClockFormat) ?? 0).clamp(0, 1);
     _messageDensity = (_prefs.getInt(_keyMessageDensity) ?? 1).clamp(0, 2);
     _showReactionsQuickBar = _prefs.getBool(_keyShowReactionsQuickBar) ?? true;
-    _quickReactionEmoji = _prefs.getString(_keyQuickReactionEmoji) ?? '👍';
+    final rawQuick = _prefs.getString(_keyQuickReactionEmoji) ?? '👍';
+    _quickReactionEmoji = canonicalReactionEmojiKey(rawQuick);
+    if (_quickReactionEmoji.isEmpty) _quickReactionEmoji = '👍';
+    if (_quickReactionEmoji != rawQuick) {
+      unawaited(_runPrefsWrite(
+          (p) => p.setString(_keyQuickReactionEmoji, _quickReactionEmoji)));
+    }
     _notifyPersonal = _prefs.getBool(_keyNotifyPersonal) ?? true;
     _notifyGroups = _prefs.getBool(_keyNotifyGroups) ?? true;
     _notifyChannels = _prefs.getBool(_keyNotifyChannels) ?? true;
@@ -527,7 +534,7 @@ class AppSettings extends ChangeNotifier {
   }
 
   Future<void> setQuickReactionEmoji(String emoji) async {
-    final e = emoji.trim();
+    final e = canonicalReactionEmojiKey(emoji);
     if (e.isEmpty) return;
     _quickReactionEmoji = e;
     await _runPrefsWrite(

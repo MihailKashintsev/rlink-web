@@ -325,8 +325,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
 
   @override
   Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final squareSize = screenWidth * 0.82;
+    final squareSize = squareVideoPreviewSize(context);
 
     return Material(
       type: MaterialType.transparency,
@@ -465,7 +464,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
       return Container(
         decoration: BoxDecoration(
           color: const Color(0xFF111111),
-          borderRadius: BorderRadius.circular(20),
+          shape: BoxShape.circle,
           border: Border.all(color: Colors.white24, width: 3),
         ),
         child: const Center(
@@ -480,7 +479,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
       return Container(
         decoration: BoxDecoration(
           color: const Color(0xFF111111),
-          borderRadius: BorderRadius.circular(20),
+          shape: BoxShape.circle,
           border: Border.all(color: Colors.white24, width: 3),
         ),
         child: Center(
@@ -512,7 +511,7 @@ class _VideoOverlayState extends State<_VideoOverlay>
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF111111),
-        borderRadius: BorderRadius.circular(20),
+        shape: BoxShape.circle,
         border: Border.all(color: Colors.white24, width: 3),
       ),
     );

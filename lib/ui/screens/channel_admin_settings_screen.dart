@@ -331,34 +331,21 @@ class _ChannelAdminSettingsScreenState
   Future<void> _requestVerification() async {
     final ch = _channel;
     if (ch == null || ch.verified) return;
-    final canAutoVerify = ChannelService.instance.checkAutoVerify(ch);
-    if (canAutoVerify) {
-      await ChannelService.instance.verifyChannel(ch.id, 'auto');
-      await ch
-          .copyWith(verified: true, verifiedBy: 'auto')
-          .broadcastGossipMeta();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Канал верифицирован!')),
-        );
-      }
-    } else {
-      await GossipRouter.instance.sendVerificationRequest(
-        channelId: ch.id,
-        channelName: ch.name,
-        adminId: ch.adminId,
-        subscriberCount: ch.subscriberIds.length,
-        avatarEmoji: ch.avatarEmoji,
-        description: ch.description,
+    await GossipRouter.instance.sendVerificationRequest(
+      channelId: ch.id,
+      channelName: ch.name,
+      adminId: ch.adminId,
+      subscriberCount: ch.subscriberIds.length,
+      avatarEmoji: ch.avatarEmoji,
+      description: ch.description,
+    );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('Заявка на верификацию отправлена администраторам сети'),
+        ),
       );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content:
-                Text('Заявка на верификацию отправлена администраторам сети'),
-          ),
-        );
-      }
     }
     await _load();
   }

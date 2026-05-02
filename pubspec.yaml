@@ -2,7 +2,7 @@ name: rlink
 description: Rlink — Bluetooth mesh messenger
 # После смены version: сделайте `flutter build ios --config-only` и при необходимости
 # `flutter build macos --config-only`, иначе PackageInfo / Xcode могут тянуть старый номер из Generated.xcconfig.
-version: 0.0.7+13
+version: 0.0.8+14
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -129,6 +129,7 @@ dependencies:
   google_maps_flutter: ^2.17.0
   syncfusion_flutter_pdfviewer: ^33.2.4
   archive: ^4.0.9
+  flutter_whisper_kit: ^0.3.0
 
 dev_dependencies:
   flutter_test:

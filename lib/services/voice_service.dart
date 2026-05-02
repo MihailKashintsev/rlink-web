@@ -3,11 +3,11 @@ import 'dart:io';
 
 import 'package:audio_session/audio_session.dart';
 import 'package:audioplayers/audioplayers.dart' show AudioPlayer, DeviceFileSource;
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:video_player/video_player.dart';
 
-import '../ui/widgets/dm_video_fullscreen_page.dart';
 import 'embedded_video_pause_bus.dart';
 
 /// Тип элемента очереди (квадратик в очереди идёт как видео с дорожкой).
@@ -52,10 +52,13 @@ class VoiceService {
   AudioPlayer? _player;
   StreamSubscription<Duration>? _audioPosSub;
   StreamSubscription<void>? _audioCompleteSub;
+  StreamSubscription<Duration>? _audioDurSub;
+  StreamSubscription<dynamic>? _audioStateSub;
 
-  GlobalKey<NavigatorState>? _navigatorKey;
+  VideoPlayerController? _squareQueueCtrl;
+  bool _squareEndDispatchedInService = false;
 
-  /// Импульсы для паузы/возобновления квадратика, когда плеер в отдельном route.
+  /// Импульсы для паузы/возобновления квадратика из очереди (пузырь в чате).
   final ValueNotifier<int> squareVideoUiPausePulse = ValueNotifier(0);
   final ValueNotifier<int> squareVideoUiResumePulse = ValueNotifier(0);
 
@@ -64,10 +67,6 @@ class VoiceService {
   bool _sessionPaused = false;
   bool _advanceInFlight = false;
   Completer<void>? _audioSessionConfigured;
-
-  void configureNavigator(GlobalKey<NavigatorState> key) {
-    _navigatorKey = key;
-  }
 
   void _setProgressClamped(double v) {
     if (!v.isFinite) {
@@ -122,6 +121,54 @@ class VoiceService {
   /// Мини-плеер: заголовок, позиция в очереди, пауза.
   final ValueNotifier<VoicePlaybackSession?> playbackSession =
       ValueNotifier(null);
+
+  /// Квадратик из очереди: один контроллер для PiP и фона (вне чата).
+  final ValueNotifier<VideoPlayerController?> squareQueueVideoPreview =
+      ValueNotifier(null);
+
+  /// Счётчик для перерисовки PiP при смене видимости пузыря в списке.
+  final ValueNotifier<int> squareQueuePipLayoutRevision = ValueNotifier(0);
+
+  /// Путь квадратика из очереди, чей пузырь сейчас пересекается с видимой областью экрана.
+  String? _squarePathWithVisibleViewport;
+
+  void _bumpSquareQueuePipLayout() {
+    squareQueuePipLayoutRevision.value = squareQueuePipLayoutRevision.value + 1;
+  }
+
+  void _clearSquareViewportCoverage() {
+    if (_squarePathWithVisibleViewport != null) {
+      _squarePathWithVisibleViewport = null;
+      _bumpSquareQueuePipLayout();
+    }
+  }
+
+  /// Вызывается из пузыря квадратика: при пересечении с viewport PiP скрывается (без «дубля»).
+  void reportSquareBubbleViewportCoverage(String path, bool overlapsViewport) {
+    final cur = currentlyPlaying.value;
+    if (cur != path) return;
+    if (!isCurrentQueueSquareAtPath(path)) return;
+    if (overlapsViewport) {
+      if (_squarePathWithVisibleViewport != path) {
+        _squarePathWithVisibleViewport = path;
+        _bumpSquareQueuePipLayout();
+      }
+    } else {
+      if (_squarePathWithVisibleViewport == path) {
+        _squarePathWithVisibleViewport = null;
+        _bumpSquareQueuePipLayout();
+      }
+    }
+  }
+
+  /// Плавающая миниатюра — только если этот же ролик не виден в списке чата.
+  bool shouldDisplaySquareQueuePip() {
+    if (_squareQueueCtrl == null) return false;
+    final cur = currentlyPlaying.value;
+    if (cur == null || cur.isEmpty) return false;
+    if (!isCurrentQueueSquareAtPath(cur)) return false;
+    return _squarePathWithVisibleViewport != cur;
+  }
 
   Future<bool> hasPermission() => _recorder.hasPermission();
 
@@ -181,11 +228,55 @@ class VoiceService {
     return _recorder.onAmplitudeChanged(interval).map((a) => a.current);
   }
 
+  Future<void> _disposeSquareQueueController() async {
+    _squareEndDispatchedInService = false;
+    _clearSquareViewportCoverage();
+    final c = _squareQueueCtrl;
+    _squareQueueCtrl = null;
+    squareQueueVideoPreview.value = null;
+    if (c == null) return;
+    try {
+      c.removeListener(_onSquareQueueVideoTick);
+    } catch (_) {}
+    try {
+      await c.pause();
+    } catch (_) {}
+    try {
+      await c.dispose();
+    } catch (_) {}
+  }
+
+  void _onSquareQueueVideoTick() {
+    final c = _squareQueueCtrl;
+    if (c == null || !c.value.isInitialized) return;
+    final v = c.value;
+    final totalMs = v.duration.inMilliseconds;
+    if (totalMs <= 0) return;
+    reportSquarePlaybackProgress(v.position.inMilliseconds / totalMs);
+    if (_squareEndDispatchedInService) return;
+    if (v.position.inMilliseconds >= totalMs - 80) {
+      _squareEndDispatchedInService = true;
+      final path = _queue.isNotEmpty &&
+              _queuePos >= 0 &&
+              _queuePos < _queue.length
+          ? _queue[_queuePos].path
+          : null;
+      if (path != null) {
+        unawaited(onSquareVideoPlaybackEnded(path));
+      }
+    }
+  }
+
   Future<void> _disposePlaybackOutputs() async {
+    await _disposeSquareQueueController();
     _audioPosSub?.cancel();
     _audioPosSub = null;
     _audioCompleteSub?.cancel();
     _audioCompleteSub = null;
+    _audioDurSub?.cancel();
+    _audioDurSub = null;
+    _audioStateSub?.cancel();
+    _audioStateSub = null;
     try {
       await _player?.stop();
     } catch (_) {}
@@ -193,13 +284,35 @@ class VoiceService {
     _player = null;
   }
 
-  /// Прогресс квадратика с полноэкранного плеера (0..1).
+  /// Текущий элемент очереди — квадратик по этому пути (для UI в чате).
+  bool isCurrentQueueSquareAtPath(String path) {
+    if (_queue.isEmpty || _queuePos < 0 || _queuePos >= _queue.length) {
+      return false;
+    }
+    final it = _queue[_queuePos];
+    return it.kind == PlaybackMediaKind.squareVideo && it.path == path;
+  }
+
+  bool get hasSquareQueueVideoController => _squareQueueCtrl != null;
+
+  /// Прогресс квадратика в пузыре чата (0..1) при воспроизведении из очереди.
   void reportSquarePlaybackProgress(double p) {
     if (_queue.isEmpty || _queuePos < 0 || _queuePos >= _queue.length) return;
     if (_queue[_queuePos].kind != PlaybackMediaKind.squareVideo) return;
     final cur = currentlyPlaying.value;
     if (cur == null || cur != _queue[_queuePos].path) return;
     _setProgressClamped(p);
+  }
+
+  /// Вызывается из пузыря [VideoPlayer], когда ролик `_sq.mp4` доиграл до конца в режиме очереди.
+  Future<void> onSquareVideoPlaybackEnded(String path) async {
+    if (_queue.isEmpty) return;
+    if (_queuePos < 0 || _queuePos >= _queue.length) return;
+    final still = _queue[_queuePos];
+    if (still.path != path || still.kind != PlaybackMediaKind.squareVideo) {
+      return;
+    }
+    await _advanceQueue();
   }
 
   void _syncSession() {
@@ -271,7 +384,7 @@ class VoiceService {
     await _ensurePlaybackAudioSession();
     _player = AudioPlayer();
     playDuration.value = Duration.zero;
-    _player!.onDurationChanged.listen((dur) {
+    _audioDurSub = _player!.onDurationChanged.listen((dur) {
       if (dur.inMilliseconds > 0) playDuration.value = dur;
     });
     _audioPosSub = _player!.onPositionChanged.listen((pos) async {
@@ -290,7 +403,8 @@ class VoiceService {
     _audioCompleteSub = _player!.onPlayerComplete.listen((_) {
       unawaited(_advanceQueue());
     });
-    _player!.onPlayerStateChanged.listen((state) {}, onError: (e) {
+    _audioStateSub =
+        _player!.onPlayerStateChanged.listen((state) {}, onError: (e) {
       debugPrint('[Voice] player error: $e');
       unawaited(_advanceQueue());
     });
@@ -300,6 +414,24 @@ class VoiceService {
   /// Перемотка на позицию [progress] ∈ [0.0, 1.0].
   Future<void> seekTo(double progress) async {
     final p = progress.clamp(0.0, 1.0);
+    if (_queue.isNotEmpty &&
+        _queuePos >= 0 &&
+        _queuePos < _queue.length &&
+        _queue[_queuePos].kind == PlaybackMediaKind.squareVideo) {
+      final c = _squareQueueCtrl;
+      if (c == null || !c.value.isInitialized) return;
+      final totalMs = c.value.duration.inMilliseconds;
+      if (totalMs <= 0) return;
+      final target =
+          Duration(milliseconds: (p * totalMs).round());
+      try {
+        await c.seekTo(target);
+        _setProgressClamped(p);
+      } catch (e) {
+        debugPrint('[Voice] square seek error: $e');
+      }
+      return;
+    }
     final dur = playDuration.value;
     if (dur.inMilliseconds <= 0) return;
     final target = Duration(
@@ -314,33 +446,52 @@ class VoiceService {
 
   Future<void> _startVideoItem(PlaybackQueueItem item) async {
     await _ensurePlaybackAudioSession();
-    final nav = _navigatorKey?.currentState;
-    if (nav == null) {
-      debugPrint('[Voice] square video: navigator not configured');
-      await _advanceQueue();
+    if (kIsWeb) {
+      // На web локальный файл в VideoPlayer не поднимаем — пузырь в чате.
       return;
     }
+    _squareEndDispatchedInService = false;
+    VideoPlayerController? c;
     try {
-      await nav.push<void>(
-        MaterialPageRoute<void>(
-          fullscreenDialog: true,
-          builder: (_) => DmVideoFullscreenPage(
-                path: item.path,
-                closeWhenPlaybackSessionCleared: true,
-              ),
-        ),
-      );
+      final f = File(item.path);
+      if (!f.existsSync()) {
+        await _advanceQueue();
+        return;
+      }
+      await _disposeSquareQueueController();
+      c = VideoPlayerController.file(f);
+      await c.initialize();
+      if (_queue.isEmpty ||
+          _queuePos < 0 ||
+          _queuePos >= _queue.length ||
+          _queue[_queuePos].path != item.path) {
+        await c.dispose();
+        return;
+      }
+      c.setLooping(false);
+      _squareQueueCtrl = c;
+      squareQueueVideoPreview.value = c;
+      c = null;
+      final active = _squareQueueCtrl!;
+      final d = active.value.duration;
+      if (d.inMilliseconds > 0) {
+        playDuration.value = d;
+      }
+      active.addListener(_onSquareQueueVideoTick);
+      await active.seekTo(Duration.zero);
+      if (!_sessionPaused) {
+        await active.play();
+      }
     } catch (e, st) {
-      debugPrint('[Voice] square video route: $e\n$st');
+      debugPrint('[Voice] square queue start: $e\n$st');
+      if (c != null && !identical(c, _squareQueueCtrl)) {
+        try {
+          await c.dispose();
+        } catch (_) {}
+      }
+      await _disposeSquareQueueController();
+      await _advanceQueue();
     }
-    if (_queue.isEmpty) return;
-    if (_queuePos < 0 || _queuePos >= _queue.length) return;
-    final still = _queue[_queuePos];
-    if (still.path != item.path ||
-        still.kind != PlaybackMediaKind.squareVideo) {
-      return;
-    }
-    await _advanceQueue();
   }
 
   Future<void> _advanceQueue() async {
@@ -363,6 +514,9 @@ class VoiceService {
     _sessionPaused = true;
     final item = _queue[_queuePos];
     if (item.kind == PlaybackMediaKind.squareVideo) {
+      try {
+        await _squareQueueCtrl?.pause();
+      } catch (_) {}
       squareVideoUiPausePulse.value++;
     } else {
       try {
@@ -377,6 +531,9 @@ class VoiceService {
     _sessionPaused = false;
     final item = _queue[_queuePos];
     if (item.kind == PlaybackMediaKind.squareVideo) {
+      try {
+        await _squareQueueCtrl?.play();
+      } catch (_) {}
       squareVideoUiResumePulse.value++;
     } else {
       try {
@@ -401,6 +558,7 @@ class VoiceService {
   }
 
   void dispose() {
+    unawaited(_disposeSquareQueueController());
     _audioPosSub?.cancel();
     _audioPosSub = null;
     _audioCompleteSub?.cancel();

@@ -224,6 +224,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         username: rawUsername,
         avatarColor: _selectedColor,
         avatarEmoji: _selectedEmoji,
+        setAvatarImagePath: true,
         avatarImagePath: _selectedImagePath,
         tags: _tags,
         bannerImagePath: _bannerImagePath,

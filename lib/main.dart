@@ -18,6 +18,7 @@ import 'models/chat_message.dart';
 import 'utils/reaction_limit.dart';
 import 'utils/invite_dm_codec.dart';
 import 'utils/custom_emoji_text.dart';
+import 'utils/reaction_emoji_key.dart';
 import 'models/contact.dart';
 import 'models/group.dart';
 import 'models/user_profile.dart';
@@ -55,7 +56,7 @@ import 'services/account_sync_service.dart';
 import 'services/scheduled_dm_service.dart';
 import 'services/outbox_service.dart';
 import 'services/typing_service.dart';
-import 'services/voice_service.dart';
+import 'services/audio_queue_mini_player_layout.dart';
 import 'services/update_service.dart';
 import 'services/connection_transport.dart';
 import 'services/app_icon_service.dart';
@@ -70,7 +71,9 @@ import 'services/web_notification_bridge.dart';
 import 'app_route_observer.dart';
 import 'ui/screens/chat_list_screen.dart';
 import 'ui/screens/call_screen.dart';
+import 'ui/widgets/avatar_widget.dart';
 import 'ui/widgets/audio_queue_mini_player.dart';
+import 'ui/widgets/square_video_queue_pip.dart';
 import 'ui/screens/onboarding_screen.dart';
 
 final incomingMessageController = StreamController<IncomingMessage>.broadcast();
@@ -159,11 +162,15 @@ Future<void> _showIncomingCallOverlay(
 ) async {
   try {
     final peerName = await _peerDisplayName(session.peerId);
+    final contact = await ChatStorageService.instance.getContact(session.peerId);
     await nav.push(PageRouteBuilder(
       opaque: false,
       pageBuilder: (_, __, ___) => _IncomingCallOverlayScreen(
         session: session,
         peerName: peerName,
+        peerAvatarColor: contact?.avatarColor ?? 0xFF5C6BC0,
+        peerAvatarEmoji: contact?.avatarEmoji ?? '',
+        peerAvatarImagePath: contact?.avatarImagePath,
       ),
       transitionsBuilder: (_, anim, __, child) {
         return SlideTransition(
@@ -500,20 +507,24 @@ class IncomingMessage {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  VoiceService.instance.configureNavigator(navigatorKey);
-  if (RuntimePlatform.isDesktopWindows) {
+  // window_manager должен быть инициализирован до любого вызова setPreventClose/show/etc,
+  // иначе на macOS WindowManager.mainWindow getter падает с assertionFailure.
+  if (!kIsWeb &&
+      (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
     await windowManager.ensureInitialized();
-    const windowOptions = WindowOptions(
-      size: Size(1280, 720),
-      center: true,
-      backgroundColor: Colors.transparent,
-      skipTaskbar: false,
-      titleBarStyle: TitleBarStyle.normal,
-    );
-    windowManager.waitUntilReadyToShow(windowOptions, () async {
-      await windowManager.show();
-      await windowManager.focus();
-    });
+    if (RuntimePlatform.isDesktopWindows) {
+      const windowOptions = WindowOptions(
+        size: Size(1280, 720),
+        center: true,
+        backgroundColor: Colors.transparent,
+        skipTaskbar: false,
+        titleBarStyle: TitleBarStyle.normal,
+      );
+      windowManager.waitUntilReadyToShow(windowOptions, () async {
+        await windowManager.show();
+        await windowManager.focus();
+      });
+    }
   }
   // В release-сборке полностью глушим debugPrint — на iOS он в противном случае
   // бьёт по производительности (лог в stderr через native bridge).
@@ -932,8 +943,9 @@ Future<void> initServices() async {
         await ChatStorageService.instance.deleteMessage(messageId);
       },
       onReact: (fromId, messageId, emoji) async {
+        final em = canonicalReactionEmojiKey(emoji);
         await ChatStorageService.instance
-            .toggleReaction(messageId, emoji, fromId);
+            .toggleReaction(messageId, em, fromId);
       },
       onImgMetaReceived: (String fromId,
           String msgId,
@@ -1837,6 +1849,11 @@ Future<void> initServices() async {
       final authorId = payload['authorId'] as String?;
       if (channelId == null || postId == null || authorId == null) return;
 
+      await EmojiPackDmService.installFromGossipEapField(
+        payload,
+        sourcePeerId: authorId,
+      );
+
       final tsOriginal = payload['ts'] as int?;
       final reactionsJson = payload['rx'] as String?;
       final pj = payload['pj'] as String?;
@@ -1990,6 +2007,10 @@ Future<void> initServices() async {
           await ChannelService.instance.getPostsNewerThan(channelId, sinceTs);
       for (final post in posts) {
         final rx = post.reactions.isEmpty ? null : jsonEncode(post.reactions);
+        final eap = await EmojiPackDmService.buildEmojiAutoPayloadJson(
+          post.text,
+          kind: 'channel_post',
+        );
         await GossipRouter.instance.sendChannelPost(
           channelId: channelId,
           postId: post.id,
@@ -2005,16 +2026,22 @@ Future<void> initServices() async {
           fileName: post.fileName,
           pollJson: post.pollJson,
           staffLabel: post.staffLabel,
+          emojiAutoPayloadJson: eap,
         );
         await ChannelService.instance.forwardChannelPostMediaIfPresent(post);
         // А также его комментарии.
         for (final c in post.comments) {
           final crx = c.reactions.isEmpty ? null : jsonEncode(c.reactions);
+          final ct = c.text.trim().isEmpty ? ' ' : c.text;
+          final ceap = await EmojiPackDmService.buildEmojiAutoPayloadJson(
+            ct,
+            kind: 'channel_comment',
+          );
           await GossipRouter.instance.sendChannelComment(
             postId: post.id,
             commentId: c.id,
             authorId: c.authorId,
-            text: c.text.trim().isEmpty ? ' ' : c.text,
+            text: ct,
             timestamp: c.timestamp,
             reactionsJson: crx,
             hasImage: c.imagePath != null,
@@ -2022,6 +2049,7 @@ Future<void> initServices() async {
             hasVoice: c.voicePath != null,
             hasFile: c.filePath != null,
             fileName: c.fileName,
+            emojiAutoPayloadJson: ceap,
           );
           await ChannelService.instance
               .forwardChannelCommentMediaIfPresent(c, c.authorId);
@@ -2038,6 +2066,12 @@ Future<void> initServices() async {
       final authorId = payload['authorId'] as String?;
       final text = payload['text'] as String? ?? '';
       if (postId == null || commentId == null || authorId == null) return;
+
+      await EmojiPackDmService.installFromGossipEapField(
+        payload,
+        sourcePeerId: authorId,
+      );
+
       final hasMedia = payload['img'] == true ||
           payload['vid'] == true ||
           payload['voice'] == true ||
@@ -2099,51 +2133,55 @@ Future<void> initServices() async {
       if (kind == null || targetId == null || emoji == null || from == null) {
         return;
       }
+      final em = canonicalReactionEmojiKey(emoji);
       final myKey = CryptoService.instance.publicKeyHex;
       if (from == myKey) return;
       final reactorName = await _peerDisplayName(from);
       switch (kind) {
         case 'story':
-          StoryService.instance.applyIncomingReaction(targetId, emoji, from);
+          StoryService.instance.applyIncomingReaction(targetId, em, from);
           break;
         case 'channel_post':
           await ChannelService.instance
-              .togglePostReaction(targetId, emoji, from);
+              .togglePostReaction(targetId, em, from);
           final post = await ChannelService.instance.getPost(targetId);
           final reacted =
-              (post?.reactions[emoji] ?? const <String>[]).contains(from);
+              (post?.reactions[em] ?? const <String>[]).contains(from);
           if (reacted && post != null && post.authorId == myKey) {
+            final emojiPlain = humanizeCustomEmojiCodes(em);
             await NotificationService.instance.showChannelPost(
               channelId: post.channelId,
               title: 'Реакция на ваш пост',
-              body: '$reactorName: $emoji',
+              body: '$reactorName: $emojiPlain',
             );
           }
           break;
         case 'channel_comment':
           await ChannelService.instance
-              .toggleCommentReaction(targetId, emoji, from);
+              .toggleCommentReaction(targetId, em, from);
           final comment = await ChannelService.instance.getComment(targetId);
           final reacted =
-              (comment?.reactions[emoji] ?? const <String>[]).contains(from);
+              (comment?.reactions[em] ?? const <String>[]).contains(from);
           if (reacted && comment != null && comment.authorId == myKey) {
+            final emojiPlain = humanizeCustomEmojiCodes(em);
             await NotificationService.instance.showPersonalMessage(
               peerId: from,
               title: reactorName,
-              body: 'Реакция на ваш комментарий: $emoji',
+              body: 'Реакция на ваш комментарий: $emojiPlain',
             );
           }
           break;
         case 'group_message':
           final updated = await GroupService.instance
-              .toggleMessageReaction(targetId, emoji, from);
+              .toggleMessageReaction(targetId, em, from);
           final reacted =
-              (updated?.reactions[emoji] ?? const <String>[]).contains(from);
+              (updated?.reactions[em] ?? const <String>[]).contains(from);
           if (reacted && updated != null && updated.senderId == myKey) {
+            final emojiPlain = humanizeCustomEmojiCodes(em);
             await NotificationService.instance.showPersonalMessage(
               peerId: from,
               title: reactorName,
-              body: 'Реакция на ваше сообщение: $emoji',
+              body: 'Реакция на ваше сообщение: $emojiPlain',
             );
           }
           break;
@@ -3695,10 +3733,16 @@ Future<void> _checkUpdate() async {
 class _IncomingCallOverlayScreen extends StatefulWidget {
   final CallSessionInfo session;
   final String peerName;
+  final int peerAvatarColor;
+  final String peerAvatarEmoji;
+  final String? peerAvatarImagePath;
 
   const _IncomingCallOverlayScreen({
     required this.session,
     required this.peerName,
+    this.peerAvatarColor = 0xFF5C6BC0,
+    this.peerAvatarEmoji = '',
+    this.peerAvatarImagePath,
   });
 
   @override
@@ -3718,6 +3762,9 @@ class _IncomingCallOverlayScreenState extends State<_IncomingCallOverlayScreen> 
         builder: (_) => CallScreen(
           session: widget.session,
           peerName: widget.peerName,
+          peerAvatarColor: widget.peerAvatarColor,
+          peerAvatarEmoji: widget.peerAvatarEmoji,
+          peerAvatarImagePath: widget.peerAvatarImagePath,
         ),
       ),
     );
@@ -3755,10 +3802,33 @@ class _IncomingCallOverlayScreenState extends State<_IncomingCallOverlayScreen> 
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(
-                    isVideo ? Icons.videocam_rounded : Icons.call_rounded,
-                    size: 44,
-                    color: Theme.of(context).colorScheme.primary,
+                  Stack(
+                    clipBehavior: Clip.none,
+                    alignment: Alignment.bottomRight,
+                    children: [
+                      AvatarWidget(
+                        initials: widget.peerName.trim().isNotEmpty
+                            ? widget.peerName.trim().substring(0, 1).toUpperCase()
+                            : '?',
+                        color: widget.peerAvatarColor,
+                        emoji: widget.peerAvatarEmoji,
+                        imagePath: widget.peerAvatarImagePath,
+                        size: 88,
+                      ),
+                      Positioned(
+                        right: -2,
+                        bottom: -2,
+                        child: CircleAvatar(
+                          radius: 18,
+                          backgroundColor: Theme.of(context).colorScheme.primary,
+                          child: Icon(
+                            isVideo ? Icons.videocam_rounded : Icons.call_rounded,
+                            size: 20,
+                            color: Theme.of(context).colorScheme.onPrimary,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 12),
                   Text(
@@ -3916,14 +3986,22 @@ class _RlinkAppState extends State<RlinkApp> with WidgetsBindingObserver {
             fit: StackFit.expand,
             children: [
               if (child != null) child,
-              const Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: SafeArea(
-                  bottom: false,
-                  child: AudioQueueMiniPlayer(),
-                ),
+              const SquareVideoQueuePip(),
+              ValueListenableBuilder<double?>(
+                valueListenable: AudioQueueMiniPlayerLayout.instance.barTop,
+                builder: (ctx, top, _) {
+                  final y = top ?? AudioQueueMiniPlayerLayout.defaultBarTop(ctx);
+                  return Positioned(
+                    left: 0,
+                    right: 0,
+                    top: y,
+                    child: const SafeArea(
+                      top: false,
+                      bottom: false,
+                      child: AudioQueueMiniPlayer(),
+                    ),
+                  );
+                },
               ),
             ],
           ),

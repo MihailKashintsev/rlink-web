@@ -569,6 +569,14 @@ class RichMessageText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!parseCustomEmoji) return _buildInner(context);
+    return ValueListenableBuilder<int>(
+      valueListenable: EmojiPackService.instance.version,
+      builder: (_, __, ___) => _buildInner(context),
+    );
+  }
+
+  Widget _buildInner(BuildContext context) {
     final segments = _splitCodeFenceSegments(text);
     final urls = <String>{};
     for (final seg in segments) {

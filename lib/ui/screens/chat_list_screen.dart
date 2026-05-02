@@ -24,6 +24,7 @@ import '../../l10n/app_l10n.dart';
 import '../../services/gossip_router.dart';
 import '../../services/relay_service.dart';
 import '../../services/story_service.dart';
+import '../../services/audio_queue_mini_player_layout.dart';
 import '../../services/platform_capabilities.dart';
 import '../../services/wifi_direct_service.dart';
 import '../widgets/avatar_widget.dart';
@@ -42,6 +43,7 @@ import 'ether_screen.dart';
 import 'groups_screen.dart';
 import 'location_map_screen.dart';
 import 'profile_screen.dart';
+import 'call_history_screen.dart';
 import 'chat_inbox_filters_manage_screen.dart';
 import 'settings_screen.dart';
 import 'story_creator_screen.dart';
@@ -59,6 +61,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     with UpdateAvailableBannerMixin {
   /// 0=Чаты, 1=Рядом, 2=Эфир, 3=Я
   int _currentTab = 0;
+  bool _homeMiniPlayerLayoutCallbackPending = false;
   bool _searchActive = false;
   final _searchController = TextEditingController();
   final ValueNotifier<bool> _nearbyShowRadar = ValueNotifier(true);
@@ -75,6 +78,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     unregisterUpdateBannerListener();
     _searchController.dispose();
     _nearbyShowRadar.dispose();
+    AudioQueueMiniPlayerLayout.instance.clearBarTop();
     super.dispose();
   }
 
@@ -372,8 +376,23 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
+  void _syncHomeMiniPlayerBarTop(BuildContext context) {
+    if (_homeMiniPlayerLayoutCallbackPending) return;
+    _homeMiniPlayerLayoutCallbackPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _homeMiniPlayerLayoutCallbackPending = false;
+      if (!mounted) return;
+      if (_currentTab != 0) {
+        AudioQueueMiniPlayerLayout.instance.clearBarTop();
+      } else if (_searchActive) {
+        AudioQueueMiniPlayerLayout.instance.setBarTopBelowAppBar(context);
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    _syncHomeMiniPlayerBarTop(context);
     final settings = AppSettings.instance;
     final channelsEnabled = settings.channelsEnabled;
     final childLinked = settings.isLinkedChildDevice;
@@ -423,7 +442,9 @@ class _ChatListScreenState extends State<ChatListScreen>
                           ? AppL10n.t('nav_nearby')
                           : _currentTab == 2
                               ? AppL10n.t('nav_ether')
-                              : AppL10n.t('nav_me'),
+                              : _currentTab == 3
+                                  ? AppL10n.t('nav_call_history')
+                                  : AppL10n.t('nav_me'),
                   key: ValueKey<int>(_currentTab),
                   style: const TextStyle(
                       fontWeight: FontWeight.w700, fontSize: 22),
@@ -562,9 +583,14 @@ class _ChatListScreenState extends State<ChatListScreen>
         index: _currentTab,
         children: [
           _UnifiedChatsTab(
-              searchQuery: _searchActive ? _searchController.text : ''),
+            searchQuery: _searchActive ? _searchController.text : '',
+            layoutActive: _currentTab == 0 &&
+                !_searchActive &&
+                (ModalRoute.of(context)?.isCurrent ?? true),
+          ),
           _NearbyTab(showRadar: _nearbyShowRadar),
           const EtherScreen(),
+          const CallHistoryScreen(),
           const _MeTab(),
         ],
       ),
@@ -640,7 +666,7 @@ class _MeTabNavIcon extends StatelessWidget {
   }
 }
 
-// ── Animated bottom nav bar (4 tabs) ──────────────────────────────
+// ── Animated bottom nav bar (5 tabs) ─────────────────────────────
 
 class _AnimatedNavBar extends StatelessWidget {
   final int selectedIndex;
@@ -695,6 +721,11 @@ class _AnimatedNavBar extends StatelessWidget {
           ),
           selectedIcon: const Icon(Icons.cell_tower),
           label: AppL10n.t('nav_ether'),
+        ),
+        NavigationDestination(
+          icon: const Icon(Icons.history),
+          selectedIcon: const Icon(Icons.history),
+          label: AppL10n.t('nav_call_history'),
         ),
         NavigationDestination(
           icon: const _MeTabNavIcon(selected: false),
@@ -871,13 +902,20 @@ String _dmChatListPreviewOrDraft(
 
 class _UnifiedChatsTab extends StatefulWidget {
   final String searchQuery;
-  const _UnifiedChatsTab({this.searchQuery = ''});
+  /// Вкладка «Чаты» видна и поиск не открыт — якорь под фильтрами актуален.
+  final bool layoutActive;
+  const _UnifiedChatsTab({
+    this.searchQuery = '',
+    this.layoutActive = true,
+  });
 
   @override
   State<_UnifiedChatsTab> createState() => _UnifiedChatsTabState();
 }
 
 class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
+  final GlobalKey _miniPlayerListAnchor = GlobalKey(debugLabel: 'miniPlayerListAnchor');
+  bool _miniPlayerAnchorCallbackPending = false;
   List<_ChatItem> _items = [];
   StreamSubscription<IncomingMessage>? _sub;
   Timer? _loadDebounce;
@@ -978,6 +1016,20 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     }
     ChatInboxService.instance.removeListener(_inboxListener);
     super.dispose();
+  }
+
+  void _layoutMiniPlayerAnchor() {
+    if (!widget.layoutActive || widget.searchQuery.isNotEmpty) return;
+    if (_miniPlayerAnchorCallbackPending) return;
+    _miniPlayerAnchorCallbackPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _miniPlayerAnchorCallbackPending = false;
+      if (!mounted || !widget.layoutActive || widget.searchQuery.isNotEmpty) {
+        return;
+      }
+      AudioQueueMiniPlayerLayout.instance
+          .scheduleBarTopFromAnchor(_miniPlayerListAnchor);
+    });
   }
 
   Future<void> _load() async {
@@ -1120,6 +1172,7 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
           isOnline: false,
           onlineTransports: const [],
           unreadCount: channelUnread[ch.id] ?? 0,
+          channelVerified: ch.verified,
         ));
       }
     }
@@ -1625,20 +1678,24 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
     final visible = _computeVisibleItems();
 
     if (_items.isEmpty && q.isEmpty) {
-      return Column(children: [
+      final col = Column(children: [
         _StoriesStrip(chatItems: _storiesSource()),
         _buildPendingBanners(context),
+        SizedBox(height: 0, key: _miniPlayerListAnchor),
         const Expanded(child: _EmptyChatsState()),
       ]);
+      _layoutMiniPlayerAnchor();
+      return col;
     }
 
     if (q.isEmpty) {
       if (visible.isEmpty) {
-        return Column(
+        final col = Column(
           children: [
             _StoriesStrip(chatItems: _storiesSource()),
             _buildFilterBar(context),
             _buildPendingBanners(context),
+            SizedBox(height: 0, key: _miniPlayerListAnchor),
             Expanded(
               child: Center(
                 child: Text(
@@ -1649,11 +1706,14 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
             ),
           ],
         );
+        _layoutMiniPlayerAnchor();
+        return col;
       }
-      return Column(children: [
+      final col = Column(children: [
         _StoriesStrip(chatItems: _storiesSource()),
         _buildFilterBar(context),
         _buildPendingBanners(context),
+        SizedBox(height: 0, key: _miniPlayerListAnchor),
         Expanded(
             child: ListView.separated(
           itemCount: visible.length,
@@ -1683,6 +1743,8 @@ class _UnifiedChatsTabState extends State<_UnifiedChatsTab> {
           },
         )),
       ]);
+      _layoutMiniPlayerAnchor();
+      return col;
     }
 
     final forSearch =
@@ -1730,7 +1792,8 @@ class _TelegramChatRow extends StatelessWidget {
         ? const Color(0xFF8E8E93)
         : const Color(0xFF8E8E93);
     final showVerifiedMark =
-        item.type == _ChatItemType.channel || item.isAiBot;
+        (item.type == _ChatItemType.channel && item.channelVerified) ||
+        item.isAiBot;
 
     return Material(
       color: Colors.transparent,
@@ -2007,6 +2070,7 @@ class _ChatItem {
 
   /// Личка с ботом: Lib, GigaChat или бот из каталога relay.
   final bool isAiBot;
+  final bool channelVerified;
   _ChatItem({
     this.type = _ChatItemType.personal,
     required this.id,
@@ -2024,6 +2088,7 @@ class _ChatItem {
     this.isSavedMessages = false,
     this.savedHasMessages = true,
     this.isAiBot = false,
+    this.channelVerified = false,
   });
   // Backward compat
   String get peerId => id;

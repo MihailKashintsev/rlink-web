@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import 'crypto_service.dart';
 import 'diagnostics_log_service.dart';
+import '../utils/reaction_emoji_key.dart';
 
 const _kDefaultTtl = 7;
 const _kProfileTtl =
@@ -17,6 +18,10 @@ const _kMaxImgPayloadBytes =
     500; // img_meta ≈ 233–350 б (с именем файла), img_chunk ≈ 274 б; BLE framing снимает ограничение MTU
 const _kMaxEncPayloadBytes =
     780; // 'msg': шифртекст + опционально rt/ffid/ffn (пересылка, ответ)
+/// Верхняя граница закодированного gossip-пакета type=call_sig (UTF-8 JSON).
+/// SDP offer/answer с видео и множеством кодеков легко 4–8+ КБ; relay принимает
+/// base64 до ~256K символов — держим запас, BLE этим путём не ходит.
+const _kMaxCallSigBytes = 65536;
 
 /// JSON numbers on dart2js are often [double]; gossip must still decode.
 int? _jsonIntLoose(dynamic v) {
@@ -958,6 +963,7 @@ class GossipRouter {
     required String fromId,
     String recipientId = '',
   }) async {
+    final em = canonicalReactionEmojiKey(emoji);
     final rid8 = recipientId.length >= 8 ? recipientId.substring(0, 8) : null;
     final packet = GossipPacket(
       id: _uuid.v4(),
@@ -966,7 +972,7 @@ class GossipRouter {
       timestamp: DateTime.now().millisecondsSinceEpoch,
       payload: {
         'messageId': messageId,
-        'emoji': emoji,
+        'emoji': em,
         'from': fromId,
         if (rid8 != null) 'r': rid8,
       },
@@ -986,6 +992,7 @@ class GossipRouter {
     required String emoji,
     required String fromId,
   }) async {
+    final em = canonicalReactionEmojiKey(emoji);
     final packet = GossipPacket(
       id: _uuid.v4(),
       type: 'react_ext',
@@ -994,7 +1001,7 @@ class GossipRouter {
       payload: {
         'kind': kind,
         'targetId': targetId,
-        'emoji': emoji,
+        'emoji': em,
         'from': fromId,
       },
     );
@@ -1365,7 +1372,30 @@ class GossipRouter {
       },
     );
     _markSeen(packet.id);
-    await _forward(packet);
+    await _forwardCallSig(packet);
+  }
+
+  /// SDP offer/answer для звонка может быть до 2-3 КБ (особенно с видео).
+  /// Идёт через relay-WebSocket или direct route, BLE-mesh не используется
+  /// (offer/answer ≫ MTU 512), поэтому не подпадает под `_kMaxPayloadBytes`.
+  Future<void> _forwardCallSig(GossipPacket packet) async {
+    if (onForwardPacket == null) {
+      _gossipTrace(
+          '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=onForwardPacket_null');
+      return;
+    }
+    final bytes = packet.encode();
+    if (bytes.length > _kMaxCallSigBytes) {
+      debugPrint(
+          '[RLINK][Gossip] call_sig packet too large (${bytes.length} bytes > $_kMaxCallSigBytes), dropping');
+      return;
+    }
+    try {
+      await onForwardPacket!(packet);
+    } catch (e) {
+      _gossipTrace(
+          '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=call_sig_forward_failed err=$e');
+    }
   }
 
   Future<void> broadcastProfile({
@@ -1445,9 +1475,12 @@ class GossipRouter {
 
     if (packet.ttl > 1) {
       // Зашифрованные 'msg' пакеты (~380-420 байт) пересылаем с увеличенным лимитом.
-      // Обычные пакеты (сообщения, ack, profile) — стандартный 288-байтный лимит.
+      // 'call_sig' (SDP offer/answer) — лимит relay, см. _forwardCallSig / _kMaxCallSigBytes.
+      // Остальное — BLE-mesh лимит _kMaxPayloadBytes.
       if (packet.type == 'msg') {
         await _forwardEncrypted(packet.decremented());
+      } else if (packet.type == 'call_sig') {
+        await _forwardCallSig(packet.decremented());
       } else {
         await _forward(packet.decremented());
       }
@@ -2162,6 +2195,12 @@ class GossipRouter {
   }
 
   Future<void> _forward(GossipPacket packet) async {
+    // call_sig никогда не должен попадать сюда (BLE MTU), но если попал —
+    // иначе SDP offer/answer молча отбрасывается лимитом ниже.
+    if (packet.type == 'call_sig') {
+      await _forwardCallSig(packet);
+      return;
+    }
     if (onForwardPacket == null) {
       _gossipTrace(
           '[RLINK][Gossip][DROP] type=${packet.type} id=${packet.id.substring(0, packet.id.length.clamp(0, 8))} reason=onForwardPacket_null');
@@ -2413,6 +2452,7 @@ class GossipRouter {
     String? fileName,
     String? pollJson,
     String? staffLabel,
+    String? emojiAutoPayloadJson,
   }) async {
     final packet = GossipPacket(
       id: const Uuid().v4(),
@@ -2435,6 +2475,8 @@ class GossipRouter {
         if (fileName != null && fileName.isNotEmpty) 'fname': fileName,
         if (pollJson != null && pollJson.isNotEmpty) 'pj': pollJson,
         if (staffLabel != null && staffLabel.isNotEmpty) 'sl': staffLabel,
+        if (emojiAutoPayloadJson != null && emojiAutoPayloadJson.isNotEmpty)
+          'eap': emojiAutoPayloadJson,
       },
     );
     await _forward(packet);
@@ -2566,6 +2608,7 @@ class GossipRouter {
     bool hasVoice = false,
     bool hasFile = false,
     String? fileName,
+    String? emojiAutoPayloadJson,
   }) async {
     final packet = GossipPacket(
       id: const Uuid().v4(),
@@ -2585,6 +2628,8 @@ class GossipRouter {
         if (hasVoice) 'voice': true,
         if (hasFile) 'file': true,
         if (fileName != null && fileName.isNotEmpty) 'fname': fileName,
+        if (emojiAutoPayloadJson != null && emojiAutoPayloadJson.isNotEmpty)
+          'eap': emojiAutoPayloadJson,
       },
     );
     await _forward(packet);

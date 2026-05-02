@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../utils/reaction_emoji_key.dart';
 import '../utils/reaction_limit.dart';
 
 class StoryOverlayItem {
@@ -285,19 +286,20 @@ class StoryService {
   /// Переключает реакцию [emoji] от [reactorId] на истории [storyId].
   /// Возвращает обновлённый StoryItem или null если не найдено.
   StoryItem? toggleReaction(String storyId, String emoji, String reactorId) {
+    final em = canonicalReactionEmojiKey(emoji);
     final s = findStory(storyId);
     if (s == null) return null;
-    final list = s.reactions[emoji];
+    final list = s.reactions[em];
     if (list != null && list.contains(reactorId)) {
       list.remove(reactorId);
-      if (list.isEmpty) s.reactions.remove(emoji);
+      if (list.isEmpty) s.reactions.remove(em);
     } else {
       if (s.totalReactions >= kMaxStoryReactionsTotal) return s;
       if (s.reactionsBy(reactorId) >= kMaxStoryDistinctReactionsPerUser) {
         return s;
       }
-      if (!reactionAddAllowed(s.reactions, emoji, reactorId)) return s;
-      s.reactions.putIfAbsent(emoji, () => <String>[]).add(reactorId);
+      if (!reactionAddAllowed(s.reactions, em, reactorId)) return s;
+      s.reactions.putIfAbsent(em, () => <String>[]).add(reactorId);
     }
     version.value++;
     _save();

@@ -1,6 +1,25 @@
+import 'dart:io';
+import 'dart:math' as math;
+
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart' show ValueListenable, kIsWeb;
 import 'package:flutter/material.dart';
+
+/// Размер превью «квадратика»: на широком окне ПК не растягивается на всю ширину.
+double squareVideoPreviewSize(BuildContext context) {
+  final s = MediaQuery.sizeOf(context);
+  final w = s.width;
+  final h = s.height;
+  final short = math.min(w, h);
+  final isDesktop = !kIsWeb &&
+      (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
+  final maxSide = isDesktop ? 180.0 : 360.0;
+  final raw = math.min(
+    w * 0.40,
+    math.min(short * 0.45, math.min(h * 0.35, maxSide)),
+  );
+  return raw.clamp(isDesktop ? 140.0 : 232.0, maxSide).toDouble();
+}
 
 /// Одна «логическая» камера на направление (wide в приоритете), как в рекордере каналов.
 List<CameraDescription> logicalCamerasForSquareVideo(
@@ -165,157 +184,156 @@ class SquareVideoFramedCameraView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const radius = 20.0;
     return Center(
       child: Container(
         width: squareSize + 6,
         height: squareSize + 6,
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(radius + 3),
           border: Border.all(color: _borderColor, width: 3),
         ),
-        child: Stack(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(17),
-              child: SizedBox(
-                width: squareSize,
-                height: squareSize,
-                child: _SquareVideoCameraPreviewInner(controller: controller),
-              ),
-            ),
-            if (isRecording)
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: ValueListenableBuilder<double>(
-                  valueListenable: recordingSeconds,
-                  builder: (_, rec, __) {
-                    return ClipRRect(
-                      borderRadius: const BorderRadius.vertical(
-                        top: Radius.circular(17),
+        clipBehavior: Clip.none,
+        alignment: Alignment.center,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(radius),
+          child: SizedBox(
+            width: squareSize,
+            height: squareSize,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _SquareVideoCameraPreviewInner(controller: controller),
+                if (isRecording)
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: ValueListenableBuilder<double>(
+                      valueListenable: recordingSeconds,
+                      builder: (_, rec, __) {
+                        return LinearProgressIndicator(
+                          value: (rec / maxDuration).clamp(0.0, 1.0),
+                          minHeight: 3,
+                          color: Colors.red,
+                          backgroundColor: Colors.white24,
+                        );
+                      },
+                    ),
+                  ),
+                if (showFlipButton && onFlipCamera != null)
+                  Positioned(
+                    top: 10,
+                    right: 10,
+                    child: GestureDetector(
+                      onTap: isSwitchingCamera ? null : onFlipCamera,
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.white24, width: 1),
+                        ),
+                        child: AnimatedRotation(
+                          turns: isSwitchingCamera ? 0.5 : 0,
+                          duration: const Duration(milliseconds: 300),
+                          child: const Icon(
+                            Icons.flip_camera_ios_rounded,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                        ),
                       ),
-                      child: LinearProgressIndicator(
-                        value: (rec / maxDuration).clamp(0.0, 1.0),
-                        minHeight: 3,
-                        color: Colors.red,
-                        backgroundColor: Colors.white24,
-                      ),
-                    );
-                  },
-                ),
-              ),
-            if (showFlipButton && onFlipCamera != null)
-              Positioned(
-                top: 10,
-                right: 10,
-                child: GestureDetector(
-                  onTap: isSwitchingCamera ? null : onFlipCamera,
-                  child: Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
+                    ),
+                  ),
+                if (isRecording && onToggleRecordingPause != null)
+                  Positioned(
+                    bottom: 10,
+                    right: 10,
+                    child: Material(
                       color: Colors.black54,
                       borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.white24, width: 1),
-                    ),
-                    child: AnimatedRotation(
-                      turns: isSwitchingCamera ? 0.5 : 0,
-                      duration: const Duration(milliseconds: 300),
-                      child: const Icon(
-                        Icons.flip_camera_ios_rounded,
-                        color: Colors.white,
-                        size: 20,
+                      child: InkWell(
+                        onTap: onToggleRecordingPause,
+                        borderRadius: BorderRadius.circular(12),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Icon(
+                            recordingPaused
+                                ? Icons.play_arrow_rounded
+                                : Icons.pause_rounded,
+                            color: Colors.white,
+                            size: 22,
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ),
-            if (isRecording && onToggleRecordingPause != null)
-              Positioned(
-                bottom: 10,
-                right: 10,
-                child: Material(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(12),
-                  child: InkWell(
-                    onTap: onToggleRecordingPause,
-                    borderRadius: BorderRadius.circular(12),
-                    child: Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: Icon(
-                        recordingPaused
-                            ? Icons.play_arrow_rounded
-                            : Icons.pause_rounded,
-                        color: Colors.white,
-                        size: 22,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            if (isRecording)
-              Positioned(
-                bottom: 10,
-                left: 12,
-                child: ValueListenableBuilder<double>(
-                  valueListenable: recordingSeconds,
-                  builder: (_, rec, __) {
-                    final secs = rec.floor();
-                    final tenths = ((rec % 1) * 10).floor();
-                    return Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (pulseController != null)
-                            AnimatedBuilder(
-                              animation: pulseController!,
-                              builder: (_, ___) => Container(
-                                width: 7,
-                                height: 7,
-                                decoration: BoxDecoration(
-                                  color: Colors.red.withValues(
-                                    alpha: 0.5 +
-                                        pulseController!.value * 0.5,
+                if (isRecording)
+                  Positioned(
+                    bottom: 10,
+                    left: 12,
+                    child: ValueListenableBuilder<double>(
+                      valueListenable: recordingSeconds,
+                      builder: (_, rec, __) {
+                        final secs = rec.floor();
+                        final tenths = ((rec % 1) * 10).floor();
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (pulseController != null)
+                                AnimatedBuilder(
+                                  animation: pulseController!,
+                                  builder: (_, ___) => Container(
+                                    width: 7,
+                                    height: 7,
+                                    decoration: BoxDecoration(
+                                      color: Colors.red.withValues(
+                                        alpha: 0.5 +
+                                            pulseController!.value * 0.5,
+                                      ),
+                                      shape: BoxShape.circle,
+                                    ),
                                   ),
-                                  shape: BoxShape.circle,
+                                )
+                              else
+                                Container(
+                                  width: 7,
+                                  height: 7,
+                                  decoration: BoxDecoration(
+                                    color: Colors.red.withValues(alpha: 0.85),
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                              const SizedBox(width: 6),
+                              Text(
+                                '0:${secs.toString().padLeft(2, '0')}.$tenths',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                  fontFeatures: [FontFeature.tabularFigures()],
                                 ),
                               ),
-                            )
-                          else
-                            Container(
-                              width: 7,
-                              height: 7,
-                              decoration: BoxDecoration(
-                                color: Colors.red.withValues(alpha: 0.85),
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          const SizedBox(width: 6),
-                          Text(
-                            '0:${secs.toString().padLeft(2, '0')}.$tenths',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                              fontFeatures: [FontFeature.tabularFigures()],
-                            ),
+                            ],
                           ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
-          ],
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );

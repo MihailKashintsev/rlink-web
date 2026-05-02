@@ -2,8 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import 'call_history_service.dart';
 import 'crypto_service.dart';
 import 'gossip_router.dart';
 import 'chat_storage_service.dart';
@@ -52,6 +55,8 @@ class CallService {
   Map<String, dynamic>? _lastLocalOffer;
   String? _activeCallId;
   String? _activePeerId;
+  /// Для записи в [CallHistoryService] при [_cleanup].
+  bool _historyWasIncoming = false;
   bool _videoEnabled = true;
   bool _acceptedAwaitingOffer = false;
   Timer? _connectTimeout;
@@ -71,14 +76,141 @@ class CallService {
   MediaStream? remoteStream;
   final ValueNotifier<MediaStream?> remoteStreamNotifier = ValueNotifier(null);
 
+  /// Инкремент при каждом [onTrack]: иначе [ValueNotifier] не уведомляет слушателей,
+  /// если объект [MediaStream] тот же — у инициатора не появлялось удалённое видео.
+  final ValueNotifier<int> remoteStreamGeneration = ValueNotifier(0);
+
+  /// Собеседник включил запись звонка — показываем красный индикатор.
+  final ValueNotifier<bool> peerIsRecording = ValueNotifier(false);
+
+  /// Мы сами пишем разговор (локальная кнопка записи).
+  final ValueNotifier<bool> localRecording = ValueNotifier(false);
+
+  /// Длительность с момента соединения (обновляется раз в секунду).
+  final ValueNotifier<Duration> callElapsed = ValueNotifier(Duration.zero);
+
+  /// Длительность записи (обновляется раз в секунду, пока localRecording == true).
+  final ValueNotifier<Duration> recordingElapsed = ValueNotifier(Duration.zero);
+
+  MediaRecorder? _mediaRecorder;
+  String? _recordingPath;
+  Stopwatch? _callDurationSw;
+  Timer? _callDurationTimer;
+  Stopwatch? _recordingSw;
+  Timer? _recordingTimer;
+
   bool get isBusy =>
       phase.value == CallPhase.ringing ||
       phase.value == CallPhase.connecting ||
       phase.value == CallPhase.connected;
 
   void _setPhase(CallPhase next) {
+    final prev = phase.value;
     phase.value = next;
     _phaseSince = DateTime.now();
+    if (next == CallPhase.connected && prev != CallPhase.connected) {
+      _armCallDurationTimer();
+    }
+  }
+
+  void _armCallDurationTimer() {
+    if (_callDurationSw != null) return;
+    _callDurationSw = Stopwatch()..start();
+    callElapsed.value = Duration.zero;
+    _callDurationTimer?.cancel();
+    _callDurationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final sw = _callDurationSw;
+      if (sw != null) {
+        callElapsed.value = sw.elapsed;
+      }
+    });
+  }
+
+  void _stopCallDurationTimer() {
+    _callDurationTimer?.cancel();
+    _callDurationTimer = null;
+    _callDurationSw?.stop();
+    _callDurationSw = null;
+    callElapsed.value = Duration.zero;
+  }
+
+  /// Запись разговора (локально в Documents). Собеседнику уходит сигнал [recording].
+  Future<void> setCallRecording(bool on) async {
+    if (kIsWeb) {
+      debugPrint('[RLINK][Call] Recording: не поддерживается в web-сборке.');
+      return;
+    }
+    final peerId = _activePeerId;
+    final callId = _activeCallId;
+    if (peerId == null || callId == null) return;
+    if (on) {
+      if (_mediaRecorder != null) return;
+      if (phase.value != CallPhase.connected) return;
+      try {
+        final dir = await getApplicationDocumentsDirectory();
+        final ext = (_videoEnabled && remoteStream?.getVideoTracks().isNotEmpty == true)
+            ? 'mp4'
+            : 'm4a';
+        _recordingPath = p.join(
+          dir.path,
+          'call_${callId.substring(0, 8)}_${DateTime.now().millisecondsSinceEpoch}.$ext',
+        );
+        final rec = MediaRecorder();
+        final remote = remoteStream;
+        final vTracks = remote?.getVideoTracks() ?? const <MediaStreamTrack>[];
+        final aTracks = remote?.getAudioTracks() ?? const <MediaStreamTrack>[];
+        if (vTracks.isNotEmpty) {
+          await rec.start(
+            _recordingPath!,
+            videoTrack: vTracks.first,
+            audioChannel: RecorderAudioChannel.OUTPUT,
+          );
+        } else if (aTracks.isNotEmpty) {
+          await rec.start(
+            _recordingPath!,
+            audioChannel: RecorderAudioChannel.OUTPUT,
+          );
+        } else {
+          await rec.start(
+            _recordingPath!,
+            audioChannel: RecorderAudioChannel.INPUT,
+          );
+        }
+        _mediaRecorder = rec;
+        localRecording.value = true;
+        _recordingSw = Stopwatch()..start();
+        recordingElapsed.value = Duration.zero;
+        _recordingTimer?.cancel();
+        _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+          if (_recordingSw != null) recordingElapsed.value = _recordingSw!.elapsed;
+        });
+        await _sendSignal(peerId, callId, 'recording', {'on': true});
+        debugPrint('[RLINK][Call] Recording started → $_recordingPath');
+      } catch (e) {
+        debugPrint('[RLINK][Call] Recording start failed: $e');
+        _mediaRecorder = null;
+        _recordingPath = null;
+      }
+    } else {
+      if (_mediaRecorder == null) return;
+      try {
+        await _sendSignal(peerId, callId, 'recording', {'on': false});
+      } catch (_) {}
+      try {
+        final out = await _mediaRecorder!.stop();
+        debugPrint('[RLINK][Call] Recording stopped out=$out path=$_recordingPath');
+      } catch (e) {
+        debugPrint('[RLINK][Call] Recording stop failed: $e');
+      }
+      _mediaRecorder = null;
+      _recordingPath = null;
+      _recordingTimer?.cancel();
+      _recordingTimer = null;
+      _recordingSw?.stop();
+      _recordingSw = null;
+      recordingElapsed.value = Duration.zero;
+      localRecording.value = false;
+    }
   }
 
   Map<String, dynamic> _iceConfig() {
@@ -160,6 +292,7 @@ class CallService {
     if (!RelayService.instance.isConnected) {
       throw StateError('peer_offline');
     }
+    _historyWasIncoming = false;
     final callId = _uuid.v4();
     _activeCallId = callId;
     _activePeerId = recipientKey;
@@ -199,6 +332,7 @@ class CallService {
     _activeCallId = session.callId;
     _activePeerId = session.peerId;
     _videoEnabled = session.videoEnabled;
+    _historyWasIncoming = true;
     await SoundEffectsService.instance.stopIncomingRingtone();
     _setPhase(CallPhase.connecting);
 
@@ -242,6 +376,12 @@ class CallService {
   Future<void> rejectIncoming(CallSessionInfo session) async {
     await _sendSignal(session.peerId, session.callId, 'reject');
     incomingCall.value = null;
+    unawaited(
+      CallHistoryService.instance.recordRejectedIncoming(
+        peerId: session.peerId,
+        video: session.videoEnabled,
+      ),
+    );
   }
 
   Future<void> endCall() async {
@@ -335,6 +475,7 @@ class CallService {
       unawaited(rs.addTrack(event.track));
       remoteStream = rs;
       remoteStreamNotifier.value = rs;
+      remoteStreamGeneration.value++;
       _connectTimeout?.cancel();
       if (phase.value != CallPhase.connected) {
         _setPhase(CallPhase.connected);
@@ -526,6 +667,12 @@ class CallService {
           }
         }
         break;
+      case 'recording':
+        if (_activeCallId != callId || _activePeerId != fromId) {
+          break;
+        }
+        peerIsRecording.value = payload['on'] == true;
+        break;
       case 'ice':
         final candidate = payload['candidate'] as String?;
         final sdpMid = payload['sdpMid'] as String?;
@@ -595,6 +742,26 @@ class CallService {
 
   Future<void> _cleanup(CallPhase endPhase) async {
     await SoundEffectsService.instance.stopIncomingRingtone();
+    final peerForHistory = _activePeerId;
+    final durationSnapshot =
+        _callDurationSw != null ? _callDurationSw!.elapsed : Duration.zero;
+    final incomingSnapshot = _historyWasIncoming;
+    final videoSnapshot = _videoEnabled;
+    _stopCallDurationTimer();
+    peerIsRecording.value = false;
+    if (localRecording.value && _activePeerId != null && _activeCallId != null) {
+      try {
+        await _sendSignal(_activePeerId!, _activeCallId!, 'recording', {'on': false});
+      } catch (_) {}
+    }
+    localRecording.value = false;
+    if (_mediaRecorder != null) {
+      try {
+        await _mediaRecorder!.stop();
+      } catch (_) {}
+      _mediaRecorder = null;
+    }
+    _recordingPath = null;
     _connectTimeout?.cancel();
     _connectTimeout = null;
     _iceDiagTimer?.cancel();
@@ -627,6 +794,17 @@ class CallService {
     _remoteSrflxCount = 0;
     _remoteHostCount = 0;
     _setPhase(endPhase);
+    if (peerForHistory != null && endPhase != CallPhase.idle) {
+      unawaited(
+        CallHistoryService.instance.recordCallEnded(
+          peerId: peerForHistory,
+          duration: durationSnapshot,
+          incoming: incomingSnapshot,
+          video: videoSnapshot,
+        ),
+      );
+    }
+    _historyWasIncoming = false;
   }
 
   void _startAcceptResendLoop(String peerId, String callId) {

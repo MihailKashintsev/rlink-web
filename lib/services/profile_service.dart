@@ -171,6 +171,9 @@ class ProfileService {
     String? username,
     int? avatarColor,
     String? avatarEmoji,
+    /// When true, [avatarImagePath] replaces the stored path (including `null` to remove photo).
+    /// When false, the previous path is kept even if [avatarImagePath] is passed.
+    bool setAvatarImagePath = false,
     String? avatarImagePath,
     List<String>? tags,
     String? bannerImagePath,
@@ -183,13 +186,16 @@ class ProfileService {
     final nextStatus = statusEmoji != null
         ? UserProfile.normalizeStatusEmoji(statusEmoji)
         : _profile!.statusEmoji;
+    final nextAvatarPath = setAvatarImagePath
+        ? avatarImagePath
+        : _profile!.avatarImagePath;
     final updated = UserProfile(
       publicKeyHex: currentKey.isNotEmpty ? currentKey : _profile!.publicKeyHex,
       nickname: nickname ?? _profile!.nickname,
       username: username ?? _profile!.username,
       avatarColor: avatarColor ?? _profile!.avatarColor,
       avatarEmoji: avatarEmoji ?? _profile!.avatarEmoji,
-      avatarImagePath: avatarImagePath ?? _profile!.avatarImagePath,
+      avatarImagePath: nextAvatarPath,
       tags: tags ?? _profile!.tags,
       bannerImagePath: bannerImagePath ?? _profile!.bannerImagePath,
       profileMusicPath: profileMusicPath ?? _profile!.profileMusicPath,

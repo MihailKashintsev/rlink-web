@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../models/chat_message.dart';
+import '../utils/reaction_emoji_key.dart';
 import '../utils/reaction_limit.dart';
 import '../utils/message_preview_formatter.dart';
 import '../models/contact.dart';
@@ -1184,6 +1185,7 @@ class ChatStorageService {
 
   Future<void> toggleReaction(
       String messageId, String emoji, String fromId) async {
+    final em = canonicalReactionEmojiKey(emoji);
     final rows = await _db?.query(
       'messages',
       where: 'id = ?',
@@ -1195,13 +1197,13 @@ class ChatStorageService {
 
     final reactions =
         msg.reactions.map((k, v) => MapEntry(k, List<String>.from(v)));
-    final senders = reactions[emoji];
+    final senders = reactions[em];
     if (senders != null && senders.contains(fromId)) {
       senders.remove(fromId);
-      if (senders.isEmpty) reactions.remove(emoji);
+      if (senders.isEmpty) reactions.remove(em);
     } else {
-      if (!reactionAddAllowed(reactions, emoji, fromId)) return;
-      reactions.putIfAbsent(emoji, () => []).add(fromId);
+      if (!reactionAddAllowed(reactions, em, fromId)) return;
+      reactions.putIfAbsent(em, () => []).add(fromId);
     }
 
     await _db?.update(
