@@ -1,17 +1,19 @@
-# mesh_chat
+# rlink-web
 
-A new Flutter project.
+**English | [Русский](#русский)**
 
-## Getting Started
+This repo is a mirror of [Rlink](https://github.com/MihailKashintsev/Rlink) used to build and host the web version via GitHub Pages. It's periodically synced from the main repo, so it may lag behind — for the actual source of truth, current issues, and documentation, go to **[MihailKashintsev/Rlink](https://github.com/MihailKashintsev/Rlink)**.
 
-This project is a starting point for a Flutter application.
+## License
 
-A few resources to get you started if this is your first Flutter project:
+GPL-3.0 — see [LICENSE](LICENSE).
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+---
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Русский
+
+Этот репозиторий — зеркало [Rlink](https://github.com/MihailKashintsev/Rlink), используемое для сборки и хостинга web-версии через GitHub Pages. Периодически синхронизируется с основным репозиторием, поэтому может отставать — за актуальным исходным кодом, issues и документацией — сюда: **[MihailKashintsev/Rlink](https://github.com/MihailKashintsev/Rlink)**.
+
+## Лицензия
+
+GPL-3.0 — см. [LICENSE](LICENSE).
